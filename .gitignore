@@ -1,0 +1,76 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+
+# Environment files (contains sensitive data)
+.env
+.env.local
+.env.*.local
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory
+coverage/
+.nyc_output/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Database files (if using local sqlite)
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded files (if any)
+uploads/
+
+# Lock files (optional, uncomment if you want to ignore)
+# pnpm-lock.yaml
+
+# Debug
+.debug/
+
+# Trae/IDE specific
+.trae/
+.reasonix/
