@@ -121,7 +121,7 @@ export const useAgentStore = defineStore('agent', () => {
       svgPages: persistable
         ? svgPages.value.map(page => ({
             pageNumber: page.pageNumber,
-            svg: '',
+            svg: page.svg,
             speakerNotes: page.speakerNotes
           }))
         : svgPages.value
@@ -154,7 +154,11 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     if (state.steps && state.steps.length > 0) {
-      const restoredSteps = state.steps.map(s => ({ ...s }));
+      const restoredSteps = state.steps.map(s => ({
+        ...s,
+        status: s.status === 'running' ? 'idle' : s.status,
+        progress: s.status === 'running' ? 0 : s.progress,
+      }));
       const currentStepIds = new Set(workflowSteps.map(s => s.id));
       const restoredStepIds = new Set(restoredSteps.map(s => s.id));
       if ([...currentStepIds].every(id => restoredStepIds.has(id))) {
@@ -170,16 +174,34 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
+  async function persistActiveProjectState(state: PptProjectState) {
+    if (!activePpt.value) return;
+    const numericId = Number(activePpt.value.id);
+    if (!Number.isInteger(numericId) || numericId <= 0) return;
+
+    const response = await projectApi.update(numericId, {
+      title: activePpt.value.title,
+      topic: activePpt.value.topic,
+      content: activePpt.value.description,
+      state,
+    });
+
+    if (response.success && response.data?.id && response.data.id !== numericId) {
+      const newId = String(response.data.id);
+      activePpt.value.id = newId;
+      activePptId.value = newId;
+    }
+  }
+
   function syncToProject() {
     if (!activePpt.value) return;
     const state = snapshotProjectState();
     activePpt.value.state = state;
     activePpt.value.updatedAt = Date.now();
 
-    const projectId = parseInt(activePpt.value.id.replace(/\D/g, '') || '0', 10);
-    if (projectId > 0) {
-      projectApi.update(projectId, { state: snapshotProjectState({ persistable: true }) }).catch(() => {});
-    }
+    persistActiveProjectState(snapshotProjectState({ persistable: true })).catch((error) => {
+      console.warn('同步项目状态失败', error);
+    });
   }
 
   let inputSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -281,6 +303,47 @@ export const useAgentStore = defineStore('agent', () => {
     activePptId.value = project.id;
     restoreProjectState(freshState);
     pushLog(`已添加 PPT：${project.title}`);
+  }
+
+  async function addPptProjectPersisted(data: { title: string; topic: string; description: string; templateId: string }) {
+    const freshState = makeDefaultProjectState();
+    freshState.input.topic = data.topic.trim();
+    freshState.input.content = data.description.trim();
+    freshState.parameters.template = mapTemplateToStyle(data.templateId);
+
+    try {
+      const response = await projectApi.create({
+        title: data.title.trim() || data.topic.trim() || '未命名 PPT',
+        topic: data.topic.trim(),
+        content: data.description.trim(),
+        status: 'draft',
+        state: freshState,
+      });
+
+      if (response.success && response.data?.id) {
+        const now = Date.now();
+        const project: PptProject = {
+          id: String(response.data.id),
+          title: data.title.trim() || data.topic.trim() || '未命名 PPT',
+          topic: data.topic.trim(),
+          description: data.description.trim(),
+          templateId: data.templateId,
+          createdAt: now,
+          updatedAt: now,
+          state: freshState,
+        };
+        pptProjects.value = [project, ...pptProjects.value.filter(p => p.id !== project.id)];
+        activePptId.value = project.id;
+        restoreProjectState(freshState);
+        pushLog(`已添加 PPT：${project.title}`);
+        return project;
+      }
+    } catch (error) {
+      console.warn('创建远端项目失败，使用本地项目', error);
+    }
+
+    addPptProject(data);
+    return activePpt.value;
   }
 
   function updatePptProject(id: string, data: Partial<Pick<PptProject, 'title' | 'topic' | 'description' | 'templateId'>>) {
@@ -514,6 +577,21 @@ export const useAgentStore = defineStore('agent', () => {
       saveHistory();
       slide.speakerNotes = notes;
       syncToProject();
+    }
+  }
+
+  function updateSlideVisualPrompt(slideId: string, prompt: string) {
+    const slide = outline.value.find((item) => item.id === slideId);
+    if (slide) {
+      saveHistory();
+      slide.visualPrompt = prompt;
+      resetDownstreamSteps('outline');
+      syncToProject();
+    }
+
+    const specSlide = designSpec.value?.outline.find((item) => item.id === slideId);
+    if (specSlide) {
+      specSlide.visualPrompt = prompt;
     }
   }
 
@@ -860,14 +938,18 @@ export const useAgentStore = defineStore('agent', () => {
 
             const progress = Math.round((generatedSlides.value.size / slidesRequiringImages.length) * 100);
             setStepStatus('images', 'running', progress);
-            pushLog(`图片完成：${image.title}，${generatedSlides.value.size}/${slidesRequiringImages.length}`);
+            pushLog(image.error
+              ? `图片未生成：${image.title}，继续生成页面。`
+              : `图片完成：${image.title}，${generatedSlides.value.size}/${slidesRequiringImages.length}`);
           },
           onError: (_slideId, message) => {
             currentGeneratingSlide.value = null;
-            pushLog(`图片生成失败：${message}`);
+            pushLog(`图片未生成：${message}`);
           },
           onAllComplete: () => {
-            pushLog(`图片生成完成，共 ${generatedSlides.value.size} 张。`);
+            pushLog(generatedSlides.value.size > 0
+              ? `图片生成完成，共 ${generatedSlides.value.size} 张。`
+              : '没有生成可用图片，页面会使用 SVG 图示。');
             setStepStatus('images', 'done', 100);
             syncToProject();
           }
@@ -1142,7 +1224,7 @@ export const useAgentStore = defineStore('agent', () => {
         return;
       }
       
-      addPptProject({
+      await addPptProjectPersisted({
         title: input.value.topic.trim(),
         topic: input.value.topic.trim(),
         description: input.value.content.trim() || '自动创建的 PPT 项目',
@@ -1393,11 +1475,11 @@ export const useAgentStore = defineStore('agent', () => {
             ...p.state,
             input: { ...p.state.input, files: [] },
             images: (p.state.images || []).map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url })),
-            svgPages: (p.state.svgPages || []).map(page => ({
-              pageNumber: page.pageNumber,
-              svg: '',
-              speakerNotes: page.speakerNotes
-            }))
+        svgPages: (p.state.svgPages || []).map(page => ({
+          pageNumber: page.pageNumber,
+          svg: page.svg,
+          speakerNotes: page.speakerNotes
+        }))
           }
         })),
         activePptId: activePptId.value,
@@ -1433,7 +1515,11 @@ export const useAgentStore = defineStore('agent', () => {
         } : makeDefaultProjectState()
       }));
       activePptId.value = snapshot.activePptId || null;
-      const restoredSteps = snapshot.steps || cloneSteps();
+      const restoredSteps = (snapshot.steps || cloneSteps()).map((s: WorkflowStep) => ({
+        ...s,
+        status: s.status === 'running' ? 'idle' : s.status,
+        progress: s.status === 'running' ? 0 : s.progress,
+      }));
       const currentStepIds = new Set(workflowSteps.map(s => s.id));
       const restoredStepIds = new Set(restoredSteps.map((s: any) => s.id));
       if ([...currentStepIds].every(id => restoredStepIds.has(id))) {
@@ -1449,6 +1535,10 @@ export const useAgentStore = defineStore('agent', () => {
       if (activePpt.value) {
         restoreProjectState(activePpt.value.state);
       }
+
+      isRunning.value = false;
+      streamingText.value = '';
+      currentGeneratingSlide.value = null;
 
       return true;
     } catch {
@@ -1508,6 +1598,7 @@ export const useAgentStore = defineStore('agent', () => {
     generatedSlides,
     isDataLoaded,
     addPptProject,
+    addPptProjectPersisted,
     updatePptProject,
     deletePptProject,
     selectPptProject,
@@ -1536,6 +1627,7 @@ export const useAgentStore = defineStore('agent', () => {
     deleteSlideBullet,
     reorderBullet,
     updateSlideNotes,
+    updateSlideVisualPrompt,
     reorderSkills,
     globalSearch,
     saveHistory,

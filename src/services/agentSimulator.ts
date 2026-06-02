@@ -91,7 +91,7 @@ export async function generateSlideImages(
           },
           onError: (message) => {
             callbacks?.onError?.(slide.id, message);
-            toastStore.error('生成图片失败', message);
+            toastStore.warning('图片未生成', message);
           }
         }
       );
@@ -106,7 +106,7 @@ export async function generateSlideImages(
 
       return image;
     } catch (error) {
-      console.error(`生成图片失败: ${slide.id}`, error);
+      console.warn(`生成图片失败: ${slide.id}`, error);
       completed++;
       const progress = Math.round((completed / total) * 100);
       setStepProgress(progress);
@@ -157,7 +157,7 @@ export async function generateSlideImages(
   } else if (successCount > 0) {
     toastStore.warning('部分图片生成失败', `成功 ${successCount}/${totalCount} 张`);
   } else {
-    toastStore.error('图片生成失败', '请检查图像模型配置');
+    toastStore.warning('图片未生成', '页面会使用 SVG 图示继续生成。');
   }
 
   return images;

@@ -14,6 +14,7 @@ export interface Project {
   content: string | null;
   status: 'draft' | 'generating' | 'completed';
   settings: any;
+  state?: any;
   created_at: Date;
   updated_at: Date;
 }
@@ -26,6 +27,7 @@ export interface CreateProjectData {
   content?: string;
   status?: 'draft' | 'generating' | 'completed';
   settings?: any;
+  state?: any;
 }
 
 // 更新项目数据
@@ -78,8 +80,8 @@ export async function getProjectsByStatus(
 export async function createProject(data: CreateProjectData): Promise<number> {
   const result = await insert(
     `INSERT INTO projects 
-     (user_id, title, topic, content, status, settings) 
-     VALUES (?, ?, ?, ?, ?, ?)`,
+     (user_id, title, topic, content, status, settings, state) 
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       data.user_id,
       data.title,
@@ -87,6 +89,7 @@ export async function createProject(data: CreateProjectData): Promise<number> {
       data.content || null,
       data.status || 'draft',
       data.settings ? JSON.stringify(data.settings) : null,
+      data.state ? JSON.stringify(data.state) : null,
     ]
   );
   return result.insertId;

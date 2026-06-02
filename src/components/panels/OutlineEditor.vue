@@ -9,6 +9,7 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import type { SlideOutline } from '@/types/agent';
 import { generateSuggestion, getSuggestionLabel, parseSuggestionResult, type SuggestionType } from '@/composables/useCopilot';
 import { useToastStore } from '@/stores/toastStore';
+import { slideNeedsImage } from '@/utils/slideVisuals';
 
 const toastStore = useToastStore();
 
@@ -25,6 +26,7 @@ const emit = defineEmits<{
   deleteBullet: [id: string, index: number];
   reorderBullet: [id: string, fromIndex: number, toIndex: number];
   updateNotes: [id: string, notes: string];
+  updateVisualPrompt: [id: string, prompt: string];
   reorder: [fromIndex: number, toIndex: number];
   run: [];
   batchDelete: [ids: string[]];
@@ -221,18 +223,18 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 </script>
 
 <template>
-  <UiCard title="大纲与文本分析" subtitle="拖拽排序，点击编辑。Enter 添加要点，Backspace 删除空白项">
+  <UiCard title="大纲" subtitle="调整页面顺序、要点、讲稿和图片需求。修改后会影响后续页面生成。">
     <template #actions>
       <UiButton size="sm" variant="secondary" :disabled="isRunning" @click="$emit('run')">
         <RefreshCw :size="13" :class="{ 'animate-spin': isRunning }" />
-        {{ isRunning ? '生成中...' : '重跑分析' }}
+        {{ isRunning ? '生成中...' : outline.length ? '重新生成大纲' : '生成大纲' }}
       </UiButton>
     </template>
 
     <div v-if="isRunning && streamingText" class="streaming-container">
       <div class="streaming-header">
         <Loader2 :size="16" class="animate-spin" />
-        <span>AI 正在生成大纲...</span>
+        <span>正在整理大纲...</span>
       </div>
       <div class="streaming-content">
         <pre class="streaming-text">{{ streamingText }}</pre>
@@ -351,6 +353,20 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
             </Transition>
           </div>
 
+          <div class="outline-slide__visual-section">
+            <div class="visual-row">
+              <UiBadge :tone="slideNeedsImage(slide) ? 'success' : 'neutral'" size="sm">
+                {{ slideNeedsImage(slide) ? '需要图片' : '无需图片' }}
+              </UiBadge>
+              <input
+                class="visual-input"
+                :value="slide.visualPrompt"
+                placeholder="图片需求，例如：产品场景图、流程示意图、封面插图"
+                @input="$emit('updateVisualPrompt', slide.id, ($event.target as HTMLInputElement).value)"
+              />
+            </div>
+          </div>
+
           <div v-if="slide.chartHint" class="outline-slide__chart">
             <UiBadge tone="warning" size="sm">图表建议</UiBadge>
             <span>{{ slide.chartHint }}</span>
@@ -368,7 +384,7 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
                 @click="runCopilot(slide.id, cType)"
               >
                 <Loader2 v-if="isCopilotLoading(slide.id, cType)" :size="10" class="animate-spin" />
-                <span v-else>💡</span>
+                <FileText v-else :size="10" />
                 {{ getSuggestionLabel(cType) }}
               </button>
             </div>
@@ -721,6 +737,35 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.outline-slide__visual-section {
+  margin-top: 8px;
+}
+
+.visual-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.visual-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.visual-input::placeholder {
+  color: var(--color-subtle);
 }
 
 .notes-toggle {

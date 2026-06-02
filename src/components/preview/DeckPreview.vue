@@ -15,6 +15,7 @@ const props = defineProps<{
   selectedImages: GeneratedImage[];
   parameters: AgentParameters;
   artifacts: ExportArtifact[];
+  showExportActions?: boolean;
 }>();
 
 defineEmits<{
@@ -164,14 +165,16 @@ function getLayoutLabel(layout?: string): string {
           <Maximize2 :size="13" />
           全屏演示
         </UiButton>
-        <UiButton variant="primary" size="sm" @click="$emit('export', 'pptx')">
-          <Download :size="13" />
-          导出 PPTX
-        </UiButton>
-        <UiButton size="sm" @click="$emit('export', 'pdf')">
-          <Download :size="13" />
-          导出 PDF
-        </UiButton>
+        <template v-if="showExportActions !== false">
+          <UiButton variant="primary" size="sm" @click="$emit('export', 'pptx')">
+            <Download :size="13" />
+            导出 PPTX
+          </UiButton>
+          <UiButton size="sm" @click="$emit('export', 'pdf')">
+            <Download :size="13" />
+            导出 PDF
+          </UiButton>
+        </template>
         <div v-if="artifacts.length" class="artifact-tags">
           <span v-for="artifact in artifacts" :key="artifact.format" class="artifact-tag">
             {{ artifact.status === 'ready' ? '✓' : '⟳' }} {{ artifact.name }}

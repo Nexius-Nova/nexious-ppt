@@ -153,7 +153,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { title, topic, content, status, settings } = req.body;
+    const { title, topic, content, status, settings, state } = req.body;
 
     if (!title) {
       return res.status(400).json({
@@ -168,7 +168,8 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       topic,
       content,
       status: status || 'draft',
-      settings
+      settings,
+      state: state !== undefined ? compactProjectState(state) : undefined
     });
 
     res.status(201).json({
@@ -199,9 +200,22 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const existingProject = await getProjectById(projectId);
     if (!existingProject || existingProject.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
+      const { title, topic, content, status, settings, state } = req.body;
+      const fallbackTitle = title || state?.input?.topic || topic || '未命名 PPT';
+      const newProjectId = await createProject({
+        user_id: req.userId,
+        title: fallbackTitle,
+        topic: topic || state?.input?.topic || '',
+        content: content || state?.input?.content || '',
+        status: status || 'draft',
+        settings,
+        state: state !== undefined ? compactProjectState(state) : undefined
+      });
+
+      return res.status(201).json({
+        success: true,
+        data: { id: newProjectId, replacedMissingId: projectId },
+        message: '原项目不存在，已创建新项目'
       });
     }
 
@@ -644,7 +658,7 @@ function compactProjectState(state: any) {
     svgPages: Array.isArray(state.svgPages)
       ? state.svgPages.map((page: any) => ({
           pageNumber: page.pageNumber,
-          svg: '',
+          svg: typeof page.svg === 'string' ? page.svg : '',
           speakerNotes: page.speakerNotes || '',
         }))
       : [],

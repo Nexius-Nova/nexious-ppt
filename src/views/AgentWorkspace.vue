@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted } from 'vue';
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useRoute, useRouter } from 'vue-router';
 import {
@@ -267,6 +267,10 @@ onMounted(async () => {
   await store.initializeData();
 });
 
+onBeforeUnmount(() => {
+  store.syncToProject();
+});
+
 function handleNavigate(step: string) {
   const pageSteps = ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config'];
   if (pageSteps.includes(step)) {
@@ -523,6 +527,7 @@ function imagePageNumber(slide: unknown, index: number) {
                     @delete-bullet="store.deleteSlideBullet"
                     @reorder-bullet="store.reorderBullet"
                     @update-notes="store.updateSlideNotes"
+                    @update-visual-prompt="store.updateSlideVisualPrompt"
                     @reorder="store.reorderOutline"
                     @batch-delete="(ids: string[]) => { store.saveHistory(); store.outline = store.outline.filter(s => !ids.includes(s.id)) }"
                     @add-sample="store.addSampleOutline"
@@ -650,7 +655,7 @@ function imagePageNumber(slide: unknown, index: number) {
                   <div class="quality-strip">
                     <div>
                       <h3>导出</h3>
-                      <p>导出的 PPTX 会尽量保持和预览一致。</p>
+                      <p>确认预览后导出 PPTX。</p>
                     </div>
                     <UiButton variant="primary" :disabled="isExporting || svgPages.length === 0" @click="handleExport('pptx', { filename: 'presentation', pageRange: 'all' })">
                       <Download :size="14" />
@@ -663,7 +668,6 @@ function imagePageNumber(slide: unknown, index: number) {
                     v-if="svgPages.length > 0"
                     :pages="svgPages"
                     v-model:active-index="previewPageIndex"
-                    @export="(f) => handleExport(f, { filename: 'presentation', pageRange: 'all' })"
                   />
                   <DeckPreview
                     v-else
@@ -671,7 +675,7 @@ function imagePageNumber(slide: unknown, index: number) {
                     :outline="outline"
                     :parameters="parameters"
                     :selected-images="selectedImages"
-                    @export="store.exportCurrentDeck"
+                    :show-export-actions="false"
                   />
                 </div>
               </section>

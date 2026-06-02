@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { Download, Loader2 } from 'lucide-vue-next';
-import UiButton from '@/components/ui/UiButton.vue';
+import { Loader2 } from 'lucide-vue-next';
 import { renderSvgToPng } from '@/services/svgRenderer';
 
 const props = defineProps<{
@@ -11,12 +10,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:activeIndex': [value: number];
-  'export': [format: 'pptx'];
 }>();
 
 const scale = ref(1);
 const showNotes = ref(false);
-const isExporting = ref(false);
 const renderedPngs = ref<Map<number, string>>(new Map());
 const renderingPages = ref<Set<number>>(new Set());
 
@@ -98,15 +95,6 @@ function zoomOut() {
   scale.value = Math.max(0.3, scale.value - 0.1);
 }
 
-async function handleExport() {
-  if (isExporting.value) return;
-  isExporting.value = true;
-  try {
-    emit('export', 'pptx');
-  } finally {
-    setTimeout(() => { isExporting.value = false; }, 2000);
-  }
-}
 </script>
 
 <template>
@@ -120,16 +108,6 @@ async function handleExport() {
           <button class="svg-deck-preview__btn" @click="zoomIn" title="放大">+</button>
         </div>
         <button class="svg-deck-preview__btn" @click="showNotes = !showNotes" :class="{ 'svg-deck-preview__btn--active': showNotes }" title="演讲备注">📝</button>
-        <UiButton
-          size="sm"
-          variant="primary"
-          :disabled="isExporting"
-          @click="handleExport"
-        >
-          <Loader2 v-if="isExporting" :size="13" class="svg-deck-preview__spin" />
-          <Download v-else :size="13" />
-          {{ isExporting ? '导出中...' : '导出 PPTX' }}
-        </UiButton>
       </div>
       <div class="svg-deck-preview__viewport">
         <div class="svg-deck-preview__canvas" :style="{ transform: `scale(${scale})` }">
@@ -262,7 +240,8 @@ async function handleExport() {
   overflow: auto;
   display: flex;
   justify-content: center;
-  align-items: flex-start;
+  align-items: center;
+  min-height: 420px;
   padding: 16px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -271,13 +250,15 @@ async function handleExport() {
 }
 
 .svg-deck-preview__canvas {
+  width: min(100%, 1120px);
+  aspect-ratio: 16 / 9;
   transform-origin: top center;
   transition: transform var(--transition-fast);
 }
 
 .svg-deck-preview__slide {
-  width: 1280px;
-  height: 720px;
+  width: 100%;
+  height: 100%;
   border-radius: 4px;
   overflow: hidden;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
@@ -301,8 +282,8 @@ async function handleExport() {
 }
 
 .svg-deck-preview__slide-img {
-  width: 1280px;
-  height: 720px;
+  width: 100%;
+  height: 100%;
   border-radius: 4px;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
   object-fit: cover;

@@ -56,7 +56,7 @@ function compactWorkflowSnapshot(snapshotData: any) {
       svgPages: Array.isArray(state.svgPages)
         ? state.svgPages.map((page: any) => ({
             pageNumber: page.pageNumber,
-            svg: '',
+            svg: typeof page.svg === 'string' ? page.svg : '',
             speakerNotes: page.speakerNotes || '',
           }))
         : [],

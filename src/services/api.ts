@@ -7,6 +7,7 @@ interface ApiResponse<T = any> {
   data?: T;
   message?: string;
   error?: string;
+  status?: number;
 }
 
 class ApiClient {
@@ -59,6 +60,7 @@ class ApiClient {
           success: false,
           message: data.message || '请求失败',
           error: data.error,
+          status: response.status,
         };
       }
 
@@ -293,6 +295,7 @@ export const projectApi = {
     content?: string;
     status?: 'draft' | 'generating' | 'completed';
     settings?: any;
+    state?: any;
   }) => api.post<{ id: number }>('/api/projects', data),
 
   update: (id: number, data: {
@@ -302,7 +305,7 @@ export const projectApi = {
     status?: 'draft' | 'generating' | 'completed';
     settings?: any;
     state?: any;
-  }) => api.put(`/api/projects/${id}`, data),
+  }) => api.put<{ id?: number; replacedMissingId?: number }>(`/api/projects/${id}`, data),
 
   delete: (id: number) => api.delete(`/api/projects/${id}`),
 

@@ -183,8 +183,35 @@ async function fetchWithRetry(
 }
 
 function extractImageUrl(data: any): string {
-  const url = data.data?.[0]?.url || data.data?.[0]?.b64_json || data.url || data.image_url || '';
+  const first =
+    Array.isArray(data.data) ? data.data[0] :
+    Array.isArray(data.images) ? data.images[0] :
+    Array.isArray(data.output) ? data.output[0] :
+    data;
+
+  const nested =
+    first?.url ||
+    first?.b64_json ||
+    first?.base64 ||
+    first?.image ||
+    first?.image_url ||
+    first?.asset_url ||
+    first?.content?.[0]?.image_url?.url ||
+    first?.content?.[0]?.url ||
+    first?.content?.[0]?.b64_json;
+
+  const url =
+    nested ||
+    data.url ||
+    data.image_url ||
+    data.output_url ||
+    data.result?.url ||
+    data.result?.image_url ||
+    data.result?.b64_json ||
+    '';
+
   if (!url) return '';
+  if (typeof url !== 'string') return '';
   if (url.startsWith('data:') || url.startsWith('http')) return url;
   return `data:image/png;base64,${url}`;
 }
@@ -716,6 +743,8 @@ router.post('/generate-image-stream', async (req: Request, res: Response) => {
       if (errorMessage.includes('500') || errorMessage.includes('内部错误')) {
         errorMessage =
           '图像生成服务暂时不可用，建议检查API配置或稍后重试。您可以继续生成PPT，稍后手动添加图片。';
+      } else if (errorMessage.includes('未找到图片') || errorMessage.includes('格式错误')) {
+        errorMessage = '图像模型没有返回可用图片，已继续生成页面。';
       }
 
       res.write(
