@@ -479,7 +479,7 @@ async function streamTextModel(
 
 router.post('/generate-outline-stream', async (req: Request, res: Response) => {
   try {
-    const { topic, content, slideCount, tone, summaryLength } = req.body;
+    const { topic, content, slideCount, tone, summaryLength, promptContent } = req.body;
 
     const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
     if (!defaultKey) {
@@ -503,21 +503,30 @@ router.post('/generate-outline-stream', async (req: Request, res: Response) => {
     const systemPrompt = `你是一个专业的PPT内容策划专家。请根据用户提供的主题和内容，生成一份结构清晰、逻辑连贯的PPT大纲。
 
 要求：
-1. 每页PPT需要包含：标题、要点、演讲备注
+1. 每页PPT需要包含：标题、要点、演讲备注、配图提示词、推荐版式
 2. 标题要简洁有力，能概括该页核心内容
 3. 要点要具体、可执行，避免空洞表述
 4. 演讲备注要给出该页的讲述重点和过渡提示
 5. 风格要${tone === 'professional' ? '专业严谨' : tone === 'creative' ? '创意活泼' : '通俗易懂'}
 6. 内容详细程度：${lengthGuide}
+7. 请根据内容量和逻辑结构自主决定合适的页数，确保内容完整且不过于冗长
+8. 推荐版式（layout）必须是以下之一：
+   - "text-only"：纯文字，适合概念阐述、总结归纳
+   - "text-image"：左文右图，适合图文并重的说明
+   - "image-text"：左图右文，适合以图为主的内容
+   - "full-image"：全幅图片背景+少量文字，适合视觉冲击力强的页面
+   - "title-center"：居中标题+要点，适合开场、过渡、总结
+   - "two-column"：双栏布局，适合对比、并列内容
+   根据每页内容特点选择最合适的版式，让排版丰富多样，避免所有页面使用同一种版式
 
-请以JSON数组格式返回，每项包含：title, bullets(数组), speakerNotes, visualPrompt(配图提示词)`;
+请以JSON数组格式返回，每项包含：title, bullets(数组), speakerNotes, visualPrompt(配图提示词), layout(推荐版式)`;
 
     const userPrompt = `主题：${topic}
 内容概述：${content}
-期望页数：${slideCount || 6}页
+参考页数：${slideCount || 6}页（AI可根据内容自主调整）
 内容详细程度：${lengthGuide}
-
-请生成PPT大纲：`;
+${promptContent ? `\n额外提示词指导：\n${promptContent}\n` : ''}
+请根据以上信息自主决定合适的页数，生成PPT大纲：`;
 
     const messages: Message[] = [
       { role: 'system', content: systemPrompt },
@@ -570,6 +579,7 @@ router.post('/generate-outline-stream', async (req: Request, res: Response) => {
       speakerNotes: item.speakerNotes || '',
       visualPrompt: item.visualPrompt || '',
       chartHint: item.chartHint,
+      layout: item.layout || undefined,
     }));
 
     res.write(`data: ${JSON.stringify({ status: 'complete', data: outline })}\n\n`);
@@ -996,6 +1006,127 @@ router.post('/test-image-model', async (req: Request, res: Response) => {
       success: false,
       message: error instanceof Error ? error.message : '测试失败',
     });
+  }
+});
+
+router.post('/run-skill', async (req: Request, res: Response) => {
+  try {
+    const { skillId, skillName, slides, params, intensity } = req.body;
+
+    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
+    if (!defaultKey) {
+      return res.status(400).json({
+        success: false,
+        message: '未配置文本模型，请先在设置中添加 API Key',
+      });
+    }
+
+    const apiKey = decrypt(defaultKey.api_key);
+    const provider = defaultKey.provider;
+    const baseUrl = defaultKey.base_url || '';
+    const model = defaultKey.model || 'gpt-4o';
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    res.write(`data: ${JSON.stringify({ status: 'start', message: `正在执行 Skill: ${skillName}...` })}\n\n`);
+
+    let systemPrompt = '';
+    let userPrompt = '';
+
+    if (skillId === 'speaker-notes' || skillName?.includes('讲稿')) {
+      const style = params?.style || 'professional';
+      const length = params?.length || 'medium';
+      const styleGuide = style === 'storytelling' ? '叙事风格，用故事和案例引入' : style === 'professional' ? '专业严谨，数据和逻辑驱动' : '轻松自然，对话式表达';
+      const lengthGuide = length === 'long' ? '每页讲稿200-300字' : length === 'short' ? '每页讲稿50-80字' : '每页讲稿100-150字';
+
+      systemPrompt = `你是一个专业的演讲稿撰写专家。请为每页PPT生成演讲备注/讲稿。
+要求：
+1. 风格：${styleGuide}
+2. 长度：${lengthGuide}
+3. 包含自然转场提示
+4. 以JSON数组格式返回，每项包含 slideId 和 speakerNotes`;
+
+      userPrompt = `请为以下PPT页面生成演讲讲稿：\n${JSON.stringify(slides.map((s: any) => ({ slideId: s.id, title: s.title, bullets: s.bullets })))}`;
+    } else if (skillId === 'data-chart' || skillName?.includes('图表') || skillName?.includes('数据')) {
+      systemPrompt = `你是一个数据可视化专家。请分析PPT页面内容，识别数据表达机会，为适合的页面推荐图表类型。
+要求：
+1. 只为包含数字、百分比、对比、趋势等数据的页面推荐图表
+2. 推荐合适的图表类型（柱状图、折线图、饼图、雷达图等）
+3. 以JSON数组格式返回，每项包含 slideId 和 chartHint`;
+
+      userPrompt = `请分析以下PPT页面，推荐图表：\n${JSON.stringify(slides.map((s: any) => ({ slideId: s.id, title: s.title, bullets: s.bullets })))}`;
+    } else if (skillId === 'design-polish' || skillName?.includes('设计') || skillName?.includes('优化')) {
+      const level = params?.level || 'medium';
+      systemPrompt = `你是一个PPT设计优化专家。请优化每页PPT的标题和要点。
+要求：
+1. 优化等级：${level === 'high' ? '深度优化，标题精简到12字内，要点聚焦到4条以内' : level === 'low' ? '轻度优化，仅微调措辞' : '中度优化，标题精简到16字内，要点聚焦到5条以内'}
+2. 标题要简洁有力
+3. 要点要具体可执行，避免空洞
+4. 以JSON数组格式返回，每项包含 slideId、title 和 bullets`;
+
+      userPrompt = `请优化以下PPT页面：\n${JSON.stringify(slides.map((s: any) => ({ slideId: s.id, title: s.title, bullets: s.bullets })))}`;
+    } else if (skillName?.includes('摘要') || skillName?.includes('总结')) {
+      const maxLen = params?.maxLength || 200;
+      systemPrompt = `你是一个内容摘要专家。请为每页PPT生成核心要点摘要。
+要求：
+1. 每页摘要不超过${maxLen}字
+2. 提炼最核心的观点
+3. 以JSON数组格式返回，每项包含 slideId 和 summary`;
+
+      userPrompt = `请为以下PPT页面生成摘要：\n${JSON.stringify(slides.map((s: any) => ({ slideId: s.id, title: s.title, bullets: s.bullets })))}`;
+    } else {
+      systemPrompt = `你是一个PPT内容优化专家。请根据用户的要求优化PPT内容。以JSON数组格式返回结果。`;
+      userPrompt = `Skill: ${skillName}\n参数: ${JSON.stringify(params)}\nPPT内容: ${JSON.stringify(slides.map((s: any) => ({ slideId: s.id, title: s.title, bullets: s.bullets, speakerNotes: s.speakerNotes || '' })))}`;
+    }
+
+    const messages: Message[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ];
+
+    let fullContent = '';
+
+    const originalWrite = res.write.bind(res);
+    (res as any).write = (chunk: any) => {
+      const str = chunk.toString();
+      if (str.startsWith('data: ') && !str.includes('[DONE]') && !str.includes('status')) {
+        try {
+          const data = JSON.parse(str.slice(6));
+          if (data.content) {
+            fullContent += data.content;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      return originalWrite(chunk);
+    };
+
+    await streamTextModel(provider, apiKey, baseUrl, model, messages, res);
+
+    let result;
+    try {
+      const jsonMatch = fullContent.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        result = JSON.parse(jsonMatch[0]);
+      } else {
+        result = JSON.parse(fullContent);
+      }
+    } catch {
+      result = { rawContent: fullContent };
+    }
+
+    res.write(`data: ${JSON.stringify({ status: 'complete', data: { skillId, skillName, result } })}\n\n`);
+    res.end();
+  } catch (error) {
+    console.error('Skill 执行错误:', error);
+    res.write(
+      `data: ${JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : 'Skill 执行失败' })}\n\n`
+    );
+    res.end();
   }
 });
 

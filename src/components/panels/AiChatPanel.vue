@@ -16,20 +16,7 @@ const isLoading = ref(false);
 const messagesContainer = ref<HTMLDivElement | null>(null);
 const inputRef = ref<HTMLInputElement | null>(null);
 
-const STORAGE_KEY = 'nexious-ppt-chat-history';
-
-// Load saved messages
 onMounted(() => {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        messages.value = parsed;
-        return;
-      }
-    }
-  } catch {}
   addWelcomeMessage();
 });
 
@@ -38,12 +25,6 @@ function addWelcomeMessage() {
     role: 'assistant',
     content: '你好！我是 AI PPT 助手。我可以帮你：\n\n• 修改幻灯片标题和内容\n• 添加或删除要点\n• 回答 PPT 相关问题\n\n你可以直接说"把第3页标题改为xxx"或"为第1页添加一个要点"。'
   });
-}
-
-function saveMessages() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.value.slice(-50)));
-  } catch {}
 }
 
 function scrollToBottom() {
@@ -78,19 +59,17 @@ async function sendMessage() {
   inputText.value = '';
   const userMessage: ChatMessage = { role: 'user', content: text };
   messages.value.push(userMessage);
-  saveMessages();
   scrollToBottom();
 
   isLoading.value = true;
 
-  // Placeholder assistant message
   const assistantMessage: ChatMessage = { role: 'assistant', content: '' };
   messages.value.push(assistantMessage);
   scrollToBottom();
 
   try {
     const fullText = await chatService.sendMessage(
-      messages.value.slice(-20), // keep context manageable
+      messages.value.slice(-20),
       buildContext(),
       {
         onContent: (text) => {
@@ -99,22 +78,18 @@ async function sendMessage() {
         },
         onComplete: (text) => {
           assistantMessage.content = text;
-          saveMessages();
           scrollToBottom();
           processActions(text);
         },
         onError: () => {
           assistantMessage.content = '抱歉，AI 回复失败。请检查模型配置后重试。';
-          saveMessages();
         }
       }
     );
   } catch {
     assistantMessage.content = '抱歉，AI 回复失败。请检查模型配置后重试。';
-    saveMessages();
   } finally {
     isLoading.value = false;
-    saveMessages();
     scrollToBottom();
   }
 }
@@ -123,7 +98,6 @@ function processActions(text: string) {
   const actions = parseSlideActions(text);
   if (actions.length === 0) return;
 
-  // Process the first action
   const action = actions[0];
   const feedback = store.executeChatAction(action);
   if (feedback) {
@@ -132,7 +106,6 @@ function processActions(text: string) {
       content: `✅ ${feedback}`
     };
     messages.value.push(actionMsg);
-    saveMessages();
   }
 }
 
@@ -146,7 +119,6 @@ function onKeydown(event: KeyboardEvent) {
 function clearHistory() {
   messages.value = [];
   addWelcomeMessage();
-  saveMessages();
 }
 </script>
 

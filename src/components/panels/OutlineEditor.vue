@@ -411,7 +411,7 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   padding: 16px;
   border: 1px solid var(--color-accent-soft);
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--color-accent-soft) 0%, transparent 100%);
+  background: var(--color-accent-soft);
 }
 
 .streaming-header {

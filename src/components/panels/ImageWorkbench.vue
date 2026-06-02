@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { RefreshCw, Check, Loader2, ImageOff } from 'lucide-vue-next';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -7,7 +8,7 @@ import UiEmpty from '@/components/ui/UiEmpty.vue';
 import ModelSelector from '@/components/common/ModelSelector.vue';
 import type { GeneratedImage } from '@/types/agent';
 
-defineProps<{
+const props = defineProps<{
   images: GeneratedImage[];
   isRunning?: boolean;
   currentGeneratingSlide?: string | null;
@@ -19,6 +20,52 @@ defineEmits<{
   run: [];
   select: [id: string];
 }>();
+
+const startTime = ref<number | null>(null);
+const now = ref(Date.now());
+let timer: ReturnType<typeof setInterval> | null = null;
+
+watch(
+  () => props.isRunning,
+  (val) => {
+    if (val && !startTime.value) {
+      startTime.value = Date.now();
+    } else if (!val) {
+      startTime.value = null;
+    }
+  }
+);
+
+onMounted(() => {
+  timer = setInterval(() => {
+    now.value = Date.now();
+  }, 1000);
+});
+
+onUnmounted(() => {
+  if (timer) clearInterval(timer);
+});
+
+const elapsedSeconds = computed(() => {
+  if (!startTime.value) return 0;
+  return Math.floor((now.value - startTime.value) / 1000);
+});
+
+const estimatedRemaining = computed(() => {
+  const done = props.generatedCount || 0;
+  const total = props.totalCount || 0;
+  if (!startTime.value || done === 0 || total === 0) return null;
+  const remaining = total - done;
+  if (remaining <= 0) return null;
+  const secondsPerItem = elapsedSeconds.value / done;
+  const estimate = Math.ceil(secondsPerItem * remaining);
+  if (estimate < 60) return `${estimate}秒`;
+  const min = Math.floor(estimate / 60);
+  const sec = estimate % 60;
+  return `${min}分${sec}秒`;
+});
+
+const skeletonItems = Array.from({ length: 6 });
 
 function getStyleLabel(style: string) {
   const map: Record<string, string> = {
@@ -43,32 +90,26 @@ function getStyleLabel(style: string) {
       </UiButton>
     </template>
 
-    <div v-if="isRunning && !images.length" class="generating-empty">
-      <div class="generating-empty__icon">
-        <Loader2 :size="32" class="animate-spin" />
+    <div v-if="isRunning && !images.length" class="skeleton-grid">
+      <div v-for="(_, i) in skeletonItems" :key="i" class="skeleton-card">
+        <div class="skeleton-card__image"></div>
+        <div class="skeleton-card__title"></div>
+        <div class="skeleton-card__desc"></div>
       </div>
-      <div class="generating-empty__text">
-        <strong>正在生成图片</strong>
-        <p>AI 正在为每页幻灯片生成配图，请稍候...</p>
-      </div>
-      <div class="generating-bar generating-bar--large">
-        <div
-          class="generating-bar__fill"
-          :style="{ width: totalCount ? `${((generatedCount || 0) / totalCount) * 100}%` : '0%' }"
-        ></div>
-      </div>
-      <span v-if="totalCount" class="generating-progress">
-        {{ generatedCount || 0 }} / {{ totalCount }}
-      </span>
     </div>
 
     <div v-if="isRunning" class="generating-status">
       <div class="generating-header">
-        <Loader2 :size="16" class="animate-spin" />
-        <span>正在生成图片...</span>
-        <span v-if="totalCount" class="generating-progress">
-          {{ generatedCount || 0 }} / {{ totalCount }}
-        </span>
+        <div class="generating-header__left">
+          <Loader2 :size="16" class="animate-spin" />
+          <span>正在生成图片</span>
+          <span v-if="totalCount" class="generating-progress">
+            {{ generatedCount || 0 }} / {{ totalCount }}
+          </span>
+        </div>
+        <div v-if="estimatedRemaining" class="generating-header__right">
+          预估剩余 {{ estimatedRemaining }}
+        </div>
       </div>
       <div class="generating-bar">
         <div
@@ -129,6 +170,9 @@ function getStyleLabel(style: string) {
             生成失败
           </UiBadge>
         </div>
+        <div v-if="!image.selected && !image.error && !(isRunning && currentGeneratingSlide === image.slideId)" class="image-tile__hint">
+          点击选择
+        </div>
       </button>
     </div>
 
@@ -141,77 +185,122 @@ function getStyleLabel(style: string) {
 </template>
 
 <style scoped>
+@keyframes skeleton-pulse {
+  0%, 100% {
+    background-color: var(--color-panel);
+  }
+  50% {
+    background-color: var(--color-border);
+  }
+}
+
+@keyframes stripe-move {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 40px 0;
+  }
+}
+
+@keyframes pulse-border {
+  0%, 100% {
+    border-color: var(--color-accent-soft);
+  }
+  50% {
+    border-color: var(--color-accent);
+  }
+}
+
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1.5px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.skeleton-card__image {
+  height: 120px;
+  border-radius: 10px;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-card__title {
+  height: 12px;
+  width: 40%;
+  border-radius: 6px;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-card__desc {
+  height: 10px;
+  width: 70%;
+  border-radius: 5px;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
 .generating-status {
   margin-bottom: var(--space-3);
   padding: 12px;
   border: 1px solid var(--color-accent-soft);
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--color-accent-soft) 0%, transparent 100%);
-}
-
-.generating-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 16px;
-  padding: 48px 24px;
-  border: 2px dashed var(--color-accent-soft);
-  border-radius: var(--radius-lg);
-  background: linear-gradient(135deg, var(--color-accent-soft) 0%, transparent 100%);
-  text-align: center;
-}
-
-.generating-empty__icon {
-  color: var(--color-accent);
-}
-
-.generating-empty__text strong {
-  display: block;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text);
-  margin-bottom: 4px;
-}
-
-.generating-empty__text p {
-  margin: 0;
-  font-size: 13px;
-  color: var(--color-subtle);
-}
-
-.generating-bar--large {
-  width: 200px;
-  height: 6px;
+  background: var(--color-accent-soft);
 }
 
 .generating-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
   margin-bottom: 8px;
+}
+
+.generating-header__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--color-accent);
   font-size: 13px;
   font-weight: 500;
 }
 
+.generating-header__right {
+  font-size: 12px;
+  color: var(--color-subtle);
+  font-family: var(--font-mono);
+}
+
 .generating-progress {
-  margin-left: auto;
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .generating-bar {
-  height: 4px;
-  border-radius: 2px;
+  height: 6px;
+  border-radius: 3px;
   background: var(--color-border);
   overflow: hidden;
 }
 
 .generating-bar__fill {
   height: 100%;
-  border-radius: 2px;
+  border-radius: 3px;
   background: var(--color-accent);
   transition: width 0.3s ease;
+  position: relative;
+}
+
+.generating-bar__fill::after {
+  content: none;
 }
 
 .image-grid {
@@ -232,6 +321,7 @@ function getStyleLabel(style: string) {
   text-align: left;
   transition: all var(--transition-fast);
   cursor: pointer;
+  position: relative;
 }
 
 .image-tile:hover:not(:disabled) {
@@ -251,7 +341,7 @@ function getStyleLabel(style: string) {
 }
 
 .image-tile--generating {
-  border-color: var(--color-accent-soft);
+  animation: pulse-border 1.5s ease-in-out infinite;
   background: var(--color-accent-soft);
 }
 
@@ -344,6 +434,31 @@ function getStyleLabel(style: string) {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.image-tile__hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+  pointer-events: none;
+}
+
+.image-tile:hover:not(:disabled) .image-tile__hint {
+  opacity: 1;
+}
+
+.image-tile--selected:hover .image-tile__hint,
+.image-tile--generating:hover .image-tile__hint {
+  opacity: 0;
 }
 
 .animate-spin {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { Search, Check, LayoutTemplate, Palette, Layers, Star, Eye, FileText, Image, Plus, Edit3, Trash2 } from 'lucide-vue-next';
+import { Search, LayoutTemplate, Palette, Layers, Star, Eye, FileText, Image, Plus, Edit3, Trash2 } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
@@ -8,17 +8,14 @@ import UiField from '@/components/ui/UiField.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
 import { useToastStore } from '@/stores/toastStore';
-import { useAgentStore } from '@/stores/agentStore';
 import { templateApi, type Template } from '@/services/api';
 
 const toastStore = useToastStore();
-const agentStore = useAgentStore();
 
 const templates = ref<Template[]>([]);
 const loading = ref(false);
 const searchQuery = ref('');
 const selectedCategory = ref<string | null>(null);
-const appliedTemplate = ref<number | null>(null);
 const showPreviewModal = ref(false);
 const previewTemplate = ref<Template | null>(null);
 
@@ -64,12 +61,6 @@ function selectCategory(category: string) {
   selectedCategory.value = category;
 }
 
-function applyTemplate(template: Template) {
-  appliedTemplate.value = template.id;
-  agentStore.applyGalleryTemplate(template);
-  toastStore.success('模版已应用', `已应用「${template.name}」模版`);
-}
-
 function openPreviewModal(template: Template) {
   previewTemplate.value = template;
   showPreviewModal.value = true;
@@ -82,6 +73,24 @@ const templateFeatures = computed(() => {
     { icon: Layers, label: '分类', value: previewTemplate.value.category || '未分类' },
     { icon: Palette, label: '主题色', value: previewTemplate.value.accent }
   ];
+});
+
+const previewSlides = computed(() => {
+  if (!previewTemplate.value) return { slides: [], remaining: 0 };
+  const total = previewTemplate.value.slide_count;
+  const maxShow = 8;
+  const slides = [];
+  for (let i = 1; i <= Math.min(total, maxShow); i++) {
+    slides.push({
+      index: i,
+      isTitle: i === 1,
+      hasImage: i % 3 === 0
+    });
+  }
+  return {
+    slides,
+    remaining: total > maxShow ? total - maxShow : 0
+  };
 });
 
 onMounted(() => {
@@ -207,17 +216,12 @@ async function deleteTemplate(template: Template) {
         v-for="template in filteredTemplates"
         :key="template.id"
         class="template-card"
-        :class="{ 'template-card--applied': appliedTemplate === template.id }"
       >
         <div class="template-card__preview" :style="{ background: template.accent || '#334155' }">
           <div class="template-card__preview-content">
             <div class="preview-slide"></div>
             <div class="preview-slide"></div>
             <div class="preview-slide preview-slide--small"></div>
-          </div>
-          <div v-if="appliedTemplate === template.id" class="template-card__applied-badge">
-            <Check :size="12" />
-            已应用
           </div>
         </div>
 
@@ -245,14 +249,6 @@ async function deleteTemplate(template: Template) {
           >
             <Eye :size="14" />
             查看
-          </UiButton>
-          <UiButton
-            :variant="appliedTemplate === template.id ? 'secondary' : 'primary'"
-            size="sm"
-            @click="applyTemplate(template)"
-          >
-            <Check v-if="appliedTemplate === template.id" :size="14" />
-            {{ appliedTemplate === template.id ? '已应用' : '应用' }}
           </UiButton>
           <button class="action-btn" title="编辑" @click="openEditModal(template)">
             <Edit3 :size="14" />
@@ -305,15 +301,28 @@ async function deleteTemplate(template: Template) {
                 <h4>页面预览</h4>
                 <div class="slide-previews">
                   <div
-                    v-for="i in Math.min(previewTemplate?.slide_count || 0, 6)"
-                    :key="i"
-                    class="slide-preview"
-                    :style="{ borderColor: previewTemplate?.accent || '#334155' }"
+                    v-for="slide in previewSlides.slides"
+                    :key="slide.index"
+                    class="slide-preview-card"
                   >
-                    <span class="slide-number">{{ i }}</span>
+                    <div class="slide-preview-card__number">{{ slide.index }}</div>
+                    <div class="slide-preview-card__content">
+                      <div
+                        class="slide-preview-card__title"
+                        :style="{ background: previewTemplate?.accent || '#334155' }"
+                      ></div>
+                      <div class="slide-preview-card__bullets">
+                        <div class="slide-preview-card__bullet"></div>
+                        <div class="slide-preview-card__bullet"></div>
+                        <div v-if="!slide.isTitle" class="slide-preview-card__bullet slide-preview-card__bullet--short"></div>
+                      </div>
+                      <div v-if="slide.hasImage" class="slide-preview-card__image">
+                        <Image :size="14" />
+                      </div>
+                    </div>
                   </div>
-                  <div v-if="(previewTemplate?.slide_count || 0) > 6" class="slide-more">
-                    +{{ (previewTemplate?.slide_count || 0) - 6 }}
+                  <div v-if="previewSlides.remaining > 0" class="slide-more-card">
+                    +{{ previewSlides.remaining }}页
                   </div>
                 </div>
               </div>
@@ -321,10 +330,6 @@ async function deleteTemplate(template: Template) {
           </div>
           <div class="modal__footer">
             <UiButton variant="secondary" @click="showPreviewModal = false">关闭</UiButton>
-            <UiButton @click="applyTemplate(previewTemplate!); showPreviewModal = false">
-              <Check :size="14" />
-              应用模版
-            </UiButton>
           </div>
         </div>
       </div>
@@ -481,10 +486,6 @@ async function deleteTemplate(template: Template) {
   box-shadow: var(--shadow-sm);
 }
 
-.template-card--applied {
-  border-color: var(--color-accent);
-}
-
 .template-card__preview {
   position: relative;
   height: 140px;
@@ -511,21 +512,6 @@ async function deleteTemplate(template: Template) {
 .preview-slide--small {
   width: 60%;
   height: 12px;
-}
-
-.template-card__applied-badge {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.95);
-  color: var(--color-success);
-  font-size: 11px;
-  font-weight: 600;
 }
 
 .template-card__body {
@@ -746,32 +732,84 @@ async function deleteTemplate(template: Template) {
   flex-wrap: wrap;
 }
 
-.slide-preview {
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 36px;
-  border: 2px solid;
-  border-radius: 4px;
+.slide-preview-card {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
   background: var(--color-panel);
+  min-width: 0;
+  flex: 1 1 calc(50% - 4px);
+  min-width: 180px;
 }
 
-.slide-number {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.slide-more {
+.slide-preview-card__number {
   display: grid;
   place-items: center;
-  width: 48px;
-  height: 36px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-muted);
+  flex-shrink: 0;
+}
+
+.slide-preview-card__content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.slide-preview-card__title {
+  height: 8px;
+  border-radius: 3px;
+  width: 70%;
+}
+
+.slide-preview-card__bullets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.slide-preview-card__bullet {
+  height: 5px;
+  border-radius: 2px;
+  background: var(--color-border);
+  width: 90%;
+}
+
+.slide-preview-card__bullet--short {
+  width: 55%;
+}
+
+.slide-preview-card__image {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 28px;
   border-radius: 4px;
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border);
+  color: var(--color-muted);
+}
+
+.slide-more-card {
+  display: grid;
+  place-items: center;
+  padding: 10px 16px;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
   background: var(--color-panel);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--color-muted);
+  white-space: nowrap;
 }
 
 /* Template editor styles */

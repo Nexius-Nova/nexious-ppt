@@ -11,35 +11,13 @@ export interface Toast {
   read: boolean;
 }
 
-const STORAGE_KEY = 'nexious-ppt-notifications';
-
 export const useToastStore = defineStore('toast', () => {
   const toasts = ref<Toast[]>([]);
-  const loaded = ref(false);
 
   const visibleToasts = computed(() => toasts.value.slice(0, 5));
   const allNotifications = computed(() => [...toasts.value].sort((a, b) => b.createdAt - a.createdAt));
   const unreadCount = computed(() => toasts.value.filter(t => !t.read).length);
   const hasUnread = computed(() => unreadCount.value > 0);
-
-  function loadFromStorage() {
-    if (loaded.value) return;
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        toasts.value = JSON.parse(stored);
-      }
-    } catch { /* ignore */ }
-    loaded.value = true;
-  }
-
-  function saveToStorage() {
-    try {
-      // Keep only last 100
-      const toSave = toasts.value.slice(0, 100);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
-    } catch { /* ignore */ }
-  }
 
   function generateId(): string {
     return `toast_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -51,8 +29,6 @@ export const useToastStore = defineStore('toast', () => {
     message?: string,
     duration: number = 5000
   ): Toast {
-    loadFromStorage();
-
     const toast: Toast = {
       id: generateId(),
       type,
@@ -63,8 +39,7 @@ export const useToastStore = defineStore('toast', () => {
       read: false
     };
 
-    toasts.value = [toast, ...toasts.value];
-    saveToStorage();
+    toasts.value = [toast, ...toasts.value].slice(0, 100);
 
     if (duration > 0) {
       setTimeout(() => {
@@ -77,25 +52,21 @@ export const useToastStore = defineStore('toast', () => {
 
   function removeToast(id: string) {
     toasts.value = toasts.value.filter(t => t.id !== id);
-    saveToStorage();
   }
 
   function markAllRead() {
     toasts.value.forEach(t => { t.read = true; });
-    saveToStorage();
   }
 
   function markRead(id: string) {
     const toast = toasts.value.find(t => t.id === id);
     if (toast) {
       toast.read = true;
-      saveToStorage();
     }
   }
 
   function clearAll() {
     toasts.value = [];
-    saveToStorage();
   }
 
   function success(title: string, message?: string) {

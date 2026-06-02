@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
-import { Plus, Trash2, Edit3, Zap, Check, X, Upload, FileText, Loader2 } from 'lucide-vue-next';
-import UiCard from '@/components/ui/UiCard.vue';
+import { ref, onMounted } from 'vue';
+import { Plus, Trash2, Edit3, Zap, Upload, FileText, Loader2 } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -23,14 +22,11 @@ const formData = ref({
   instruction: '',
   icon: 'Zap',
   category: '其他',
-  parameters: {} as Record<string, any>,
-  is_enabled: true
+  parameters: {} as Record<string, any>
 });
 const uploadFile = ref<File | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const parsingFile = ref(false);
-
-const enabledCount = computed(() => skills.value.filter(s => s.is_enabled).length);
 
 async function fetchSkills() {
   loading.value = true;
@@ -55,7 +51,6 @@ function openCreateModal() {
     icon: 'Zap',
     category: '其他',
     parameters: {},
-    is_enabled: true
   };
   uploadFile.value = null;
   showModal.value = true;
@@ -70,7 +65,6 @@ function openEditModal(skill: Skill) {
     icon: skill.icon || 'Zap',
     category: skill.category || '其他',
     parameters: skill.parameters || {},
-    is_enabled: skill.is_enabled
   };
   uploadFile.value = null;
   showModal.value = true;
@@ -246,18 +240,6 @@ async function deleteSkill(skill: Skill) {
   }
 }
 
-async function toggleSkill(skill: Skill) {
-  try {
-    const response = await skillApi.toggle(skill.id);
-    if (response.success) {
-      toastStore.success(response.message || '状态已更新', '');
-      await fetchSkills();
-    }
-  } catch (error) {
-    toastStore.error('操作失败', error instanceof Error ? error.message : '未知错误');
-  }
-}
-
 onMounted(() => {
   fetchSkills();
 });
@@ -272,7 +254,6 @@ onMounted(() => {
       </div>
       <div class="page-header__stats">
         <UiBadge tone="info">共 {{ skills.length }} 个</UiBadge>
-        <UiBadge tone="success">已启用 {{ enabledCount }} 个</UiBadge>
       </div>
       <UiButton @click="openCreateModal">
         <Plus :size="14" />
@@ -296,7 +277,6 @@ onMounted(() => {
         v-for="skill in skills"
         :key="skill.id"
         class="skill-card"
-        :class="{ 'skill-card--disabled': !skill.is_enabled }"
       >
         <div class="skill-card__header">
           <div class="skill-card__icon">
@@ -307,13 +287,6 @@ onMounted(() => {
             <p v-if="skill.description">{{ skill.description }}</p>
           </div>
           <div class="skill-card__actions">
-            <button
-              class="toggle-btn"
-              :class="{ 'toggle-btn--active': skill.is_enabled }"
-              @click="toggleSkill(skill)"
-            >
-              <component :is="skill.is_enabled ? Check : X" :size="14" />
-            </button>
             <button class="btn-icon" title="编辑" @click="openEditModal(skill)">
               <Edit3 :size="14" />
             </button>
@@ -323,9 +296,6 @@ onMounted(() => {
           </div>
         </div>
         <div class="skill-card__footer">
-          <UiBadge :tone="skill.is_enabled ? 'success' : 'neutral'" size="sm">
-            {{ skill.is_enabled ? '已启用' : '已禁用' }}
-          </UiBadge>
           <span v-if="skill.category" class="skill-category">{{ skill.category }}</span>
         </div>
       </div>
@@ -390,33 +360,23 @@ onMounted(() => {
             </UiField>
 
             <UiField label="描述" required>
-              <div class="field-with-count">
-                <UiInput
-                  v-model="formData.description"
-                  placeholder="该技能应该在何时使用？例如：当用户询问项目结构或文件关系时"
-                  maxlength="200"
-                />
-                <span class="char-count" :class="{ 'char-count--warn': formData.description.length > 180, 'char-count--error': formData.description.length >= 200 }">
-                  {{ formData.description.length }}/200
-                </span>
-              </div>
+              <UiInput
+                v-model="formData.description"
+                placeholder="该技能应该在何时使用？例如：当用户询问项目结构或文件关系时"
+              />
             </UiField>
 
             <UiField label="指令" required>
-              <div class="field-with-count">
-                <UiTextarea
-                  v-model="formData.instruction"
-                  placeholder="定义该技能激活时模型应如何行为。例如：
+              <UiTextarea
+                v-model="formData.instruction"
+                placeholder="定义该技能激活时模型应如何行为。例如：
 # codemap
 ## Commands
 ## When to Use
 ## Output Interpretation
 ## Examples"
-                  :rows="10"
-                  maxlength="2000"
-                />
-                <span class="char-count" :class="{ 'char-count--warn': formData.instruction.length > 1800 }">{{ formData.instruction.length }}/2000</span>
-              </div>
+                :rows="10"
+              />
             </UiField>
           </div>
           <div class="modal__footer">
@@ -500,10 +460,6 @@ onMounted(() => {
   border-color: var(--color-border-strong);
 }
 
-.skill-card--disabled {
-  opacity: 0.6;
-}
-
 .skill-card__header {
   display: flex;
   align-items: flex-start;
@@ -542,25 +498,6 @@ onMounted(() => {
 .skill-card__actions {
   display: flex;
   gap: 4px;
-}
-
-.toggle-btn {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-panel);
-  color: var(--color-muted);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.toggle-btn--active {
-  border-color: var(--color-success);
-  background: var(--color-success);
-  color: white;
 }
 
 .btn-icon {

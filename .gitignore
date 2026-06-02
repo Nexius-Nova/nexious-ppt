@@ -65,6 +65,9 @@ coverage/
 # Uploaded files (if any)
 uploads/
 
+# Generated PPT Master runtime projects
+.generated/
+
 # Lock files (optional, uncomment if you want to ignore)
 # pnpm-lock.yaml
 

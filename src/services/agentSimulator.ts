@@ -1,11 +1,12 @@
-import type { AgentParameters, DeckInput, GeneratedImage, ImageStyle, SlideOutline } from '@/types/agent';
+import type { AgentParameters, DeckInput, GeneratedImage, ImageStyle, SlideLayout, SlideOutline } from '@/types/agent';
 import { aiApi, type StreamCallbacks } from '@/services/api';
 import { useToastStore } from '@/stores/toastStore';
 
 export async function analyzeDeckInput(
   input: DeckInput,
   params: AgentParameters,
-  callbacks?: StreamCallbacks
+  callbacks?: StreamCallbacks,
+  promptContent?: string
 ): Promise<SlideOutline[]> {
   const toastStore = useToastStore();
 
@@ -16,7 +17,8 @@ export async function analyzeDeckInput(
         content: input.content,
         slideCount: params.slideCount,
         tone: params.tone,
-        summaryLength: params.summaryLength
+        summaryLength: params.summaryLength,
+        promptContent: promptContent || ''
       },
       {
         onStart: (message) => {
@@ -43,7 +45,8 @@ export async function analyzeDeckInput(
       bullets: item.bullets,
       speakerNotes: item.speakerNotes,
       visualPrompt: item.visualPrompt,
-      chartHint: item.chartHint
+      chartHint: item.chartHint,
+      layout: item.layout as SlideLayout | undefined,
     }));
   } catch (error) {
     console.error('生成大纲错误:', error);
@@ -60,12 +63,15 @@ export async function generateSlideImages(
     onComplete?: (slideId: string, image: GeneratedImage) => void;
     onError?: (slideId: string, message: string) => void;
     onAllComplete?: (images: GeneratedImage[]) => void;
-  }
+  },
+  concurrency: number = 3
 ): Promise<GeneratedImage[]> {
   const toastStore = useToastStore();
   const images: GeneratedImage[] = [];
+  const total = outline.length;
+  let completed = 0;
 
-  for (const slide of outline) {
+  async function processSlide(slide: SlideOutline): Promise<GeneratedImage> {
     try {
       callbacks?.onStart?.(slide.id, `正在为"${slide.title}"生成图片...`);
 
@@ -90,13 +96,21 @@ export async function generateSlideImages(
         }
       );
 
-      images.push(image);
+      completed++;
+      const progress = Math.round((completed / total) * 100);
+      setStepProgress(progress);
 
       if (!image.error && image.url) {
         toastStore.success('图片生成完成', slide.title);
       }
+
+      return image;
     } catch (error) {
       console.error(`生成图片失败: ${slide.id}`, error);
+      completed++;
+      const progress = Math.round((completed / total) * 100);
+      setStepProgress(progress);
+
       const errorImage: GeneratedImage = {
         id: `${slide.id}-image-1`,
         slideId: slide.id,
@@ -107,8 +121,29 @@ export async function generateSlideImages(
         selected: true,
         error: true
       };
-      images.push(errorImage);
       callbacks?.onError?.(slide.id, error instanceof Error ? error.message : '未知错误');
+      return errorImage;
+    }
+  }
+
+  function setStepProgress(progress: number) {
+    callbacks?.onComplete?.('__progress__', { id: '__progress__', slideId: '__progress__', title: '', prompt: '', style: '', url: '', selected: false, error: false, _progress: progress } as any);
+  }
+
+  const batches: SlideOutline[][] = [];
+  for (let i = 0; i < outline.length; i += concurrency) {
+    batches.push(outline.slice(i, i + concurrency));
+  }
+
+  for (const batch of batches) {
+    const results = await Promise.allSettled(
+      batch.map(slide => processSlide(slide))
+    );
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        images.push(result.value);
+      }
     }
   }
 

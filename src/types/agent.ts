@@ -4,7 +4,7 @@ export type StepStatus = 'idle' | 'running' | 'done';
 
 export type ImageStyle = 'realistic' | 'illustration' | 'comic' | 'flat' | '3d' | 'photo';
 
-export type TemplateStyle = 'business' | 'creative' | 'education';
+export type TemplateStyle = 'auto' | 'business' | 'creative' | 'education' | 'tech' | 'finance';
 
 export interface WorkflowStep {
   id: WorkflowStepId;
@@ -66,6 +66,7 @@ export interface SkillDefinition {
   enabled: boolean;
   order: number;
   params: Record<string, string | number | boolean>;
+  instruction?: string;
 }
 
 export interface PromptDefinition {
@@ -82,6 +83,13 @@ export interface PptProjectState {
   outline: SlideOutline[];
   images: GeneratedImage[];
   exportArtifacts: ExportArtifact[];
+  enabledSkillIds: string[];
+  selectedPromptId: string;
+  activityLog: string[];
+  steps: WorkflowStep[];
+  designSpec: DesignSpec | null;
+  specLock: SpecLock | null;
+  svgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>;
 }
 
 export interface PptProject {
@@ -374,3 +382,63 @@ export const IMAGE_MODELS: Record<ImageModelProvider, Array<{ label: string; val
   ],
   custom: [{ label: '自定义模型', value: 'custom', description: '输入模型名称' }]
 };
+
+export interface DesignSpec {
+  projectInfo: {
+    title: string;
+    topic: string;
+    audience: string;
+    occasion: string;
+  };
+  canvas: { format: 'ppt169' | 'ppt43'; width: number; height: number };
+  visualTheme: {
+    mode: 'versatile' | 'consulting' | 'top-consulting';
+    style: string;
+    colors: {
+      primary: string; secondary: string; accent: string;
+      background: string; surface: string; text: string; muted: string; border: string;
+    };
+  };
+  typography: {
+    fontFamily: string; titleFamily: string; bodyFamily: string;
+    emphasisFamily: string; codeFamily: string;
+    bodySize: number; titleSize: number; subtitleSize: number; annotationSize: number;
+  };
+  iconStyle: string;
+  imageUsage: string;
+  outline: SpecSlide[];
+  skillExtensions: SkillExtension[];
+}
+
+export interface SpecSlide {
+  id: string;
+  pageNumber: number;
+  title: string;
+  bullets: string[];
+  speakerNotes: string;
+  visualPrompt: string;
+  layout: string;
+  rhythm: 'anchor' | 'dense' | 'breathing';
+  chartHint?: string;
+}
+
+export interface SkillExtension {
+  skillId: string;
+  skillName: string;
+  strategistPrompt?: string;
+  executorTemplate?: string;
+  executorRules?: string[];
+}
+
+export interface SpecLock {
+  colors: DesignSpec['visualTheme']['colors'];
+  typography: DesignSpec['typography'];
+  iconStyle: string;
+  imageStyle: string;
+  canvas: DesignSpec['canvas'];
+  pageRhythm: Record<string, 'anchor' | 'dense' | 'breathing'>;
+  pageLayouts: Record<string, string>;
+  pageCharts: Record<string, string>;
+  skillExtensions: SkillExtension[];
+  forbidden: string[];
+}

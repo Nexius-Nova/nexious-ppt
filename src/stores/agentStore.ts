@@ -1,16 +1,18 @@
-import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+﻿import { defineStore } from 'pinia';
+import { computed, ref, watch } from 'vue';
 import { defaultPrompts, defaultSkills, exampleTemplates, workflowSteps } from '@/data/workflow';
 import { analyzeDeckInput, exportDeck, generateSlideImages } from '@/services/agentSimulator';
 import { exportOutlineToPptx } from '@/services/pptExporter';
-import { promptApi, skillApi, templateApi, workflowApi } from '@/services/api';
+import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi } from '@/services/api';
 import { applyTemplateLayoutParams, getTemplateColors } from '@/composables/templateColors';
+import { slideNeedsImage } from '@/utils/slideVisuals';
 import { useApiKeyStore } from './apiKeyStore';
 import { useToastStore } from './toastStore';
 import type {
   AgentParameters,
   ChatMessage,
   DeckInput,
+  DesignSpec,
   ExportArtifact,
   GeneratedImage,
   PromptDefinition,
@@ -18,7 +20,11 @@ import type {
   PptProjectState,
   PptTemplate,
   SkillDefinition,
+  SkillExtension,
+  SlideLayout,
   SlideOutline,
+  SpecLock,
+  SpecSlide,
   TemplateStyle,
   VersionSnapshot,
   WorkflowStep,
@@ -44,7 +50,7 @@ export const useAgentStore = defineStore('agent', () => {
     slideCount: 6,
     tone: 'professional',
     imageStyle: 'flat',
-    template: 'business',
+    template: 'auto',
     skillIntensity: 70
   });
   const steps = ref<WorkflowStep[]>(cloneSteps());
@@ -59,6 +65,10 @@ export const useAgentStore = defineStore('agent', () => {
   const activityLog = ref<string[]>(['系统就绪，等待添加 PPT 项目。']);
   const isRunning = ref(false);
   const streamingText = ref('');
+  const designSpec = ref<DesignSpec | null>(null);
+  const specLock = ref<SpecLock | null>(null);
+  const svgPages = ref<Array<{ pageNumber: number; svg: string; speakerNotes: string }>>([]);
+  const selectedPromptId = ref<string>('');
   const currentGeneratingSlide = ref<string | null>(null);
   const generatedSlides = ref<Set<string>>(new Set());
   const isDataLoaded = ref(false);
@@ -76,22 +86,45 @@ export const useAgentStore = defineStore('agent', () => {
         slideCount: 6,
         tone: 'professional',
         imageStyle: 'flat',
-        template: 'business',
+        template: 'auto',
         skillIntensity: 70
       },
       outline: [],
       images: [],
-      exportArtifacts: []
+      exportArtifacts: [],
+      enabledSkillIds: [],
+      selectedPromptId: '',
+      activityLog: [],
+      steps: workflowSteps.map(s => ({ ...s })),
+      designSpec: null,
+      specLock: null,
+      svgPages: []
     };
   }
 
-  function snapshotProjectState(): PptProjectState {
+  function snapshotProjectState(options: { persistable?: boolean } = {}): PptProjectState {
+    const persistable = options.persistable ?? false;
     return {
       input: { ...input.value, files: [...input.value.files] },
       parameters: { ...parameters.value },
-      outline: outline.value.map(s => ({ ...s })),
-      images: images.value.map(img => ({ ...img })),
-      exportArtifacts: [...exportArtifacts.value]
+      outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
+      images: persistable
+        ? images.value.map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url }))
+        : images.value.map(img => ({ ...img })),
+      exportArtifacts: [...exportArtifacts.value],
+      enabledSkillIds: skills.value.filter(s => s.enabled).map(s => s.id),
+      selectedPromptId: selectedPromptId.value,
+      activityLog: [...activityLog.value],
+      steps: steps.value.map(s => ({ ...s })),
+      designSpec: designSpec.value,
+      specLock: specLock.value,
+      svgPages: persistable
+        ? svgPages.value.map(page => ({
+            pageNumber: page.pageNumber,
+            svg: '',
+            speakerNotes: page.speakerNotes
+          }))
+        : svgPages.value
     };
   }
 
@@ -101,14 +134,76 @@ export const useAgentStore = defineStore('agent', () => {
     outline.value = state.outline.map(s => ({ ...s }));
     images.value = state.images.map(img => ({ ...img }));
     exportArtifacts.value = [...state.exportArtifacts];
+
+    const savedSkillIds = new Set(state.enabledSkillIds || []);
+    skills.value = skills.value.map(s => ({
+      ...s,
+      enabled: savedSkillIds.has(s.id)
+    }));
+
+    selectedPromptId.value = state.selectedPromptId || '';
+
+    designSpec.value = state.designSpec || null;
+    specLock.value = state.specLock || null;
+    svgPages.value = state.svgPages || [];
+
+    if (state.activityLog && state.activityLog.length > 0) {
+      activityLog.value = [...state.activityLog];
+    } else {
+      activityLog.value = [];
+    }
+
+    if (state.steps && state.steps.length > 0) {
+      const restoredSteps = state.steps.map(s => ({ ...s }));
+      const currentStepIds = new Set(workflowSteps.map(s => s.id));
+      const restoredStepIds = new Set(restoredSteps.map(s => s.id));
+      if ([...currentStepIds].every(id => restoredStepIds.has(id))) {
+        steps.value = restoredSteps;
+      } else {
+        steps.value = workflowSteps.map(s => {
+          const existing = restoredSteps.find(rs => rs.id === s.id);
+          return existing || { ...s };
+        });
+      }
+    } else {
+      steps.value = workflowSteps.map(s => ({ ...s }));
+    }
   }
+
+  function syncToProject() {
+    if (!activePpt.value) return;
+    const state = snapshotProjectState();
+    activePpt.value.state = state;
+    activePpt.value.updatedAt = Date.now();
+
+    const projectId = parseInt(activePpt.value.id.replace(/\D/g, '') || '0', 10);
+    if (projectId > 0) {
+      projectApi.update(projectId, { state: snapshotProjectState({ persistable: true }) }).catch(() => {});
+    }
+  }
+
+  let inputSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  function debouncedSyncToProject() {
+    if (inputSyncTimer) clearTimeout(inputSyncTimer);
+    inputSyncTimer = setTimeout(() => {
+      syncToProject();
+    }, 300);
+  }
+
+  watch([input, parameters], () => {
+    if (activePpt.value) {
+      debouncedSyncToProject();
+    }
+  }, { deep: true });
 
   function mapTemplateToStyle(templateId: string): TemplateStyle {
     const template = templates.value.find(t => t.id === templateId);
-    if (!template) return 'business';
-    const cat = (template.category || '').toLowerCase();
-    if (cat.includes('教育') || cat.includes('培训') || cat.includes('education') || cat.includes('training') || cat.includes('course')) return 'education';
-    if (cat.includes('创意') || cat.includes('产品') || cat.includes('路演') || cat.includes('creative') || cat.includes('product') || cat.includes('pitch')) return 'creative';
+    if (!template) return 'auto';
+    const text = `${template.name} ${template.category || ''} ${template.description || ''}`.toLowerCase();
+    if (text.includes('教育') || text.includes('培训') || text.includes('课程') || text.includes('education') || text.includes('training') || text.includes('course')) return 'education';
+    if (text.includes('科技') || text.includes('技术') || text.includes('ai') || text.includes('tech')) return 'tech';
+    if (text.includes('金融') || text.includes('财务') || text.includes('finance')) return 'finance';
+    if (text.includes('创意') || text.includes('产品') || text.includes('路演') || text.includes('creative') || text.includes('product') || text.includes('pitch')) return 'creative';
     return 'business';
   }
 
@@ -123,17 +218,25 @@ export const useAgentStore = defineStore('agent', () => {
     step.progress = progress;
   }
 
+  function resetDownstreamSteps(afterStepId: WorkflowStepId) {
+    const stepOrder: WorkflowStepId[] = ['input', 'outline', 'images', 'layout', 'preview'];
+    const afterIndex = stepOrder.indexOf(afterStepId);
+    if (afterIndex === -1) return;
+    for (let i = afterIndex + 1; i < stepOrder.length; i++) {
+      const step = steps.value.find(s => s.id === stepOrder[i]);
+      if (step && step.status === 'done') {
+        step.status = 'idle';
+        step.progress = 0;
+      }
+    }
+  }
+
   function checkApiKeys(): boolean {
     const apiKeyStore = useApiKeyStore();
     const toastStore = useToastStore();
 
     if (!apiKeyStore.isTextModelConfigured) {
       toastStore.warning('文本模型未配置', '请先在设置中配置文本模型的 API Key');
-      return false;
-    }
-
-    if (!apiKeyStore.isImageModelConfigured) {
-      toastStore.warning('图像模型未配置', '请先在设置中配置图像模型的 API Key');
       return false;
     }
 
@@ -154,10 +257,8 @@ export const useAgentStore = defineStore('agent', () => {
 
   function addPptProject(data: { title: string; topic: string; description: string; templateId: string }) {
     const now = Date.now();
-    // Save current state to current project before creating a new one
     if (activePpt.value) {
-      activePpt.value.state = snapshotProjectState();
-      activePpt.value.updatedAt = now;
+      syncToProject();
     }
 
     const freshState = makeDefaultProjectState();
@@ -178,7 +279,6 @@ export const useAgentStore = defineStore('agent', () => {
 
     pptProjects.value = [project, ...pptProjects.value];
     activePptId.value = project.id;
-    // Restore the fresh project state into global refs
     restoreProjectState(freshState);
     pushLog(`已添加 PPT：${project.title}`);
   }
@@ -219,30 +319,69 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  function selectPptProject(id: string) {
-    const project = pptProjects.value.find((item) => item.id === id);
-    if (!project) return;
+  async function selectPptProject(id: string) {
+    if (activePpt.value && activePpt.value.id === id) return;
 
-    // Save current state to the previously active project
-    if (activePpt.value && activePpt.value.id !== id) {
-      activePpt.value.state = snapshotProjectState();
-      activePpt.value.updatedAt = Date.now();
+    if (activePpt.value) {
+      syncToProject();
+    }
+
+    const numericId = parseInt(id.replace(/\D/g, '') || '0', 10);
+    if (numericId > 0) {
+      try {
+        const response = await projectApi.getById(numericId);
+        if (response.success && response.data) {
+          const serverProject = response.data as any;
+          const projectState = serverProject.state
+            ? (typeof serverProject.state === 'string' ? JSON.parse(serverProject.state) : serverProject.state)
+            : null;
+
+          let project = pptProjects.value.find(p => p.id === id);
+          if (!project) {
+            project = {
+              id,
+              title: serverProject.title || '未命名 PPT',
+              topic: serverProject.topic || '',
+              description: serverProject.content || '',
+              templateId: 'auto',
+              createdAt: new Date(serverProject.created_at).getTime(),
+              updatedAt: new Date(serverProject.updated_at).getTime(),
+              state: projectState || makeDefaultProjectState()
+            };
+            pptProjects.value = [project, ...pptProjects.value];
+          } else {
+            if (projectState) {
+              project.state = projectState;
+            }
+            project.title = serverProject.title || project.title;
+            project.updatedAt = new Date(serverProject.updated_at).getTime();
+          }
+        }
+      } catch (error) {
+        console.error('加载项目状态失败', error);
+      }
+    }
+
+    const project = pptProjects.value.find(p => p.id === id);
+    if (!project) {
+      const freshProject: PptProject = {
+        id,
+        title: '未命名 PPT',
+        topic: '',
+        description: '',
+        templateId: 'auto',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        state: makeDefaultProjectState()
+      };
+      pptProjects.value = [freshProject, ...pptProjects.value];
+      activePptId.value = id;
+      restoreProjectState(freshProject.state);
+      return;
     }
 
     activePptId.value = id;
-    // Restore the selected project's state
     restoreProjectState(project.state);
-
-    // Also ensure topic/content stay in sync with project metadata
-    input.value = {
-      ...input.value,
-      topic: project.topic,
-      content: project.description
-    };
-    parameters.value = {
-      ...parameters.value,
-      template: mapTemplateToStyle(project.templateId)
-    };
   }
 
   function addSkill(data: Omit<SkillDefinition, 'id' | 'order' | 'enabled'> & { enabled?: boolean }) {
@@ -307,7 +446,8 @@ export const useAgentStore = defineStore('agent', () => {
     if (!slide) return;
     saveHistory();
     slide.layout = layout;
-    pushLog(`已调整版式：${slide.title} → ${layout}`);
+    pushLog(`已调整版式：${slide.title} -> ${layout}`);
+    syncToProject();
   }
 
   function reorderOutline(fromIndex: number, toIndex: number) {
@@ -317,7 +457,8 @@ export const useAgentStore = defineStore('agent', () => {
     const [moved] = items.splice(fromIndex, 1);
     items.splice(toIndex, 0, moved);
     outline.value = items;
-    pushLog(`已调整幻灯片顺序：第 ${fromIndex + 1} 页 → 第 ${toIndex + 1} 页`);
+    pushLog(`已调整幻灯片顺序：第 ${fromIndex + 1} 页 -> 第 ${toIndex + 1} 页`);
+    syncToProject();
   }
 
   function updateSlideTitle(id: string, title: string) {
@@ -326,6 +467,8 @@ export const useAgentStore = defineStore('agent', () => {
       saveHistory();
       slide.title = title;
       pushLog(`已更新页面标题：${title}`);
+      resetDownstreamSteps('outline');
+      syncToProject();
     }
   }
 
@@ -334,6 +477,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (slide && slide.bullets[bulletIndex] !== undefined) {
       saveHistory();
       slide.bullets[bulletIndex] = text;
+      syncToProject();
     }
   }
 
@@ -342,6 +486,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (slide) {
       saveHistory();
       slide.bullets.push('');
+      syncToProject();
     }
   }
 
@@ -350,6 +495,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (slide && slide.bullets.length > 1) {
       saveHistory();
       slide.bullets.splice(bulletIndex, 1);
+      syncToProject();
     }
   }
 
@@ -359,6 +505,7 @@ export const useAgentStore = defineStore('agent', () => {
     saveHistory();
     const [moved] = slide.bullets.splice(fromIndex, 1);
     slide.bullets.splice(toIndex, 0, moved);
+    syncToProject();
   }
 
   function updateSlideNotes(slideId: string, notes: string) {
@@ -366,6 +513,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (slide) {
       saveHistory();
       slide.speakerNotes = notes;
+      syncToProject();
     }
   }
 
@@ -375,7 +523,7 @@ export const useAgentStore = defineStore('agent', () => {
     const [moved] = items.splice(fromIndex, 1);
     items.splice(toIndex, 0, moved);
     skills.value = items.map((skill, index) => ({ ...skill, order: index + 1 }));
-    pushLog(`已调整 Skill 顺序`);
+    pushLog('已调整 Skill 顺序');
   }
 
   function globalSearch(query: string) {
@@ -436,7 +584,7 @@ export const useAgentStore = defineStore('agent', () => {
       outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] }))
     });
     outline.value = entry.outline.map(s => ({ ...s, bullets: [...s.bullets] }));
-    pushLog('撤销');
+    pushLog('鎾ら攢');
   }
 
   function redoOutline() {
@@ -446,7 +594,7 @@ export const useAgentStore = defineStore('agent', () => {
       outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] }))
     });
     outline.value = entry.outline.map(s => ({ ...s, bullets: [...s.bullets] }));
-    pushLog('重做');
+    pushLog('閲嶅仛');
   }
 
   // ---- Chat action execution ----
@@ -491,7 +639,7 @@ export const useAgentStore = defineStore('agent', () => {
         if (!isNaN(bIdx) && bIdx >= 0 && bIdx < slide.bullets.length) {
           slide.bullets.splice(bIdx, 1);
           outline.value = newOutline;
-          return `已删除要点`;
+          return '已删除要点';
         }
         return null;
       }
@@ -512,50 +660,43 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  // ---- Version management ----
-  const VERSIONS_KEY = 'nexious-ppt-versions';
   const MAX_VERSIONS = 30;
 
-  function getVersions(projectId: string): VersionSnapshot[] {
+  async function getVersions(projectId: string): Promise<VersionSnapshot[]> {
     try {
-      const data = localStorage.getItem(`${VERSIONS_KEY}-${projectId}`);
-      return data ? JSON.parse(data) : [];
+      const response = await versionApi.getAll(projectId);
+      return response.success && response.data ? response.data : [];
     } catch { return []; }
   }
 
-  function saveVersion(projectId: string, label?: string) {
-    const versions = getVersions(projectId);
-    const snapshot: VersionSnapshot = {
-      id: `v-${Date.now()}`,
-      projectId,
-      timestamp: Date.now(),
-      label: label || `版本 ${versions.length + 1}`,
-      outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
-      parameters: { ...parameters.value },
-      slideCount: outline.value.length
-    };
-    versions.unshift(snapshot);
-    if (versions.length > MAX_VERSIONS) versions.length = MAX_VERSIONS;
+  async function saveVersion(projectId: string, label?: string) {
     try {
-      localStorage.setItem(`${VERSIONS_KEY}-${projectId}`, JSON.stringify(versions));
+      await versionApi.save(projectId, {
+        label: label || `鐗堟湰 ${Date.now()}`,
+        outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
+        parameters: { ...parameters.value },
+        slideCount: outline.value.length
+      });
     } catch { /* ignore */ }
   }
 
-  function restoreVersion(projectId: string, versionId: string): boolean {
-    const versions = getVersions(projectId);
-    const version = versions.find(v => v.id === versionId);
-    if (!version) return false;
-    saveHistory();
-    outline.value = version.outline.map(s => ({ ...s, bullets: [...s.bullets] }));
-    parameters.value = { ...version.parameters };
-    pushLog(`已回滚到版本: ${version.label || versionId}`);
-    return true;
+  async function restoreVersion(projectId: string, versionId: string): Promise<boolean> {
+    try {
+      const versions = await getVersions(projectId);
+      const version = versions.find(v => v.id === versionId);
+      if (!version) return false;
+      saveHistory();
+      outline.value = version.outline.map(s => ({ ...s, bullets: [...s.bullets] }));
+      parameters.value = { ...version.parameters };
+      pushLog(`已回滚到版本：${version.label || versionId}`);
+      syncToProject();
+      return true;
+    } catch { return false; }
   }
 
-  function deleteVersion(projectId: string, versionId: string) {
-    const versions = getVersions(projectId).filter(v => v.id !== versionId);
+  async function deleteVersion(projectId: string, versionId: string) {
     try {
-      localStorage.setItem(`${VERSIONS_KEY}-${projectId}`, JSON.stringify(versions));
+      await versionApi.delete(projectId, versionId);
     } catch { /* ignore */ }
   }
 
@@ -567,145 +708,335 @@ export const useAgentStore = defineStore('agent', () => {
       ...input.value,
       content: [input.value.content, prompt.content].filter(Boolean).join('\n\n')
     };
-    pushLog(`已应用提示词：${prompt.title}`);
+      pushLog(`已应用提示词：${prompt.title}`);
+    syncToProject();
   }
 
-  async function runOutline() {
+  async function runStrategist() {
     if (!checkActivePpt() || !checkApiKeys()) return;
 
     activeStep.value = 'outline';
     setStepStatus('outline', 'running', 10);
+    resetDownstreamSteps('outline');
     streamingText.value = '';
-    pushLog('开始文本分析，生成 PPT 大纲。');
+    designSpec.value = null;
+    specLock.value = null;
+    outline.value = [];
+    images.value = [];
+    svgPages.value = [];
+    generatedSlides.value = new Set();
+    currentGeneratingSlide.value = null;
+    pushLog('正在生成大纲。');
 
     try {
-      outline.value = await analyzeDeckInput(input.value, parameters.value, {
-        onStart: (message) => {
-          pushLog(message);
-          setStepStatus('outline', 'running', 20);
+      const result = await aiApi.strategistStream(
+        {
+          topic: input.value.topic,
+          content: input.value.content,
+          tone: parameters.value.tone,
+          summaryLength: parameters.value.summaryLength,
+          imageStyle: parameters.value.imageStyle,
+          template: parameters.value.template || 'auto',
+          promptContent: undefined,
+          skills: [],
         },
-        onContent: (content) => {
-          streamingText.value += content;
-          const progress = Math.min(90, 20 + streamingText.value.length / 50);
-          setStepStatus('outline', 'running', progress);
-        },
-        onComplete: (data) => {
-          pushLog(`文本分析完成，生成 ${data.length} 页大纲。`);
-          setStepStatus('outline', 'done', 100);
-        },
-        onError: (message) => {
-          pushLog(`文本分析失败：${message}`);
-          setStepStatus('outline', 'idle', 0);
+        {
+          onStart: (message) => {
+            pushLog(message);
+            setStepStatus('outline', 'running', 20);
+          },
+          onContent: (content) => {
+            streamingText.value += content;
+            const progress = Math.min(90, 20 + streamingText.value.length / 100);
+            setStepStatus('outline', 'running', progress);
+          },
+          onComplete: (data) => {
+            const parsed = data as any;
+            designSpec.value = parsed.spec || null;
+            specLock.value = parsed.lock || null;
+
+            if (designSpec.value) {
+              outline.value = designSpec.value.outline.map(s => ({
+                id: s.id,
+                title: s.title,
+                bullets: s.bullets,
+                speakerNotes: s.speakerNotes,
+                visualPrompt: s.visualPrompt,
+                chartHint: s.chartHint,
+                layout: s.layout as SlideLayout,
+              }));
+            }
+
+            pushLog(`大纲生成完成，共 ${outline.value.length} 页。`);
+            setStepStatus('outline', 'done', 100);
+            streamingText.value = '';
+            syncToProject();
+          },
+          onError: (message) => {
+            pushLog(`大纲生成失败：${message}`);
+            setStepStatus('outline', 'idle', 0);
+            const toastStore = useToastStore();
+            toastStore.error('大纲生成失败', message);
+          },
         }
-      });
-      streamingText.value = '';
+      );
     } catch (error) {
       setStepStatus('outline', 'idle', 0);
-      pushLog('文本分析失败，请检查 API Key 配置。');
+      pushLog('大纲生成失败，请检查 API Key 配置。');
       throw error;
     }
+  }
+
+  const runOutline = runStrategist;
+
+  function needsImageGeneration(): boolean {
+    const slides = designSpec.value?.outline || outline.value;
+    return slides.some((slide: any) => slideNeedsImage(slide));
   }
 
   async function runImages() {
     if (!checkActivePpt() || !checkApiKeys()) return;
 
     if (outline.value.length === 0) {
-      await runOutline();
+      await runStrategist();
     }
     if (outline.value.length === 0) return;
 
     activeStep.value = 'images';
     setStepStatus('images', 'running', 0);
     generatedSlides.value = new Set();
-    pushLog('开始为每页生成候选插图。');
+    pushLog('开始按需生成图片。');
 
     try {
-      const generatedImages = await generateSlideImages(outline.value, parameters.value.imageStyle, {
-        onStart: (slideId, message) => {
-          currentGeneratingSlide.value = slideId;
-          pushLog(message);
-          const progress = Math.round((generatedSlides.value.size / outline.value.length) * 100);
-          setStepStatus('images', 'running', progress);
-        },
-        onComplete: (slideId, image) => {
-          generatedSlides.value.add(slideId);
-          currentGeneratingSlide.value = null;
-          const progress = Math.round((generatedSlides.value.size / outline.value.length) * 100);
-          setStepStatus('images', 'running', progress);
-        },
-        onError: (_slideId, message) => {
-          currentGeneratingSlide.value = null;
-          pushLog(`图片生成失败：${message}`);
-        },
-        onAllComplete: (allImages) => {
-          pushLog(`图像候选完成，共 ${allImages.length} 张。`);
-          setStepStatus('images', 'done', 100);
-        }
-      });
+      const slidesWithPrompt = designSpec.value
+        ? designSpec.value.outline
+        : outline.value.map((s, i) => ({
+            ...s,
+            pageNumber: i + 1,
+            visualPrompt: s.visualPrompt,
+            layout: s.layout || 'text-only',
+            rhythm: 'breathing' as const,
+          }));
+      const slidesRequiringImages = slidesWithPrompt.filter((slide) => slideNeedsImage(slide));
 
-      // Merge new images into existing: only replace when new image has a valid URL
-      const existingMap = new Map(images.value.map(img => [img.slideId, img]));
-      for (const genImg of generatedImages) {
-        if (genImg.url && !genImg.error) {
-          existingMap.set(genImg.slideId, genImg);
-        } else if (!existingMap.has(genImg.slideId)) {
-          existingMap.set(genImg.slideId, genImg);
-        }
+      if (slidesRequiringImages.length === 0) {
+        pushLog('本次不需要图片。');
+        setStepStatus('images', 'done', 100);
+        syncToProject();
+        return;
       }
-      images.value = Array.from(existingMap.values());
-      console.log('runImages - 生成的图片:', generatedImages.map(img => ({ slideId: img.slideId, url: img.url?.substring(0, 50), selected: img.selected })));
+
+      await generateSlideImages(
+        slidesRequiringImages.map(s => ({
+          id: s.id,
+          title: s.title,
+          bullets: [...s.bullets],
+          speakerNotes: s.speakerNotes || '',
+          visualPrompt: s.visualPrompt || [s.title, ...(s.bullets || [])].filter(Boolean).join('，'),
+        })),
+        parameters.value.imageStyle,
+        {
+          onStart: (slideId, message) => {
+            currentGeneratingSlide.value = slideId;
+            pushLog(message);
+          },
+          onComplete: (slideId, image) => {
+            if (slideId === '__progress__') {
+              const progress = (image as any)._progress || 0;
+              setStepStatus('images', 'running', progress);
+              return;
+            }
+            generatedSlides.value.add(slideId);
+            currentGeneratingSlide.value = null;
+
+            if (image.url && !image.error) {
+              const existingIdx = images.value.findIndex(img => img.slideId === slideId);
+              if (existingIdx >= 0) {
+                images.value[existingIdx] = image;
+              } else {
+                images.value = [...images.value, image];
+              }
+            }
+
+            const progress = Math.round((generatedSlides.value.size / slidesRequiringImages.length) * 100);
+            setStepStatus('images', 'running', progress);
+            pushLog(`图片完成：${image.title}，${generatedSlides.value.size}/${slidesRequiringImages.length}`);
+          },
+          onError: (_slideId, message) => {
+            currentGeneratingSlide.value = null;
+            pushLog(`图片生成失败：${message}`);
+          },
+          onAllComplete: () => {
+            pushLog(`图片生成完成，共 ${generatedSlides.value.size} 张。`);
+            setStepStatus('images', 'done', 100);
+            syncToProject();
+          }
+        }
+      );
     } catch (error) {
       setStepStatus('images', 'idle', 0);
-      pushLog('图像生成失败，请检查 API Key 配置。');
+      pushLog('图片生成失败，请检查 API Key 配置。');
       throw error;
     }
   }
 
-  async function runLayout() {
+  async function runExecutor() {
     if (!checkActivePpt()) return;
 
-    if (images.value.length === 0) {
-      await runImages();
+    if (!designSpec.value || !specLock.value) {
+      await runStrategist();
     }
-
-    console.log('runLayout - images:', images.value.map(img => ({ slideId: img.slideId, hasUrl: !!img.url, selected: img.selected })));
-    console.log('runLayout - selectedImages:', images.value.filter(img => img.selected).map(img => ({ slideId: img.slideId, hasUrl: !!img.url })));
-    console.log('runLayout - outline:', outline.value.map(s => ({ id: s.id, title: s.title })));
+    if (!designSpec.value || !specLock.value) return;
 
     activeStep.value = 'layout';
-    setStepStatus('layout', 'running', 30);
-    pushLog(`应用 ${parameters.value.template} 模板并生成版式。`);
+    isRunning.value = true;
+    setStepStatus('layout', 'running', 5);
+    pushLog('开始生成页面。');
+    svgPages.value = [];
 
-    // Apply template layout parameters to all slides
-    const { titleSize, bulletSize, imageRatio, preferredLayout } = applyTemplateLayoutParams(parameters.value.template, 'text-only');
+    try {
+      const totalPages = designSpec.value.outline.length;
 
-    // Auto-assign layout for slides that don't have one yet
-    const imageSlideIds = new Set(images.value.filter(img => img.selected && img.url).map(img => img.slideId));
-    let layoutAppliedCount = 0;
-    outline.value = outline.value.map(slide => {
-      const layout = slide.layout || 
-        (imageSlideIds.has(slide.id) ? preferredLayout : 'text-only');
-      if (!slide.layout) layoutAppliedCount++;
-      return {
-        ...slide,
-        layout: layout as import('@/types/agent').SlideLayout,
-        layoutParams: { titleSize, bulletSize, imageRatio }
-      };
-    });
-    if (layoutAppliedCount > 0) {
-      pushLog(`自动分配版式：${layoutAppliedCount} 页（模板推荐: ${preferredLayout}）。`);
+      for (let i = 0; i < totalPages; i++) {
+        const slide = designSpec.value.outline[i];
+        const progress = Math.round(((i) / totalPages) * 100);
+        setStepStatus('layout', 'running', progress);
+        pushLog(`正在生成第 ${slide.pageNumber} 页：${slide.title}`);
+
+        const imageForSlide = images.value.find(img =>
+          img.slideId === slide.id &&
+          img.selected &&
+          img.url &&
+          !img.url.startsWith('data:')
+        );
+        const imageUrl = imageForSlide?.url || undefined;
+
+        const spec = designSpec.value!;
+        const lock = specLock.value!;
+        const slimSpec = {
+          projectInfo: spec.projectInfo,
+          canvas: spec.canvas,
+          visualTheme: spec.visualTheme,
+          typography: spec.typography,
+          iconStyle: spec.iconStyle,
+          imageUsage: spec.imageUsage,
+          outline: [],
+          skillExtensions: [],
+        };
+        const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
+        const slimLock = {
+          colors: lock.colors,
+          typography: lock.typography,
+          iconStyle: lock.iconStyle,
+          imageStyle: lock.imageStyle,
+          canvas: lock.canvas,
+          pageRhythm: { [pageKey]: lock.pageRhythm[pageKey] },
+          pageLayouts: { [pageKey]: lock.pageLayouts[pageKey] },
+          pageCharts: lock.pageCharts[pageKey] ? { [pageKey]: lock.pageCharts[pageKey] } : {},
+          skillExtensions: [],
+          forbidden: (lock as any).forbidden || [
+            '<style>',
+            'class',
+            '<foreignObject>',
+            '<mask>',
+            'rgba()',
+            '@font-face',
+            '<animate>',
+            '<script>',
+            'gradient'
+          ],
+        };
+
+        try {
+          const svg = await aiApi.executorPageStream(
+            { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl },
+            {
+              onStart: () => {},
+              onContent: () => {},
+              onComplete: () => {},
+              onError: (message) => {
+                pushLog(`第 ${slide.pageNumber} 页 API 错误：${message}`);
+              },
+            }
+          );
+
+          if (!svg || !svg.includes('<svg')) {
+            throw new Error('AI 返回的 SVG 内容无效');
+          }
+
+          svgPages.value.push({
+            pageNumber: slide.pageNumber,
+            svg,
+            speakerNotes: slide.speakerNotes,
+          });
+
+          pushLog(`第 ${slide.pageNumber} 页生成完成。`);
+        } catch (pageError) {
+          const errMsg = pageError instanceof Error ? pageError.message : '未知错误';
+          pushLog(`第 ${slide.pageNumber} 页生成失败（${errMsg}），已使用备用页面。`);
+          svgPages.value.push({
+            pageNumber: slide.pageNumber,
+            svg: buildFallbackSvg(slide),
+            speakerNotes: slide.speakerNotes,
+          });
+        }
+      }
+
+      setStepStatus('layout', 'done', 100);
+      pushLog('页面生成完成。');
+      syncToProject();
+    } catch (error) {
+      setStepStatus('layout', 'idle', 0);
+      const errMsg = error instanceof Error ? error.message : '页面生成失败';
+      pushLog(`页面生成失败：${errMsg}`);
+      const toastStore = useToastStore();
+      toastStore.error('页面生成失败', errMsg);
+      throw error;
+    } finally {
+      isRunning.value = false;
     }
-
-    // Run enabled skills as part of layout processing
-    const activeSkills = enabledSkills.value;
-    if (activeSkills.length > 0) {
-      pushLog(`执行 ${activeSkills.length} 个 Skill（强度 ${parameters.value.skillIntensity}%）。`);
-      await runSkills();
-    }
-
-    setStepStatus('layout', 'done', 100);
-    pushLog('PPT 排版完成，可在预览区微调。');
   }
+
+  function buildFallbackSvg(slide: SpecSlide): string {
+    const spec = designSpec.value;
+    if (!spec) return '';
+    const { canvas, visualTheme, typography } = spec;
+    const { colors } = visualTheme;
+    const isCover = slide.layout === 'cover';
+    const isEnding = slide.layout === 'ending';
+
+    if (isCover) {
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}">
+  <rect width="${canvas.width}" height="${canvas.height}" fill="${colors.background}"/>
+  <rect x="0" y="${canvas.height * 0.35}" width="${canvas.width}" height="4" fill="${colors.accent}"/>
+  <text x="${canvas.width / 2}" y="${canvas.height * 0.45}" font-size="${typography.titleSize + 8}" fill="${colors.text}" text-anchor="middle" font-family="${typography.titleFamily}" font-weight="bold">${slide.title}</text>
+  <text x="${canvas.width / 2}" y="${canvas.height * 0.55}" font-size="${typography.bodySize}" fill="${colors.muted}" text-anchor="middle" font-family="${typography.bodyFamily}">${spec.projectInfo.occasion || ''}</text>
+</svg>`;
+    }
+
+    if (isEnding) {
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}">
+  <rect width="${canvas.width}" height="${canvas.height}" fill="${colors.background}"/>
+  <text x="${canvas.width / 2}" y="${canvas.height * 0.42}" font-size="${typography.titleSize + 12}" fill="${colors.text}" text-anchor="middle" font-family="${typography.titleFamily}" font-weight="bold">璋㈣阿</text>
+  <rect x="${canvas.width * 0.4}" y="${canvas.height * 0.5}" width="${canvas.width * 0.2}" height="3" fill="${colors.accent}"/>
+  <text x="${canvas.width / 2}" y="${canvas.height * 0.58}" font-size="${typography.bodySize}" fill="${colors.muted}" text-anchor="middle" font-family="${typography.bodyFamily}">${slide.title}</text>
+</svg>`;
+    }
+
+    const bulletLines = slide.bullets.map((b, i) =>
+      `<circle cx="100" cy="${canvas.height * 0.35 + i * 40}" r="4" fill="${colors.accent}"/><text x="116" y="${canvas.height * 0.35 + i * 40 + 5}" font-size="${typography.bodySize}" fill="${colors.text}" font-family="${typography.bodyFamily}">${b}</text>`
+    ).join('\n  ');
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}">
+  <rect width="${canvas.width}" height="${canvas.height}" fill="${colors.background}"/>
+  <rect x="0" y="0" width="6" height="${canvas.height}" fill="${colors.accent}"/>
+  <text x="60" y="80" font-size="${typography.titleSize}" fill="${colors.text}" font-family="${typography.titleFamily}" font-weight="bold">${slide.title}</text>
+  <rect x="60" y="96" width="80" height="3" fill="${colors.accent}" fill-opacity="0.5"/>
+  ${bulletLines}
+</svg>`;
+  }
+
+  const runLayout = runExecutor;
 
   async function runSkills() {
     if (!checkActivePpt()) return;
@@ -721,182 +1052,85 @@ export const useAgentStore = defineStore('agent', () => {
     pushLog(`开始执行 ${activeSkills.length} 个 Skill（强度 ${parameters.value.skillIntensity}%）。`);
 
     for (const skill of activeSkills) {
-      pushLog(`  → 执行 Skill：${skill.name}`);
+      pushLog(`执行 Skill：${skill.name}`);
 
-      if (skill.id === 'speaker-notes' || skill.name.includes('讲稿')) {
-        const style = (skill.params.style as string) || 'professional';
-        const length = (skill.params.length as string) || 'medium';
-        const maxItems = length === 'long' ? 5 : length === 'short' ? 2 : 3;
-        const verbosity = Math.round(intensity * maxItems);
+      try {
+        const slidesData = outline.value.map(s => ({
+          id: s.id,
+          title: s.title,
+          bullets: [...s.bullets],
+          speakerNotes: s.speakerNotes || ''
+        }));
 
-        outline.value = outline.value.map((slide, index) => {
-          const keyPoints = slide.bullets.slice(0, Math.max(2, verbosity));
-          const expandedNotes = keyPoints
-            .map((b, i) => {
-              const prefix = style === 'storytelling' ? ['开场故事引入：', '核心观点展开：', '案例佐证：'][i % 3] : ['要点阐述：', '数据支撑：', '行动建议：'][i % 3];
-              return `${prefix}${b}`;
-            })
-            .join('\n');
-
-          const nextTitle = outline.value[index + 1]?.title;
-          const transition = nextTitle ? `\n\n转场提示：以上内容结束后，自然过渡到"${nextTitle}"。` : '';
-          const existing = slide.speakerNotes ? `${slide.speakerNotes}\n\n---\n\n` : '';
-
-          return {
-            ...slide,
-            speakerNotes: `${existing}[${skill.name}] ${expandedNotes}${transition}`
-          };
-        });
-      }
-
-      if (skill.id === 'data-chart' || skill.name.includes('图表') || skill.name.includes('数据')) {
-        const chartTypes = ['bar', 'line', 'pie', 'radar', 'scatter'];
-        outline.value = outline.value.map((slide) => {
-          const fullText = `${slide.title} ${slide.bullets.join(' ')}`;
-          const hasNumbers = /\d+/.test(fullText);
-          const hasCompare = /对比|vs|同比|环比|增长|下降|变化|趋势|占比|比例/.test(fullText);
-          const hasPercent = /%|百分比/.test(fullText);
-
-          if (!hasNumbers) return slide;
-
-          let chartHint = slide.chartHint || '';
-          if (hasCompare) {
-            chartHint = chartHint || `建议图表类型: ${chartTypes[Math.floor(Math.random() * 2)]}对比图`;
-          } else if (hasPercent) {
-            chartHint = chartHint || `建议图表类型: 饼图或环形图`;
-          } else {
-            chartHint = chartHint || `建议图表类型: ${chartTypes[Math.floor(Math.random() * 3)]}趋势图`;
+        const result = await aiApi.runSkillStream(
+          {
+            skillId: skill.id,
+            skillName: skill.name,
+            slides: slidesData,
+            params: skill.params,
+            intensity: parameters.value.skillIntensity
+          },
+          {
+            onStart: (message) => {
+              pushLog(`    ${message}`);
+            },
+            onContent: () => {},
+            onComplete: () => {
+              pushLog(`Skill ${skill.name} AI 处理完成。`);
+            },
+            onError: (message) => {
+              pushLog(`Skill ${skill.name} 执行失败：${message}`);
+            }
           }
+        );
 
-          return { ...slide, chartHint };
-        });
-        pushLog(`    数据图表分析完成。`);
+        if (result?.result && Array.isArray(result.result)) {
+          const resultMap = new Map(result.result.map((item: any) => [item.slideId, item]));
+
+          outline.value = outline.value.map(slide => {
+            const aiResult = resultMap.get(slide.id);
+            if (!aiResult) return slide;
+
+            saveHistory();
+            const updated = { ...slide };
+
+            if (aiResult.speakerNotes && typeof aiResult.speakerNotes === 'string') {
+              updated.speakerNotes = aiResult.speakerNotes;
+            }
+
+            if (aiResult.chartHint && typeof aiResult.chartHint === 'string') {
+              updated.chartHint = aiResult.chartHint;
+            }
+
+            if (aiResult.title && typeof aiResult.title === 'string') {
+              updated.title = aiResult.title;
+            }
+
+            if (aiResult.bullets && Array.isArray(aiResult.bullets)) {
+              updated.bullets = aiResult.bullets;
+            }
+
+            if (aiResult.summary && typeof aiResult.summary === 'string') {
+              const existing = updated.speakerNotes || '';
+              updated.speakerNotes = existing
+                ? `${existing}\n\n[智能摘要] ${aiResult.summary}`
+                : `[智能摘要] ${aiResult.summary}`;
+            }
+
+            return updated;
+          });
+        }
+
+        pushLog(`Skill ${skill.name} 执行完成。`);
+      } catch (error) {
+        pushLog(`Skill ${skill.name} 执行异常：${error instanceof Error ? error.message : '未知错误'}`);
       }
 
-      if (skill.id === 'design-polish' || skill.name.includes('设计') || skill.name.includes('优化')) {
-        const level = (skill.params.level as string) || 'medium';
-        const trimThreshold = level === 'high' ? 12 : level === 'low' ? 20 : 16;
-
-        outline.value = outline.value.map((slide) => {
-          const polishedTitle = slide.title.length > trimThreshold
-            ? slide.title.slice(0, trimThreshold - 1) + '…'
-            : slide.title;
-
-          const polishedBullets = slide.bullets
-            .filter(b => b.trim().length > 0)
-            .slice(0, level === 'high' ? 4 : level === 'low' ? 6 : 5);
-
-          const notes = slide.speakerNotes || '';
-          const designNotes = level === 'high'
-            ? '\n\n[设计优化] 标题精简，要点聚焦。建议使用大号字体 + 留白布局。'
-            : level === 'medium'
-            ? '\n\n[设计优化] 内容结构已优化，要点数适中。'
-            : '';
-
-          return {
-            ...slide,
-            title: polishedTitle,
-            bullets: polishedBullets,
-            speakerNotes: notes + designNotes
-          };
-        });
-        pushLog(`    设计优化完成（等级: ${level}）。`);
-      }
-
-      if (skill.name.includes('摘要') || skill.name.includes('总结')) {
-        const maxLen = (skill.params.maxLength as number) || 200;
-        const count = Math.round(intensity * 3);
-        outline.value = outline.value.map(slide => {
-          const keyBullets = slide.bullets.slice(0, Math.max(1, count));
-          const summary = keyBullets.join('；');
-          const existing = slide.speakerNotes || '';
-          return {
-            ...slide,
-            speakerNotes: existing
-              ? `${existing}\n\n[智能摘要] 核心要点：${summary.slice(0, maxLen)}`
-              : `[智能摘要] 核心要点：${summary.slice(0, maxLen)}`
-          };
-        });
-        pushLog(`    智能摘要已生成。`);
-      }
-
-      if (skill.name.includes('配色') || skill.name.includes('调色')) {
-        outline.value = outline.value.map(slide => {
-          const notes = slide.speakerNotes || '';
-          return {
-            ...slide,
-            speakerNotes: notes
-              ? `${notes}\n\n[配色优化] 建议使用模板主题色 + 互补色强调重点数据。`
-              : `[配色优化] 建议使用模板主题色 + 互补色强调重点数据。`
-          };
-        });
-        pushLog(`    配色建议已添加。`);
-      }
-
-      if (skill.name.includes('表格') || skill.name.includes('美化')) {
-        outline.value = outline.value.map(slide => {
-          const hasData = /\d+[万亿千百]|[0-9]+%|同比|环比/.test(
-            `${slide.title} ${slide.bullets.join(' ')}`
-          );
-          const notes = slide.speakerNotes || '';
-          const hint = hasData
-            ? '\n\n[表格美化] 检测到数据内容，建议使用三线表 + 斑马条纹样式。'
-            : '';
-          return { ...slide, speakerNotes: notes + hint };
-        });
-        pushLog(`    表格美化建议已应用。`);
-      }
-
-      if (skill.name.includes('图标') || skill.name.includes('推荐')) {
-        outline.value = outline.value.map((slide, i) => {
-          const iconMap = ['🏢', '📊', '💡', '🚀', '🔧', '📈', '🎯', '⭐', '🌐', '✅'];
-          const icon = iconMap[i % iconMap.length];
-          const visuals = slide.visualPrompt || '';
-          return {
-            ...slide,
-            visualPrompt: visuals
-              ? `${visuals} + 搭配 ${icon} 风格图标`
-              : `搭配 ${icon} 风格图标装饰`
-          };
-        });
-        pushLog(`    图标推荐已添加。`);
-      }
-
-      if (skill.name.includes('思维导图') || skill.name.includes('脑图')) {
-        outline.value = outline.value.map(slide => {
-          const notes = slide.speakerNotes || '';
-          return {
-            ...slide,
-            speakerNotes: notes
-              ? `${notes}\n\n[思维导图] 可将本页要点转换为层级放射状思维导图。`
-              : `[思维导图] 可将本页要点转换为层级放射状思维导图。`
-          };
-        });
-        pushLog(`    思维导图提示已添加。`);
-      }
-
-      if (skill.name.includes('翻译')) {
-        pushLog(`    翻译助手已就绪（导出时可选多语言版本）。`);
-      }
-
-      if (skill.name.includes('动画')) {
-        outline.value = outline.value.map(slide => {
-          const notes = slide.speakerNotes || '';
-          return {
-            ...slide,
-            speakerNotes: notes
-              ? `${notes}\n\n[动画效果] 建议：标题淡入 → 要点逐条滑入 → 图片缩放进入。`
-              : `[动画效果] 建议：标题淡入 → 要点逐条滑入 → 图片缩放进入。`
-          };
-        });
-        pushLog(`    动画建议已添加。`);
-      }
-
-      // Simulate processing time for realism
-      await new Promise((resolve) => window.setTimeout(resolve, 120));
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
     }
 
     pushLog(`Skill 链路完成，共处理 ${activeSkills.length} 个 Skill。`);
+    syncToProject();
   }
 
   async function runFullWorkflow() {
@@ -912,7 +1146,7 @@ export const useAgentStore = defineStore('agent', () => {
         title: input.value.topic.trim(),
         topic: input.value.topic.trim(),
         description: input.value.content.trim() || '自动创建的 PPT 项目',
-        templateId: parameters.value.template || 'business'
+        templateId: parameters.value.template || 'auto'
       });
       
       toastStore.info('已创建 PPT 项目', `已自动创建项目：${input.value.topic.trim()}`);
@@ -921,7 +1155,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (!checkApiKeys()) return;
 
     if (isRunning.value) {
-      toastStore.warning('工作流正在运行中', '请等待当前任务完成');
+      toastStore.warning('正在生成', '请等待当前任务完成');
       return;
     }
 
@@ -930,13 +1164,33 @@ export const useAgentStore = defineStore('agent', () => {
     try {
       toastStore.info('开始生成 PPT', '正在处理，请稍候。');
 
-      await runOutline();
+      const imagesStep = steps.value.find(s => s.id === 'images');
+      await runStrategist();
+
       activeStep.value = 'images';
-      
-      await runImages();
+
+      if (!needsImageGeneration()) {
+        pushLog('本次不需要图片。');
+        setStepStatus('images', 'done', 100);
+      } else if (imagesStep && imagesStep.status !== 'done') {
+        const apiKeyStore = useApiKeyStore();
+        if (apiKeyStore.isImageModelConfigured) {
+          try {
+            await runImages();
+          } catch (imgError) {
+            pushLog(`图片生成失败（${imgError instanceof Error ? imgError.message : '未知错误'}），跳过图片继续生成页面。`);
+          }
+        } else {
+          pushLog('图像模型未配置，跳过图片生成。');
+          setStepStatus('images', 'done', 100);
+        }
+      } else {
+        pushLog('图片已完成，跳过图片生成。');
+      }
+
       activeStep.value = 'layout';
-      
-      await runLayout();
+      await runExecutor();
+
       activeStep.value = 'preview';
 
       toastStore.success('PPT 生成完成', '可以在预览区查看结果');
@@ -950,7 +1204,7 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function exportCurrentDeck(format: 'pptx' | 'pdf') {
-    if (!checkActivePpt() || !checkApiKeys()) return;
+    if (!checkActivePpt()) return;
 
     const toastStore = useToastStore();
 
@@ -961,21 +1215,37 @@ export const useAgentStore = defineStore('agent', () => {
 
     activeStep.value = 'preview';
     setStepStatus('preview', 'running', 40);
-    pushLog(`开始生成 ${format.toUpperCase()} 导出任务。`);
+    pushLog(`开始导出 ${format.toUpperCase()}。`);
 
     try {
-      const artifact =
-        format === 'pptx'
-          ? {
-              format,
-              name: await exportOutlineToPptx(outline.value, selectedImages.value, parameters.value),
-              status: 'ready' as const
-            }
-          : await exportDeck(format);
+      let artifact: ExportArtifact;
+
+      if (format === 'pptx') {
+        if (svgPages.value.length > 0 && designSpec.value) {
+          const fileName = await aiApi.exportPptx(
+            svgPages.value.map(p => ({ svg: p.svg, speakerNotes: p.speakerNotes })),
+            designSpec.value,
+            specLock.value || undefined
+          );
+          artifact = {
+            format,
+            name: fileName,
+            status: 'ready'
+          };
+        } else {
+          artifact = {
+            format,
+            name: await exportOutlineToPptx(outline.value, selectedImages.value, parameters.value),
+            status: 'ready'
+          };
+        }
+      } else {
+        artifact = await exportDeck(format);
+      }
       exportArtifacts.value = [artifact, ...exportArtifacts.value.filter((item) => item.format !== format)];
       setStepStatus('preview', 'done', 100);
-      pushLog(`${artifact.name} 已准备就绪。`);
-      toastStore.success('导出成功', `${artifact.name} 已准备就绪`);
+      pushLog(`${artifact.name} 已准备好。`);
+      toastStore.success('导出成功', `${artifact.name} 已准备好`);
     } catch (error) {
       setStepStatus('preview', 'idle', 0);
       toastStore.error('导出失败', error instanceof Error ? error.message : '未知错误');
@@ -988,6 +1258,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (skill) {
       skill.enabled = !skill.enabled;
       pushLog(`${skill.name} 已${skill.enabled ? '启用' : '停用'}。`);
+      syncToProject();
     }
   }
 
@@ -998,24 +1269,27 @@ export const useAgentStore = defineStore('agent', () => {
       image.slideId === target.slideId ? { ...image, selected: image.id === imageId } : image
     );
     pushLog(`已选择插图：${target.title}`);
+    syncToProject();
   }
 
   function attachFiles(files: FileList | null) {
     if (!files) return;
     input.value.files = Array.from(files).map((file) => file.name);
     pushLog(`已接收 ${input.value.files.length} 个资料文件。`);
+    syncToProject();
   }
 
   function addSampleOutline() {
     saveHistory();
     outline.value = [
-      { id: 'sample-1', title: '市场概况与行业趋势', bullets: ['全球市场规模及增长预测', '主要竞争对手分析', '行业技术演进路线', '政策与监管环境'], speakerNotes: '简要概述行业背景，引用权威数据来源支撑论点。', visualPrompt: '市场增长趋势图表', chartHint: '建议使用折线图展示增长趋势', layout: 'text-only' },
-      { id: 'sample-2', title: '核心产品与技术优势', bullets: ['产品架构与核心技术', '与竞品的差异化对比', '技术壁垒与专利布局', '产品路线图'], speakerNotes: '重点突出技术独特性，用对比表格展示差异化优势。', visualPrompt: '产品架构示意图', chartHint: '建议使用对比表格', layout: 'text-image' },
-      { id: 'sample-3', title: '商业模式与盈利分析', bullets: ['收入模型与定价策略', '成本结构与毛利分析', '客户获取成本与LTV', '盈亏平衡预测'], speakerNotes: '用数据说话，展示单位经济模型和长期盈利预期。', visualPrompt: '商业模式画布', chartHint: '建议使用柱状图展示收入构成', layout: 'image-text' },
-      { id: 'sample-4', title: '实施计划与里程碑', bullets: ['分阶段实施路线图', '关键里程碑与交付物', '资源需求与团队配置', '风险管理计划'], speakerNotes: '明确时间节点和可量化的交付标准，增强可信度。', visualPrompt: '项目甘特图', layout: 'text-only' },
-      { id: 'sample-5', title: '总结与展望', bullets: ['核心结论与关键数据', '未来发展方向', '合作建议与下一步行动'], speakerNotes: '总结核心观点，明确下一步行动计划和合作邀约。', visualPrompt: '未来愿景图示', layout: 'full-image' }
+      { id: 'sample-1', title: '市场概况与行业趋势', bullets: ['市场规模与增长预测', '主要竞争对手分析', '行业技术演进路线', '政策与监管环境'], speakerNotes: '简要介绍行业背景，用数据支撑核心判断。', visualPrompt: '市场增长趋势图表', chartHint: '建议使用折线图展示增长趋势', layout: 'text-only' },
+      { id: 'sample-2', title: '核心产品与技术优势', bullets: ['产品架构与核心技术', '与竞品的差异化对比', '技术壁垒与专利布局', '产品路线图'], speakerNotes: '突出技术独特性，用对比说明优势。', visualPrompt: '产品架构示意图', chartHint: '建议使用对比表格', layout: 'text-image' },
+      { id: 'sample-3', title: '商业模式与盈利分析', bullets: ['收入模型与定价策略', '成本结构与毛利分析', '客户获取成本与 LTV', '盈亏平衡预测'], speakerNotes: '用数据说明单位经济模型和长期盈利预期。', visualPrompt: '商业模式画布', chartHint: '建议使用柱状图展示收入构成', layout: 'image-text' },
+      { id: 'sample-4', title: '实施计划与里程碑', bullets: ['分阶段实施路线图', '关键里程碑与交付物', '资源需求与团队配置', '风险管理计划'], speakerNotes: '明确时间节点和可量化交付标准。', visualPrompt: '项目甘特图', layout: 'text-only' },
+      { id: 'sample-5', title: '总结与展望', bullets: ['核心结论与关键数据', '未来发展方向', '合作建议与下一步行动'], speakerNotes: '总结核心观点，明确下一步行动计划。', visualPrompt: '未来愿景图示', layout: 'full-image' }
     ];
-    pushLog('已加载示例大纲数据');
+    pushLog('已加载示例大纲数据。');
+    syncToProject();
   }
 
   async function fetchPrompts() {
@@ -1049,7 +1323,7 @@ export const useAgentStore = defineStore('agent', () => {
         }));
       }
     } catch (error) {
-      console.error('加载技能失败，使用默认数据:', error);
+      console.error('加载 Skill 失败，使用默认数据:', error);
     }
   }
 
@@ -1067,7 +1341,7 @@ export const useAgentStore = defineStore('agent', () => {
         }));
       }
     } catch (error) {
-      console.error('加载模板失败，使用默认数据:', error);
+      console.error('加载模板失败，使用默认数据', error);
     }
   }
 
@@ -1087,12 +1361,13 @@ export const useAgentStore = defineStore('agent', () => {
       addPptProject({
         title: input.value.topic.trim(),
         topic: input.value.topic.trim(),
-        description: input.value.content.trim() || '通过模版广场创建',
+        description: input.value.content.trim() || '通过模板广场创建',
         templateId
       });
     }
 
-    pushLog(`已应用模版：${template.name}（${template.category || '未分类'}）→ 样式: ${style}`);
+    pushLog(`已应用模板：${template.name}（${template.category || '未分类'}），样式：${style}`);
+    syncToProject();
   }
 
   async function saveWorkflow() {
@@ -1110,11 +1385,20 @@ export const useAgentStore = defineStore('agent', () => {
         input: { ...input.value, files: [] },
         parameters: { ...parameters.value },
         outline: outline.value.map(s => ({ ...s })),
-        images: images.value.map(img => ({ ...img })),
+        images: images.value.map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url })),
         skills: skills.value.map(s => ({ ...s, params: { ...s.params } })),
         pptProjects: pptProjects.value.map(p => ({
           ...p,
-          state: { ...p.state, input: { ...p.state.input, files: [] } }
+          state: {
+            ...p.state,
+            input: { ...p.state.input, files: [] },
+            images: (p.state.images || []).map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url })),
+            svgPages: (p.state.svgPages || []).map(page => ({
+              pageNumber: page.pageNumber,
+              svg: '',
+              speakerNotes: page.speakerNotes
+            }))
+          }
         })),
         activePptId: activePptId.value,
         steps: steps.value.map(s => ({ ...s })),
@@ -1149,7 +1433,17 @@ export const useAgentStore = defineStore('agent', () => {
         } : makeDefaultProjectState()
       }));
       activePptId.value = snapshot.activePptId || null;
-      steps.value = snapshot.steps || cloneSteps();
+      const restoredSteps = snapshot.steps || cloneSteps();
+      const currentStepIds = new Set(workflowSteps.map(s => s.id));
+      const restoredStepIds = new Set(restoredSteps.map((s: any) => s.id));
+      if ([...currentStepIds].every(id => restoredStepIds.has(id))) {
+        steps.value = restoredSteps;
+      } else {
+        steps.value = workflowSteps.map(s => {
+          const existing = restoredSteps.find((rs: any) => rs.id === s.id);
+          return existing || { ...s };
+        });
+      }
 
       // Restore active project state into global refs
       if (activePpt.value) {
@@ -1182,7 +1476,7 @@ export const useAgentStore = defineStore('agent', () => {
     await Promise.all([fetchPrompts(), fetchSkills(), fetchTemplates()]);
     isDataLoaded.value = true;
     if (restored) {
-      pushLog('已恢复上次保存的工作流数据');
+      pushLog('已恢复上次保存的工作流数据。');
     }
   }
 
@@ -1206,6 +1500,10 @@ export const useAgentStore = defineStore('agent', () => {
     activityLog,
     isRunning,
     streamingText,
+    designSpec,
+    specLock,
+    svgPages,
+    selectedPromptId,
     currentGeneratingSlide,
     generatedSlides,
     isDataLoaded,
@@ -1259,6 +1557,8 @@ export const useAgentStore = defineStore('agent', () => {
     saveWorkflow,
     restoreWorkflow,
     hasSavedWorkflow,
-    clearSavedWorkflow
+    clearSavedWorkflow,
+    syncToProject
   };
 });
+

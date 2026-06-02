@@ -1,5 +1,7 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
+import type { DesignSpec, SpecSlide, SpecLock, SkillExtension } from '../types/agent';
+
 interface ApiResponse<T = any> {
   success: boolean;
   data?: T;
@@ -299,6 +301,7 @@ export const projectApi = {
     content?: string;
     status?: 'draft' | 'generating' | 'completed';
     settings?: any;
+    state?: any;
   }) => api.put(`/api/projects/${id}`, data),
 
   delete: (id: number) => api.delete(`/api/projects/${id}`),
@@ -351,6 +354,7 @@ export interface GeneratedOutline {
   speakerNotes: string;
   visualPrompt: string;
   chartHint?: string;
+  layout?: string;
 }
 
 export interface GeneratedImage {
@@ -378,6 +382,7 @@ export const aiApi = {
     slideCount: number;
     tone: string;
     summaryLength?: string;
+    promptContent?: string;
   }) => api.post<GeneratedOutline[]>('/api/ai/generate-outline', data),
 
   generateImages: (data: {
@@ -396,6 +401,7 @@ export const aiApi = {
       slideCount: number;
       tone: string;
       summaryLength?: string;
+      promptContent?: string;
     },
     callbacks: StreamCallbacks
   ): Promise<GeneratedOutline[]> => {
@@ -417,7 +423,8 @@ export const aiApi = {
               bullets: item.bullets,
               speakerNotes: item.speakerNotes,
               visualPrompt: item.visualPrompt,
-              chartHint: item.chartHint
+              chartHint: item.chartHint,
+              layout: item.layout
             }));
             callbacks.onComplete?.(outline);
             resolve(outline);
@@ -492,7 +499,131 @@ export const aiApi = {
 
   testTextModel: () => api.post<{ success: boolean; message: string }>('/api/ai/test-text-model'),
 
-  testImageModel: () => api.post<{ success: boolean; message: string }>('/api/ai/test-image-model')
+  testImageModel: () => api.post<{ success: boolean; message: string }>('/api/ai/test-image-model'),
+
+  runSkillStream: async (
+    data: {
+      skillId: string;
+      skillName: string;
+      slides: Array<{ id: string; title: string; bullets: string[]; speakerNotes?: string }>;
+      params: Record<string, any>;
+      intensity: number;
+    },
+    callbacks: StreamCallbacks
+  ): Promise<{ skillId: string; skillName: string; result: any }> => {
+    return new Promise((resolve, reject) => {
+      api.stream(
+        '/api/ai/run-skill',
+        data,
+        (parsed) => {
+          if (parsed.status === 'start') {
+            callbacks.onStart?.(parsed.message);
+          } else if (parsed.content) {
+            callbacks.onContent?.(parsed.content);
+          } else if (parsed.status === 'complete') {
+            callbacks.onComplete?.(parsed.data);
+            resolve(parsed.data);
+          } else if (parsed.status === 'error') {
+            callbacks.onError?.(parsed.message);
+            reject(new Error(parsed.message));
+          }
+        },
+        (error) => {
+          callbacks.onError?.(error.message);
+          reject(error);
+        }
+      );
+    });
+  },
+
+  strategistStream: async (
+    data: {
+      topic: string;
+      content: string;
+      tone: string;
+      summaryLength: string;
+      imageStyle: string;
+      template: string;
+      promptContent?: string;
+      skills: Array<{ id: string; name: string; instruction?: string }>;
+    },
+    callbacks: StreamCallbacks
+  ): Promise<{ spec: DesignSpec; lock: SpecLock }> => {
+    return new Promise((resolve, reject) => {
+      api.stream(
+        '/api/generate/strategist',
+        data,
+        (parsed) => {
+          if (parsed.status === 'start') {
+            callbacks.onStart?.(parsed.message);
+          } else if (parsed.content) {
+            callbacks.onContent?.(parsed.content);
+          } else if (parsed.status === 'complete') {
+            callbacks.onComplete?.(parsed.data);
+            resolve(parsed.data);
+          } else if (parsed.status === 'error') {
+            callbacks.onError?.(parsed.message);
+            reject(new Error(parsed.message));
+          }
+        },
+        (error) => {
+          callbacks.onError?.(error.message);
+          reject(error);
+        }
+      );
+    });
+  },
+
+  executorPageStream: async (
+    data: { spec: DesignSpec; lock: SpecLock; slide: SpecSlide; imageUrl?: string },
+    callbacks: StreamCallbacks
+  ): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      api.stream(
+        '/api/generate/executor-page',
+        data,
+        (parsed) => {
+          if (parsed.status === 'start') {
+            callbacks.onStart?.(parsed.message);
+          } else if (parsed.content) {
+            callbacks.onContent?.(parsed.content);
+          } else if (parsed.status === 'complete') {
+            const svg = parsed.data?.svg || '';
+            callbacks.onComplete?.(svg);
+            resolve(svg);
+          } else if (parsed.status === 'error') {
+            callbacks.onError?.(parsed.message);
+            reject(new Error(parsed.message));
+          }
+        },
+        (error) => {
+          callbacks.onError?.(error.message);
+          reject(error);
+        }
+      );
+    });
+  },
+
+  exportPptx: async (pages: Array<{ svg: string; speakerNotes: string }>, spec: DesignSpec, lock?: SpecLock): Promise<string> => {
+    const response = await fetch(`${API_BASE_URL}/api/generate/export-pptx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pages, spec, lock }),
+    });
+    if (!response.ok) throw new Error('导出失败');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || `nexious-deck-${Date.now()}.pptx`;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return fileName;
+  }
 };
 
 export interface Prompt {
@@ -659,4 +790,14 @@ export const workflowApi = {
   restore: () => api.get<{ snapshotData: any; savedAt: string }>('/api/workflows/restore'),
 
   clear: () => api.delete('/api/workflows')
+};
+
+export const versionApi = {
+  getAll: (projectId: string) => api.get<any[]>(`/api/versions/${projectId}`),
+
+  save: (projectId: string, data: { label?: string; outline: any[]; parameters: any; slideCount: number }) =>
+    api.post(`/api/versions/${projectId}`, data),
+
+  delete: (projectId: string, versionId: string) =>
+    api.delete(`/api/versions/${projectId}/${versionId}`)
 };

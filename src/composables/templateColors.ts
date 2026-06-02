@@ -16,6 +16,18 @@ export interface TemplateColorScheme {
  * Expanded template configs — colors + layout parameters.
  */
 export const TEMPLATE_COLORS: Record<string, TemplateColorScheme> = {
+  auto: {
+    bg: '#F7F8F5',
+    panel: '#FFFFFF',
+    accent: '#C9A227',
+    text: '#172026',
+    muted: '#66757F',
+    titleSize: 28,
+    bulletSize: 14,
+    imageRatio: 0.5,
+    padding: 40,
+    preferredLayout: 'text-only'
+  },
   business: {
     bg: '#070A0E',
     panel: '#111820',
@@ -94,7 +106,7 @@ export const TEMPLATE_COLORS: Record<string, TemplateColorScheme> = {
  * Get a color scheme for a given template style, falling back to business.
  */
 export function getTemplateColors(template?: string): TemplateColorScheme {
-  return TEMPLATE_COLORS[template || 'business'] || TEMPLATE_COLORS.business;
+  return TEMPLATE_COLORS[template || 'auto'] || TEMPLATE_COLORS.auto;
 }
 
 /**

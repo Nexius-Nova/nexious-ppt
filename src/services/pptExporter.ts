@@ -1,6 +1,13 @@
 import type { AgentParameters, GeneratedImage, SlideOutline } from '@/types/agent';
 
 const templateColors: Record<AgentParameters['template'], { bg: string; panel: string; accent: string; text: string; muted: string }> = {
+  auto: {
+    bg: 'F7F8F5',
+    panel: 'FFFFFF',
+    accent: 'C9A227',
+    text: '172026',
+    muted: '66757F'
+  },
   business: {
     bg: '070A0E',
     panel: '111820',
@@ -21,6 +28,20 @@ const templateColors: Record<AgentParameters['template'], { bg: string; panel: s
     accent: 'BCE1FF',
     text: 'F5F7FA',
     muted: 'AAB6C2'
+  },
+  tech: {
+    bg: 'F4F7F7',
+    panel: 'FFFFFF',
+    accent: 'C28B2C',
+    text: '172326',
+    muted: '607176'
+  },
+  finance: {
+    bg: 'F8F6F1',
+    panel: 'FFFFFF',
+    accent: 'B08A32',
+    text: '211F1B',
+    muted: '6F6B63'
   }
 };
 

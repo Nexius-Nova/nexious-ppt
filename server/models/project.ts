@@ -35,6 +35,7 @@ export interface UpdateProjectData {
   content?: string;
   status?: 'draft' | 'generating' | 'completed';
   settings?: any;
+  state?: any;
 }
 
 /**
@@ -117,6 +118,10 @@ export async function updateProject(id: number, data: UpdateProjectData): Promis
   if (data.settings !== undefined) {
     fields.push('settings = ?');
     values.push(JSON.stringify(data.settings));
+  }
+  if (data.state !== undefined) {
+    fields.push('state = ?');
+    values.push(JSON.stringify(data.state));
   }
 
   if (fields.length === 0) {

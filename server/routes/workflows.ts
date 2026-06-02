@@ -15,6 +15,7 @@ router.post('/save', async (req: AuthRequest, res: Response) => {
     }
 
     const userId = req.userId || DEFAULT_USER_ID;
+    const compactSnapshot = compactWorkflowSnapshot(snapshotData);
 
     const existing = await query(
       'SELECT id FROM workflow_snapshots WHERE user_id = ?',
@@ -24,12 +25,12 @@ router.post('/save', async (req: AuthRequest, res: Response) => {
     if (existing.length > 0) {
       await update(
         'UPDATE workflow_snapshots SET snapshot_data = ?, updated_at = NOW() WHERE user_id = ?',
-        [JSON.stringify(snapshotData), userId]
+        [JSON.stringify(compactSnapshot), userId]
       );
     } else {
       await insert(
         'INSERT INTO workflow_snapshots (user_id, snapshot_data) VALUES (?, ?)',
-        [userId, JSON.stringify(snapshotData)]
+        [userId, JSON.stringify(compactSnapshot)]
       );
     }
 
@@ -39,6 +40,46 @@ router.post('/save', async (req: AuthRequest, res: Response) => {
     res.status(500).json({ success: false, message: '保存工作流数据失败' });
   }
 });
+
+function compactWorkflowSnapshot(snapshotData: any) {
+  const compactState = (state: any) => {
+    if (!state || typeof state !== 'object') return state;
+    return {
+      ...state,
+      input: state.input ? { ...state.input, files: [] } : state.input,
+      images: Array.isArray(state.images)
+        ? state.images.map((image: any) => ({
+            ...image,
+            url: typeof image.url === 'string' && image.url.startsWith('data:') ? '' : image.url,
+          }))
+        : state.images,
+      svgPages: Array.isArray(state.svgPages)
+        ? state.svgPages.map((page: any) => ({
+            pageNumber: page.pageNumber,
+            svg: '',
+            speakerNotes: page.speakerNotes || '',
+          }))
+        : [],
+    };
+  };
+
+  return {
+    ...snapshotData,
+    input: snapshotData.input ? { ...snapshotData.input, files: [] } : snapshotData.input,
+    images: Array.isArray(snapshotData.images)
+      ? snapshotData.images.map((image: any) => ({
+          ...image,
+          url: typeof image.url === 'string' && image.url.startsWith('data:') ? '' : image.url,
+        }))
+      : snapshotData.images,
+    pptProjects: Array.isArray(snapshotData.pptProjects)
+      ? snapshotData.pptProjects.map((project: any) => ({
+          ...project,
+          state: compactState(project.state),
+        }))
+      : snapshotData.pptProjects,
+  };
+}
 
 router.get('/restore', async (req: AuthRequest, res: Response) => {
   try {

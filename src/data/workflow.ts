@@ -3,36 +3,36 @@ import type { PromptDefinition, PptTemplate, SkillDefinition, WorkflowStep } fro
 export const workflowSteps: WorkflowStep[] = [
   {
     id: 'input',
-    title: '输入',
-    description: '填写主题和内容，选择提示词与技能',
+    title: '资料',
+    description: '准备主题和内容',
     status: 'idle',
     progress: 0
   },
   {
     id: 'outline',
-    title: '文本分析',
-    description: 'AI 自动生成 PPT 大纲',
+    title: '大纲',
+    description: '整理页面结构',
     status: 'idle',
     progress: 0
   },
   {
     id: 'images',
-    title: '图像生成',
-    description: '根据每页内容生成插图',
+    title: '图片',
+    description: '按需生成图片',
     status: 'idle',
     progress: 0
   },
   {
     id: 'layout',
-    title: '排版 & Skill',
-    description: '选择模板、版式，运行 Skill 处理',
+    title: '页面',
+    description: '生成页面预览',
     status: 'idle',
     progress: 0
   },
   {
     id: 'preview',
-    title: '预览 & 导出',
-    description: '实时查看微调 PPT，一键导出',
+    title: '导出',
+    description: '导出 PPTX',
     status: 'idle',
     progress: 0
   }
@@ -42,7 +42,7 @@ export const defaultSkills: SkillDefinition[] = [
   {
     id: 'speaker-notes',
     name: '讲稿生成',
-    description: '自动生成每页演讲稿，并补充自然转场。',
+    description: '辅助生成每页演讲备注与自然转场。',
     enabled: true,
     order: 1,
     params: {
@@ -53,7 +53,7 @@ export const defaultSkills: SkillDefinition[] = [
   {
     id: 'data-chart',
     name: '数据图表',
-    description: '识别数据表达机会，生成适合演示的图表建议。',
+    description: '识别数据表达机会，形成图表建议。',
     enabled: false,
     order: 2,
     params: {
@@ -64,7 +64,7 @@ export const defaultSkills: SkillDefinition[] = [
   {
     id: 'design-polish',
     name: '设计优化',
-    description: '优化标题层级、页面节奏和视觉重点。',
+    description: '优化页面节奏、层级和视觉重点。',
     enabled: false,
     order: 3,
     params: {

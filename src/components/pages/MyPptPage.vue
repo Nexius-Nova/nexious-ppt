@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { Plus, Search, Trash2, Edit3, Copy, FileText, Clock, Calendar, Check, CheckSquare, Square } from 'lucide-vue-next';
-import UiCard from '@/components/ui/UiCard.vue';
+import { Plus, Search, Trash2, FileText, Clock, Calendar, Check } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
-import UiAlert from '@/components/ui/UiAlert.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
 import { projectApi, type Project } from '@/services/api';
@@ -24,10 +22,6 @@ const projectToDelete = ref<Project | null>(null);
 const showCreateModal = ref(false);
 const newProjectTitle = ref('');
 
-// Batch selection
-const selectedIds = ref<Set<number>>(new Set());
-const showBatchDeleteModal = ref(false);
-
 const filteredProjects = computed(() => {
   if (!searchQuery.value) return projects.value;
   const query = searchQuery.value.toLowerCase();
@@ -35,10 +29,6 @@ const filteredProjects = computed(() => {
     p.title.toLowerCase().includes(query) ||
     p.topic?.toLowerCase().includes(query)
   );
-});
-
-const allFilteredSelected = computed(() => {
-  return filteredProjects.value.length > 0 && filteredProjects.value.every(p => selectedIds.value.has(p.id));
 });
 
 const stats = computed(() => ({
@@ -116,13 +106,9 @@ async function confirmDelete() {
   }
 }
 
-function editProject(project: Project) {
+function openProject(project: Project) {
   agentStore.selectPptProject(String(project.id));
   router.push(`/project/${project.id}`);
-}
-
-function duplicateProject(project: Project) {
-  toastStore.info('复制项目', '功能开发中...');
 }
 
 function getStatusBadge(tone: 'draft' | 'generating' | 'completed') {
@@ -146,65 +132,6 @@ function formatDate(dateStr: string) {
 onMounted(() => {
   fetchProjects();
 });
-
-// ---- Batch operations ----
-function toggleSelect(id: number) {
-  const next = new Set(selectedIds.value);
-  if (next.has(id)) next.delete(id); else next.add(id);
-  selectedIds.value = next;
-}
-
-function toggleSelectAll() {
-  if (allFilteredSelected.value) {
-    selectedIds.value = new Set();
-  } else {
-    selectedIds.value = new Set(filteredProjects.value.map(p => p.id));
-  }
-}
-
-async function batchDelete() {
-  showBatchDeleteModal.value = false;
-  const ids = Array.from(selectedIds.value);
-  if (ids.length === 0) return;
-
-  loading.value = true;
-  try {
-    let successCount = 0;
-    for (const id of ids) {
-      const response = await projectApi.delete(id);
-      if (response.success) successCount++;
-    }
-    toastStore.success('批量删除完成', `成功删除 ${successCount} 个项目`);
-    selectedIds.value = new Set();
-    await fetchProjects();
-  } catch (error) {
-    toastStore.error('批量删除失败', error instanceof Error ? error.message : '未知错误');
-  } finally {
-    loading.value = false;
-  }
-}
-
-function getSampleProjects() {
-  const samples = [
-    { title: '智能硬件品牌年度增长计划', topic: '智能硬件行业年度战略规划' },
-    { title: 'Q2 产品发布路演', topic: '新产品发布与市场推广策略' },
-    { title: '团队季度工作复盘', topic: '研发团队季度总结与规划' }
-  ];
-  let created = 0;
-  for (const s of samples) {
-    if (!projects.value.find(p => p.title === s.title)) {
-      // Add via the API
-      projectApi.create({ title: s.title, topic: s.topic, status: 'draft' });
-      created++;
-    }
-  }
-  if (created > 0) {
-    setTimeout(fetchProjects, 500);
-    toastStore.success('已添加示例项目', `添加了 ${created} 个示例`);
-  } else {
-    toastStore.info('示例项目已存在', '无需重复添加');
-  }
-}
 </script>
 
 <template>
@@ -267,25 +194,6 @@ function getSampleProjects() {
       />
     </div>
 
-    <!-- Batch toolbar -->
-    <Transition name="slide-fade">
-      <div v-if="selectedIds.size > 0" class="batch-bar">
-        <span class="batch-bar__info">
-          <CheckSquare :size="14" />
-          已选 {{ selectedIds.size }} 项
-        </span>
-        <div class="batch-bar__actions">
-          <UiButton size="sm" variant="danger" @click="showBatchDeleteModal = true">
-            <Trash2 :size="13" />
-            批量删除
-          </UiButton>
-          <UiButton size="sm" variant="ghost" @click="selectedIds = new Set()">
-            取消选择
-          </UiButton>
-        </div>
-      </div>
-    </Transition>
-
     <div v-if="loading && projects.length === 0" class="loading-state">
       加载中...
     </div>
@@ -293,16 +201,12 @@ function getSampleProjects() {
     <div v-else-if="filteredProjects.length === 0 && !loading" class="empty-state">
       <UiEmpty
         :title="searchQuery ? '未找到匹配项目' : '还没有项目'"
-        :description="searchQuery ? '尝试其他搜索词' : '创建您的第一个 PPT 项目，或使用示例数据快速开始'"
+        :description="searchQuery ? '尝试其他搜索词' : '创建您的第一个 PPT 项目'"
       >
         <div v-if="!searchQuery" class="empty-actions">
           <UiButton @click="showCreateModal = true">
             <Plus :size="14" />
             新建项目
-          </UiButton>
-          <UiButton variant="secondary" @click="getSampleProjects">
-            <FileText :size="14" />
-            使用示例数据
           </UiButton>
         </div>
       </UiEmpty>
@@ -313,22 +217,14 @@ function getSampleProjects() {
         v-for="project in filteredProjects"
         :key="project.id"
         class="project-card"
+        @click="openProject(project)"
       >
         <div class="project-card__header">
-          <button class="card-checkbox" @click.stop="toggleSelect(project.id)">
-            <component :is="selectedIds.has(project.id) ? CheckSquare : Square" :size="16" />
-          </button>
           <div class="project-card__icon">
             <FileText :size="20" />
           </div>
           <div class="project-card__actions">
-            <button class="action-btn" title="编辑" @click="editProject(project)">
-              <Edit3 :size="14" />
-            </button>
-            <button class="action-btn" title="复制" @click="duplicateProject(project)">
-              <Copy :size="14" />
-            </button>
-            <button class="action-btn action-btn--danger" title="删除" @click="deleteProject(project)">
+            <button class="action-btn action-btn--danger" title="删除" @click.stop="deleteProject(project)">
               <Trash2 :size="14" />
             </button>
           </div>
@@ -390,25 +286,6 @@ function getSampleProjects() {
             <UiButton variant="secondary" @click="showDeleteModal = false">取消</UiButton>
             <UiButton variant="danger" :disabled="loading" @click="confirmDelete">
               删除
-            </UiButton>
-          </div>
-        </div>
-      </div>
-
-      <!-- Batch delete confirmation -->
-      <div v-if="showBatchDeleteModal" class="modal-overlay" @click.self="showBatchDeleteModal = false">
-        <div class="modal">
-          <div class="modal__header">
-            <h3>批量删除</h3>
-            <button class="modal__close" @click="showBatchDeleteModal = false">×</button>
-          </div>
-          <div class="modal__body">
-            <p>确定要删除选中的 {{ selectedIds.size }} 个项目吗？此操作不可撤销。</p>
-          </div>
-          <div class="modal__footer">
-            <UiButton variant="secondary" @click="showBatchDeleteModal = false">取消</UiButton>
-            <UiButton variant="danger" :disabled="loading" @click="batchDelete">
-              删除 {{ selectedIds.size }} 项
             </UiButton>
           </div>
         </div>
@@ -479,22 +356,22 @@ function getSampleProjects() {
 }
 
 .stat-card--total .stat-card__icon {
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  background: #2563eb;
   color: white;
 }
 
 .stat-card--draft .stat-card__icon {
-  background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%);
+  background: #64748b;
   color: white;
 }
 
 .stat-card--generating .stat-card__icon {
-  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  background: #d97706;
   color: white;
 }
 
 .stat-card--completed .stat-card__icon {
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  background: #059669;
   color: white;
 }
 
@@ -557,67 +434,6 @@ function getSampleProjects() {
   margin-top: 8px;
 }
 
-/* Batch bar */
-.batch-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 16px;
-  border: 1px solid var(--color-accent);
-  border-radius: 10px;
-  background: var(--color-accent-soft);
-}
-
-.batch-bar__info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--color-accent);
-}
-
-.batch-bar__actions {
-  display: flex;
-  gap: 6px;
-}
-
-/* Card checkbox */
-.card-checkbox {
-  display: grid;
-  place-items: center;
-  background: transparent;
-  border: none;
-  color: var(--color-muted);
-  cursor: pointer;
-  padding: 2px;
-  border-radius: 4px;
-  transition: color var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.card-checkbox:hover {
-  color: var(--color-accent);
-}
-
-.project-card__header {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-/* Slide fade transition */
-.slide-fade-enter-active,
-.slide-fade-leave-active {
-  transition: all 0.2s ease;
-}
-
-.slide-fade-enter-from,
-.slide-fade-leave-to {
-  opacity: 0;
-  transform: translateY(-8px);
-}
-
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -631,12 +447,14 @@ function getSampleProjects() {
   border-radius: 12px;
   background: var(--color-surface);
   padding: 16px;
+  cursor: pointer;
   transition: all var(--transition-fast);
 }
 
 .project-card:hover {
-  border-color: var(--color-border-strong);
+  border-color: var(--color-accent);
   box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
 .project-card__header {

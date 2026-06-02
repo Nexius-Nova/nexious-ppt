@@ -205,7 +205,7 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { title, topic, content, status, settings } = req.body;
+    const { title, topic, content, status, settings, state } = req.body;
     const updateData: any = {};
 
     if (title !== undefined) updateData.title = title;
@@ -213,6 +213,7 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     if (content !== undefined) updateData.content = content;
     if (status !== undefined) updateData.status = status;
     if (settings !== undefined) updateData.settings = settings;
+    if (state !== undefined) updateData.state = compactProjectState(state);
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({
@@ -628,3 +629,24 @@ router.post('/:projectId/slides/:slideId/images/:imageId/select', authMiddleware
 });
 
 export default router;
+
+function compactProjectState(state: any) {
+  if (!state || typeof state !== 'object') return state;
+  return {
+    ...state,
+    input: state.input ? { ...state.input, files: [] } : state.input,
+    images: Array.isArray(state.images)
+      ? state.images.map((image: any) => ({
+          ...image,
+          url: typeof image.url === 'string' && image.url.startsWith('data:') ? '' : image.url,
+        }))
+      : state.images,
+    svgPages: Array.isArray(state.svgPages)
+      ? state.svgPages.map((page: any) => ({
+          pageNumber: page.pageNumber,
+          svg: '',
+          speakerNotes: page.speakerNotes || '',
+        }))
+      : [],
+  };
+}

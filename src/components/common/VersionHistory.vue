@@ -21,9 +21,9 @@ onMounted(() => {
   loadVersions();
 });
 
-function loadVersions() {
+async function loadVersions() {
   if (!activePpt.value) return;
-  versions.value = store.getVersions(activePpt.value.id);
+  versions.value = await store.getVersions(activePpt.value.id);
 }
 
 function toggle() {
@@ -41,9 +41,9 @@ function formatTime(ts: number) {
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-function doRestore(versionId: string) {
+async function doRestore(versionId: string) {
   if (!activePpt.value) return;
-  const success = store.restoreVersion(activePpt.value.id, versionId);
+  const success = await store.restoreVersion(activePpt.value.id, versionId);
   if (success) {
     toastStore.success('已回滚', '大纲和参数已恢复到所选版本');
     confirmRestoreId.value = null;
@@ -53,9 +53,9 @@ function doRestore(versionId: string) {
   }
 }
 
-function doDelete(versionId: string) {
+async function doDelete(versionId: string) {
   if (!activePpt.value) return;
-  store.deleteVersion(activePpt.value.id, versionId);
+  await store.deleteVersion(activePpt.value.id, versionId);
   loadVersions();
   toastStore.info('已删除版本');
 }

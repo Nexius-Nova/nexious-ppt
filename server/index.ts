@@ -16,18 +16,35 @@ import skillRoutes from './routes/skills.js';
 import templateRoutes from './routes/templates.js';
 import configRoutes from './routes/configs.js';
 import workflowRoutes from './routes/workflows.js';
+import versionRoutes from './routes/versions.js';
+import generateRoutes from './routes/generate.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const allowedOrigins = new Set(
+  [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    ...(process.env.CORS_ORIGINS?.split(',').map((origin) => origin.trim()).filter(Boolean) || []),
+  ]
+);
+const localDevOriginPattern = /^http:\/\/(?:localhost|127\.0\.0\.1):\d+$/;
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin) || localDevOriginPattern.test(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`CORS origin not allowed: ${origin}`));
+  },
   credentials: true
 }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '150mb' }));
+app.use(express.urlencoded({ extended: true, limit: '150mb' }));
 
 app.get('/health', (req, res) => {
   res.json({
@@ -93,6 +110,8 @@ app.use('/api/skills', skillRoutes);
 app.use('/api/templates', templateRoutes);
 app.use('/api/configs', configRoutes);
 app.use('/api/workflows', workflowRoutes);
+app.use('/api/versions', versionRoutes);
+app.use('/api/generate', generateRoutes);
 
 app.use((req, res) => {
   res.status(404).json({
@@ -119,10 +138,19 @@ async function startServer() {
       process.exit(1);
     }
 
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`🚀 服务器运行在 http://localhost:${PORT}`);
       console.log(`📡 API 文档: http://localhost:${PORT}/api`);
       console.log(`💚 健康检查: http://localhost:${PORT}/health`);
+    });
+
+    server.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`Port ${PORT} is already in use. Stop the existing server or set a different PORT in .env.`);
+        process.exit(1);
+      }
+
+      throw error;
     });
   } catch (error) {
     console.error('❌ 服务器启动失败:', error);
