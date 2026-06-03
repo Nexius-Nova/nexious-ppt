@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { Loader2 } from 'lucide-vue-next';
 import { renderSvgToPng } from '@/services/svgRenderer';
 
 const props = defineProps<{
@@ -23,22 +22,10 @@ const currentNotes = computed(() => {
   return props.pages[idx]?.speakerNotes || '';
 });
 
-const currentPngUrl = computed(() => {
-  if (props.pages.length === 0) return '';
-  const idx = Math.min(props.activeIndex, props.pages.length - 1);
-  return renderedPngs.value.get(idx) || '';
-});
-
 const currentSvg = computed(() => {
   if (props.pages.length === 0) return '';
   const idx = Math.min(props.activeIndex, props.pages.length - 1);
   return props.pages[idx]?.svg || '';
-});
-
-const isCurrentPageRendering = computed(() => {
-  if (props.pages.length === 0) return false;
-  const idx = Math.min(props.activeIndex, props.pages.length - 1);
-  return renderingPages.value.has(idx);
 });
 
 async function renderPageToPng(index: number) {
@@ -111,21 +98,7 @@ function zoomOut() {
       </div>
       <div class="svg-deck-preview__viewport">
         <div class="svg-deck-preview__canvas" :style="{ transform: `scale(${scale})` }">
-          <img
-            v-if="currentPngUrl"
-            :src="currentPngUrl"
-            class="svg-deck-preview__slide-img"
-            alt=""
-          />
           <div
-            v-else-if="isCurrentPageRendering"
-            class="svg-deck-preview__slide svg-deck-preview__slide--loading"
-          >
-            <Loader2 :size="32" class="svg-deck-preview__spin" />
-            <span>渲染中...</span>
-          </div>
-          <div
-            v-else
             class="svg-deck-preview__slide"
             v-html="currentSvg"
           ></div>

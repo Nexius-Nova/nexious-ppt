@@ -8,8 +8,10 @@ defineProps<{
 
 <template>
   <div class="activity-log">
-    <!-- <div class="activity-log__header">
-    </div> -->
+    <div class="activity-log__summary">
+      <span>{{ logs.length }} 条记录</span>
+      <span>最新在上</span>
+    </div>
     <div class="activity-log__content">
       <div v-for="(log, index) in logs" :key="index" class="activity-log__item">
         <Terminal :size="11" class="activity-log__icon" />
@@ -28,22 +30,15 @@ defineProps<{
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 0;
 }
 
-.activity-log__header {
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.activity-log__header h3 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--color-text);
-}
-
-.activity-log__header p {
-  margin: 4px 0 0;
+.activity-log__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
   font-size: 12px;
   color: var(--color-subtle);
 }
@@ -51,20 +46,8 @@ defineProps<{
 .activity-log__content {
   display: grid;
   gap: 6px;
-  max-height: min(64vh, 680px);
-  overflow-y: auto;
+  min-height: 0;
   padding-right: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-border-strong) transparent;
-}
-
-.activity-log__content::-webkit-scrollbar {
-  width: 6px;
-}
-
-.activity-log__content::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--color-border-strong);
 }
 
 .activity-log__item {

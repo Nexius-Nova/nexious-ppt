@@ -12,6 +12,7 @@ import {
   FileText,
   Image,
   Loader2,
+  Maximize2,
   Paintbrush,
   Pause,
   Play,
@@ -20,7 +21,8 @@ import {
   ShieldCheck,
   Sparkles,
   RotateCcw,
-  Wand2
+  Wand2,
+  X
 } from 'lucide-vue-next';
 import AppShell from '@/components/layout/AppShell.vue';
 import SideNavigation from '@/components/layout/SideNavigation.vue';
@@ -47,7 +49,7 @@ import VersionHistory from '@/components/common/VersionHistory.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useShortcuts } from '@/composables/useShortcuts';
 import { slideNeedsImage } from '@/utils/slideVisuals';
-import type { WorkflowStep, WorkflowStepId } from '@/types/agent';
+import type { GeneratedImage, WorkflowStep, WorkflowStepId } from '@/types/agent';
 
 const route = useRoute();
 const router = useRouter();
@@ -71,8 +73,10 @@ const {
   svgPages,
   currentGeneratingSlide,
   isDataLoaded,
+  configOptions,
   designSpec,
-  specLock
+  specLock,
+  retryingPageNumbers
 } = storeToRefs(store);
 
 const showRightPanel = ref(true);
@@ -82,6 +86,7 @@ const showShortcutsHelp = ref(false);
 const exportProgress = ref(0);
 const isExporting = ref(false);
 const exportHistory = ref<Array<{ id: string; filename: string; format: 'pptx' | 'pdf'; status: 'ready' | 'queued' | 'exporting'; createdAt: number }>>([]);
+const previewingImage = ref<GeneratedImage | null>(null);
 
 useShortcuts([
   {
@@ -166,6 +171,10 @@ const imageBySlideId = computed(() => {
     map.set(image.slideId, image);
   }
   return map;
+});
+const previewingImageSlide = computed(() => {
+  if (!previewingImage.value) return null;
+  return (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === previewingImage.value?.slideId) || null;
 });
 const activeProjectTitle = computed(() => activePpt.value?.title || input.value.topic || '尚未选择 PPT 项目');
 const pipelineProgress = computed(() => {
@@ -389,6 +398,24 @@ function imagePageNumber(slide: unknown, index: number) {
   }
   return index + 1;
 }
+
+function isFallbackPageSvg(svg?: string) {
+  return Boolean(svg && svg.includes('本页待重试'));
+}
+
+function openImagePreview(slideId: string) {
+  const image = imageBySlideId.value.get(slideId);
+  if (!image?.url || image.error) return;
+  previewingImage.value = image;
+}
+
+async function retryImage(slideId: string) {
+  await store.retrySlideImage(slideId);
+  const updated = imageBySlideId.value.get(slideId);
+  if (previewingImage.value?.slideId === slideId) {
+    previewingImage.value = updated && !updated.error && updated.url ? updated : null;
+  }
+}
 </script>
 
 <template>
@@ -509,6 +536,7 @@ function imagePageNumber(slide: unknown, index: number) {
                     v-else
                     v-model="input"
                     :parameters="parameters"
+                    :config-options="configOptions"
                     @update:parameters="parameters = $event"
                     @attach="store.attachFiles"
                     @run="store.runFullWorkflow()"
@@ -597,15 +625,22 @@ function imagePageNumber(slide: unknown, index: number) {
                       :class="{ 'image-page-item--running': currentGeneratingSlide === slide.id }"
                     >
                       <span>{{ imagePageNumber(slide, index) }}</span>
-                      <div class="image-page-item__preview">
+                      <button
+                        type="button"
+                        class="image-page-item__preview"
+                        :class="{ 'image-page-item__preview--clickable': imageBySlideId.get(slide.id)?.url && !imageBySlideId.get(slide.id)?.error }"
+                        :disabled="!imageBySlideId.get(slide.id)?.url || imageBySlideId.get(slide.id)?.error"
+                        @click="openImagePreview(slide.id)"
+                      >
                         <img
                           v-if="imageBySlideId.get(slide.id)?.url && !imageBySlideId.get(slide.id)?.error"
                           :src="imageBySlideId.get(slide.id)?.url"
                           :alt="slide.title"
                           loading="lazy"
                         />
+                        <Maximize2 v-if="imageBySlideId.get(slide.id)?.url && !imageBySlideId.get(slide.id)?.error" :size="14" class="image-page-item__zoom" />
                         <Image v-else :size="18" />
-                      </div>
+                      </button>
                       <div>
                         <strong>{{ slide.title }}</strong>
                         <p>{{ imageBySlideId.get(slide.id)?.errorMessage || slide.visualPrompt }}</p>
@@ -615,14 +650,14 @@ function imagePageNumber(slide: unknown, index: number) {
                           {{ imageBySlideId.get(slide.id)?.error ? '未生成' : imageBySlideId.get(slide.id) && !imageBySlideId.get(slide.id)?.error ? '已生成' : currentGeneratingSlide === slide.id ? '生成中' : '等待' }}
                         </UiBadge>
                         <UiButton
-                          v-if="imageBySlideId.get(slide.id)?.error"
+                          v-if="imageBySlideId.get(slide.id)"
                           variant="text"
                           size="sm"
-                          :disabled="isRunning || currentGeneratingSlide === slide.id"
-                          @click="store.retrySlideImage(slide.id)"
+                          :disabled="currentGeneratingSlide === slide.id"
+                          @click="retryImage(slide.id)"
                         >
                           <RotateCcw :size="13" />
-                          重试
+                          {{ imageBySlideId.get(slide.id)?.error ? '重试' : '重新生成' }}
                         </UiButton>
                       </div>
                     </div>
@@ -697,14 +732,25 @@ function imagePageNumber(slide: unknown, index: number) {
 
                     <div class="executor-thumbs" v-if="layoutTotalPages">
                       <template v-for="i in layoutTotalPages" :key="i">
-                        <button
-                          v-if="svgPages[i - 1]"
-                          class="executor-thumb executor-thumb--done"
-                          @click="previewPageIndex = i - 1; activeStep = 'preview'"
-                        >
-                          <span>{{ i }}</span>
-                          <div v-html="svgPages[i - 1].svg" />
-                        </button>
+                        <div v-if="svgPages[i - 1]" class="executor-thumb-wrap">
+                          <button
+                            class="executor-thumb executor-thumb--done"
+                            :class="{ 'executor-thumb--retry': isFallbackPageSvg(svgPages[i - 1].svg) }"
+                            @click="previewPageIndex = i - 1; activeStep = 'preview'"
+                          >
+                            <span>{{ i }}</span>
+                            <div v-html="svgPages[i - 1].svg" />
+                          </button>
+                          <button
+                            v-if="isFallbackPageSvg(svgPages[i - 1].svg)"
+                            class="executor-thumb-retry"
+                            :disabled="retryingPageNumbers.has(i)"
+                            @click="store.retrySlidePage(i)"
+                          >
+                            <Loader2 v-if="retryingPageNumbers.has(i)" :size="12" class="spin" />
+                            {{ retryingPageNumbers.has(i) ? '重试中' : '重试本页' }}
+                          </button>
+                        </div>
                         <div v-else class="executor-thumb executor-thumb--pending">
                           <span>{{ i }}</span>
                         </div>
@@ -757,8 +803,13 @@ function imagePageNumber(slide: unknown, index: number) {
 
           <aside v-show="showRightPanel" class="workspace-content-right">
             <div class="right-panel-title">
-              <h3>运行日志</h3>
-              <span>实时记录每个阶段</span>
+              <div>
+                <h3>运行日志</h3>
+                <span>实时记录每个阶段</span>
+              </div>
+              <button class="right-panel-title__close" title="隐藏右侧面板" @click="showRightPanel = false">
+                <ChevronRight :size="15" />
+              </button>
             </div>
             <div class="right-panel-content">
               <ActivityLog :logs="activityLog" />
@@ -790,6 +841,29 @@ function imagePageNumber(slide: unknown, index: number) {
       :show="showShortcutsHelp"
       @close="showShortcutsHelp = false"
     />
+    <div v-if="previewingImage" class="image-preview-modal" @click.self="previewingImage = null">
+      <div class="image-preview-modal__panel">
+        <header class="image-preview-modal__header">
+          <div>
+            <h3>{{ previewingImageSlide?.title || previewingImage.title }}</h3>
+            <p>{{ previewingImage.prompt }}</p>
+          </div>
+          <button class="image-preview-modal__close" @click="previewingImage = null">
+            <X :size="18" />
+          </button>
+        </header>
+        <div class="image-preview-modal__canvas">
+          <img :src="previewingImage.url" :alt="previewingImage.title" />
+        </div>
+        <footer class="image-preview-modal__footer">
+          <UiButton variant="secondary" @click="retryImage(previewingImage.slideId)">
+            <RotateCcw :size="14" />
+            重新生成这张
+          </UiButton>
+          <UiButton variant="primary" @click="previewingImage = null">关闭</UiButton>
+        </footer>
+      </div>
+    </div>
     <AiChatPanel />
   </AppShell>
 </template>
@@ -888,6 +962,10 @@ function imagePageNumber(slide: unknown, index: number) {
 }
 
 .right-panel-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--color-border);
 }
@@ -904,6 +982,23 @@ function imagePageNumber(slide: unknown, index: number) {
   margin-top: 4px;
   color: var(--color-subtle);
   font-size: 11px;
+}
+
+.right-panel-title__close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+.right-panel-title__close:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
 }
 
 .right-panel-content {
@@ -1361,15 +1456,18 @@ function imagePageNumber(slide: unknown, index: number) {
 }
 
 .image-page-item__preview {
+  position: relative;
   display: grid;
   place-items: center;
   width: 88px;
   height: 50px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-panel);
   color: var(--color-subtle);
+  cursor: default;
 }
 
 .image-page-item__preview img {
@@ -1377,6 +1475,24 @@ function imagePageNumber(slide: unknown, index: number) {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.image-page-item__preview--clickable {
+  cursor: zoom-in;
+}
+
+.image-page-item__preview--clickable:hover {
+  border-color: var(--color-accent);
+}
+
+.image-page-item__zoom {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  padding: 2px;
+  border-radius: 5px;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.48);
 }
 
 .image-page-item strong {
@@ -1533,6 +1649,11 @@ function imagePageNumber(slide: unknown, index: number) {
   gap: 8px;
 }
 
+.executor-thumb-wrap {
+  display: grid;
+  gap: 6px;
+}
+
 .executor-thumb {
   position: relative;
   display: block;
@@ -1550,6 +1671,34 @@ function imagePageNumber(slide: unknown, index: number) {
 
 .executor-thumb--done:hover {
   border-color: var(--color-accent);
+}
+
+.executor-thumb--retry {
+  border-color: var(--color-danger);
+}
+
+.executor-thumb-retry {
+  min-height: 26px;
+  border: 1px solid var(--color-danger);
+  border-radius: 6px;
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.executor-thumb-retry:hover {
+  border-color: var(--color-danger);
+  background: var(--color-surface);
+}
+
+.executor-thumb-retry:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.executor-thumb-retry:disabled:hover {
+  background: var(--color-danger-soft);
 }
 
 .executor-thumb--pending {
@@ -1586,6 +1735,91 @@ function imagePageNumber(slide: unknown, index: number) {
 
 .quality-strip {
   padding: 16px;
+}
+
+.image-preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(8, 12, 18, 0.72);
+}
+
+.image-preview-modal__panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(960px, 92vw);
+  max-height: 88vh;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.image-preview-modal__header,
+.image-preview-modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.image-preview-modal__footer {
+  border-top: 1px solid var(--color-border);
+  border-bottom: none;
+}
+
+.image-preview-modal__header h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 15px;
+}
+
+.image-preview-modal__header p {
+  max-width: 720px;
+  margin: 5px 0 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.image-preview-modal__close {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+.image-preview-modal__close:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.image-preview-modal__canvas {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  overflow: auto;
+  padding: 16px;
+  background: var(--color-panel);
+}
+
+.image-preview-modal__canvas img {
+  display: block;
+  max-width: 100%;
+  max-height: 68vh;
+  border-radius: 6px;
+  object-fit: contain;
 }
 
 @keyframes spin {

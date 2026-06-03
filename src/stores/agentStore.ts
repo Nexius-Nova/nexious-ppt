@@ -14,6 +14,8 @@ import type {
   DeckInput,
   DesignSpec,
   ExportArtifact,
+  ConfigOptionGroups,
+  ConfigOptionKey,
   GeneratedImage,
   PromptDefinition,
   PptProject,
@@ -35,6 +37,26 @@ const cloneSteps = (): WorkflowStep[] => workflowSteps.map((step) => ({ ...step 
 const cloneSkills = (): SkillDefinition[] => defaultSkills.map((skill) => ({ ...skill, params: { ...skill.params } }));
 const clonePrompts = (): PromptDefinition[] => defaultPrompts.map((prompt) => ({ ...prompt }));
 const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => ({ ...template }));
+const cloneConfigOptions = (): ConfigOptionGroups => ({
+  summaryLength: [
+    { value: 'brief', label: '简洁' },
+    { value: 'balanced', label: '均衡' },
+    { value: 'detailed', label: '详细' }
+  ],
+  tone: [
+    { value: 'professional', label: '专业汇报' },
+    { value: 'storytelling', label: '叙事表达' },
+    { value: 'teaching', label: '教学讲解' }
+  ],
+  imageStyle: [
+    { value: 'realistic', label: '写实' },
+    { value: 'illustration', label: '插画' },
+    { value: 'comic', label: '漫画' },
+    { value: 'flat', label: '扁平化' },
+    { value: '3d', label: '3D' },
+    { value: 'photo', label: '摄影' }
+  ]
+});
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 const MAX_ACTIVITY_LOGS = 5000;
@@ -88,6 +110,8 @@ export const useAgentStore = defineStore('agent', () => {
   const selectedPromptId = ref<string>('');
   const currentGeneratingSlide = ref<string | null>(null);
   const generatedSlides = ref<Set<string>>(new Set());
+  const retryingPageNumbers = ref<Set<number>>(new Set());
+  const configOptions = ref<ConfigOptionGroups>(cloneConfigOptions());
   const isDataLoaded = ref(false);
   const recoveredActiveWorkflow = ref(false);
   const workflowRunToken = ref(0);
@@ -117,6 +141,7 @@ export const useAgentStore = defineStore('agent', () => {
   function cancelActiveRunForProjectSwitch() {
     if (!isRunning.value || !activePpt.value) return;
     const previousProject = activePpt.value;
+    pushLog('已切换项目，当前工作流已保存，可稍后继续。');
     previousProject.state = {
       ...snapshotProjectState(),
       paused: true,
@@ -210,6 +235,7 @@ export const useAgentStore = defineStore('agent', () => {
       designSpec: null,
       specLock: null,
       svgPages: [],
+      configOptions: cloneConfigOptions(),
       paused: false,
       resumeStage: null,
       executorCursor: 0,
@@ -242,6 +268,11 @@ export const useAgentStore = defineStore('agent', () => {
           }))
         : svgPages.value,
       paused: isPaused.value,
+      configOptions: {
+        summaryLength: configOptions.value.summaryLength.map(option => ({ ...option })),
+        tone: configOptions.value.tone.map(option => ({ ...option })),
+        imageStyle: configOptions.value.imageStyle.map(option => ({ ...option })),
+      },
       resumeStage: resumeStage.value,
       executorCursor: executorCursor.value,
       workflowActive: isRunning.value || steps.value.some(step => step.status === 'running'),
@@ -267,6 +298,8 @@ export const useAgentStore = defineStore('agent', () => {
     designSpec.value = state.designSpec || null;
     specLock.value = state.specLock || null;
     svgPages.value = state.svgPages || [];
+    configOptions.value = state.configOptions || cloneConfigOptions();
+    retryingPageNumbers.value = new Set();
     const hadActiveWorkflow = Boolean(state.workflowActive || state.steps?.some(step => step.status === 'running'));
     recoveredActiveWorkflow.value = hadActiveWorkflow && !state.paused;
     isPaused.value = Boolean(state.paused || hadActiveWorkflow);
@@ -324,14 +357,18 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function syncToProject() {
-    if (!activePpt.value) return;
+    if (!activePpt.value) return Promise.resolve();
     const state = snapshotProjectState();
     activePpt.value.state = state;
     activePpt.value.updatedAt = Date.now();
 
-    persistActiveProjectState(snapshotProjectState({ persistable: true })).catch((error) => {
+    return persistActiveProjectState(snapshotProjectState({ persistable: true })).catch((error) => {
       console.warn('同步项目状态失败', error);
     });
+  }
+
+  async function syncToProjectNow() {
+    await syncToProject();
   }
 
   let inputSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -378,6 +415,63 @@ export const useAgentStore = defineStore('agent', () => {
     if (!step) return;
     step.status = status;
     step.progress = progress;
+  }
+
+  function normalizeConfigValue(label: string, key: ConfigOptionKey) {
+    const base = label.trim() || '未命名';
+    const slug = base
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^\w\u4e00-\u9fa5-]/g, '')
+      .slice(0, 40);
+    const candidate = slug || `${key}-${Date.now()}`;
+    const existing = new Set(configOptions.value[key].map(option => option.value));
+    if (!existing.has(candidate)) return candidate;
+    return `${candidate}-${Date.now().toString(36).slice(-5)}`;
+  }
+
+  function setConfigOptionValue(key: ConfigOptionKey, value: string) {
+    parameters.value = { ...parameters.value, [key]: value };
+    syncToProject();
+  }
+
+  function addConfigOption(key: ConfigOptionKey, label: string) {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    const option = { label: trimmed, value: normalizeConfigValue(trimmed, key) };
+    configOptions.value = {
+      ...configOptions.value,
+      [key]: [...configOptions.value[key], option]
+    };
+    setConfigOptionValue(key, option.value);
+    pushLog(`已添加配置：${trimmed}`);
+    syncToProject();
+  }
+
+  function updateConfigOption(key: ConfigOptionKey, value: string, label: string) {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    configOptions.value = {
+      ...configOptions.value,
+      [key]: configOptions.value[key].map(option => option.value === value ? { ...option, label: trimmed } : option)
+    };
+    pushLog(`已更新配置：${trimmed}`);
+    syncToProject();
+  }
+
+  function deleteConfigOption(key: ConfigOptionKey, value: string) {
+    if (configOptions.value[key].length <= 1) return;
+    const target = configOptions.value[key].find(option => option.value === value);
+    configOptions.value = {
+      ...configOptions.value,
+      [key]: configOptions.value[key].filter(option => option.value !== value)
+    };
+    if (parameters.value[key] === value) {
+      const next = configOptions.value[key][0]?.value || '';
+      parameters.value = { ...parameters.value, [key]: next };
+    }
+    pushLog(`已删除配置：${target?.label || value}`);
+    syncToProject();
   }
 
   function requestPauseWorkflow() {
@@ -1022,8 +1116,9 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
-  async function runStrategist() {
+  async function runStrategist(ctx: RunContext = createRunContext()) {
     if (!checkActivePpt() || !checkApiKeys()) return;
+    if (!isRunContextActive(ctx)) return;
 
     activeStep.value = 'outline';
     setStepStatus('outline', 'running', 10);
@@ -1052,15 +1147,18 @@ export const useAgentStore = defineStore('agent', () => {
         },
         {
           onStart: (message) => {
+            if (!isRunContextActive(ctx)) return;
             pushLog(message);
             setStepStatus('outline', 'running', 20);
           },
           onContent: (content) => {
+            if (!isRunContextActive(ctx)) return;
             streamingText.value += content;
             const progress = Math.min(90, 20 + streamingText.value.length / 100);
             setStepStatus('outline', 'running', progress);
           },
           onComplete: (data) => {
+            if (!isRunContextActive(ctx)) return;
             const parsed = data as any;
             designSpec.value = parsed.spec || null;
             specLock.value = parsed.lock || null;
@@ -1080,9 +1178,10 @@ export const useAgentStore = defineStore('agent', () => {
             pushLog(`大纲生成完成，共 ${outline.value.length} 页。`);
             setStepStatus('outline', 'done', 100);
             streamingText.value = '';
-            syncToProject();
+            void syncToProject();
           },
           onError: (message) => {
+            if (!isRunContextActive(ctx)) return;
             pushLog(`大纲生成失败：${message}`);
             setStepStatus('outline', 'idle', 0);
             const toastStore = useToastStore();
@@ -1090,26 +1189,34 @@ export const useAgentStore = defineStore('agent', () => {
           },
         }
       );
+      if (!isRunContextActive(ctx)) return;
+      await syncToProjectNow();
     } catch (error) {
+      if (!isRunContextActive(ctx)) return;
       setStepStatus('outline', 'idle', 0);
       pushLog('大纲生成失败，请检查 API Key 配置。');
+      await syncToProjectNow();
       throw error;
     }
   }
 
-  const runOutline = runStrategist;
+  async function runOutline() {
+    await runStrategist();
+  }
 
   function needsImageGeneration(): boolean {
     const slides = designSpec.value?.outline || outline.value;
     return slides.some((slide: any) => slideNeedsImage(slide));
   }
 
-  async function runImages() {
+  async function runImages(ctx: RunContext = createRunContext()) {
     if (!checkActivePpt() || !checkApiKeys()) return;
+    if (!isRunContextActive(ctx)) return;
 
     if (outline.value.length === 0) {
-      await runStrategist();
+      await runStrategist(ctx);
     }
+    if (!isRunContextActive(ctx)) return;
     if (outline.value.length === 0) return;
 
     activeStep.value = 'images';
@@ -1132,7 +1239,7 @@ export const useAgentStore = defineStore('agent', () => {
       if (slidesRequiringImages.length === 0) {
         pushLog('本次不需要图片。');
         setStepStatus('images', 'done', 100);
-        syncToProject();
+        await syncToProjectNow();
         return;
       }
 
@@ -1148,7 +1255,7 @@ export const useAgentStore = defineStore('agent', () => {
         generatedSlides.value = new Set(existingReadySlideIds);
         pushLog('图片已完成。');
         setStepStatus('images', 'done', 100);
-        syncToProject();
+        await syncToProjectNow();
         return;
       }
 
@@ -1163,10 +1270,12 @@ export const useAgentStore = defineStore('agent', () => {
         parameters.value.imageStyle,
         {
           onStart: (slideId, message) => {
+            if (!isRunContextActive(ctx)) return;
             currentGeneratingSlide.value = slideId;
             pushLog(message);
           },
           onComplete: (slideId, image) => {
+            if (!isRunContextActive(ctx)) return;
             if (slideId === '__progress__') {
               const pendingProgress = (image as any)._progress || 0;
               const completedPending = Math.round((pendingProgress / 100) * pendingSlides.length);
@@ -1194,10 +1303,12 @@ export const useAgentStore = defineStore('agent', () => {
               : `图片完成：${image.title}，${Math.min(readyCount, slidesRequiringImages.length)}/${slidesRequiringImages.length}`);
           },
           onError: (_slideId, message) => {
+            if (!isRunContextActive(ctx)) return;
             currentGeneratingSlide.value = null;
             pushLog(`图片未生成：${message}`);
           },
           onAllComplete: () => {
+            if (!isRunContextActive(ctx)) return;
             const readyCount = images.value.filter((img) => img.selected && !img.error && img.url).length;
             generatedSlides.value = new Set(
               images.value
@@ -1212,17 +1323,21 @@ export const useAgentStore = defineStore('agent', () => {
           }
         }
       );
+      if (!isRunContextActive(ctx)) return;
+      await syncToProjectNow();
     } catch (error) {
+      if (!isRunContextActive(ctx)) return;
       setStepStatus('images', 'idle', 0);
       const errMsg = error instanceof Error ? error.message : '未知错误';
       pushLog(`图片生成失败：${errMsg}`);
-      syncToProject();
+      await syncToProjectNow();
       throw error;
     }
   }
 
-  async function retrySlideImage(slideId: string) {
+  async function retrySlideImage(slideId: string, ctx: RunContext = createRunContext()) {
     if (!checkActivePpt() || !checkApiKeys()) return;
+    if (!isRunContextActive(ctx)) return;
 
     const sourceSlide = (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === slideId) as any;
     if (!sourceSlide) return;
@@ -1243,9 +1358,11 @@ export const useAgentStore = defineStore('agent', () => {
         parameters.value.imageStyle,
         {
           onStart: (_id, message) => {
+            if (!isRunContextActive(ctx)) return;
             pushLog(message);
           },
           onComplete: (id, image) => {
+            if (!isRunContextActive(ctx)) return;
             if (id === '__progress__') return;
             const existingIdx = images.value.findIndex(img => img.slideId === id);
             if (existingIdx >= 0) {
@@ -1262,12 +1379,14 @@ export const useAgentStore = defineStore('agent', () => {
             syncToProject();
           },
           onError: (_id, message) => {
+            if (!isRunContextActive(ctx)) return;
             pushLog(`图片未生成：${message}`);
           },
           onAllComplete: () => {},
         },
         1
       );
+      if (!isRunContextActive(ctx)) return;
 
       const image = result[0];
       if (image?.error || !image?.url) {
@@ -1277,12 +1396,13 @@ export const useAgentStore = defineStore('agent', () => {
       }
       syncToProject();
     } catch (error) {
+      if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
       pushLog(`图片重试失败：${errMsg}`);
       syncToProject();
       throw error;
     } finally {
-      currentGeneratingSlide.value = null;
+      if (isRunContextActive(ctx)) currentGeneratingSlide.value = null;
     }
   }
 
@@ -1304,12 +1424,94 @@ export const useAgentStore = defineStore('agent', () => {
     return undefined;
   }
 
-  async function runExecutor(options: { resume?: boolean; embedded?: boolean } = {}) {
+  async function generateSlideSvg(slide: SpecSlide, ctx: RunContext): Promise<string> {
+    const imageForSlide = images.value.find(img =>
+      img.slideId === slide.id &&
+      img.selected &&
+      img.url
+    );
+    const imageUrl = await ensureExecutorImageUrl(imageForSlide);
+    if (!isRunContextActive(ctx)) return '';
+
+    const spec = designSpec.value!;
+    const lock = specLock.value!;
+    const slimSpec = {
+      projectInfo: spec.projectInfo,
+      canvas: spec.canvas,
+      visualTheme: spec.visualTheme,
+      typography: spec.typography,
+      iconStyle: spec.iconStyle,
+      imageUsage: spec.imageUsage,
+      outline: [],
+      skillExtensions: [],
+    };
+    const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
+    const slimLock = {
+      colors: lock.colors,
+      typography: lock.typography,
+      iconStyle: lock.iconStyle,
+      imageStyle: lock.imageStyle,
+      canvas: lock.canvas,
+      pageRhythm: { [pageKey]: lock.pageRhythm[pageKey] },
+      pageLayouts: { [pageKey]: lock.pageLayouts[pageKey] },
+      pageCharts: lock.pageCharts[pageKey] ? { [pageKey]: lock.pageCharts[pageKey] } : {},
+      skillExtensions: [],
+      forbidden: (lock as any).forbidden || [
+        '<style>',
+        'class',
+        '<foreignObject>',
+        '<mask>',
+        'rgba()',
+        '@font-face',
+        '<animate>',
+        '<script>',
+        'gradient'
+      ],
+    };
+
+    let svg = '';
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        svg = await aiApi.executorPageStream(
+          { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl },
+          {
+            onStart: () => {},
+            onContent: () => {},
+            onComplete: () => {},
+            onError: (message) => {
+              if (!isRunContextActive(ctx)) return;
+              pushLog(`第 ${slide.pageNumber} 页 API 错误：${message}`);
+            },
+          }
+        );
+        if (!isRunContextActive(ctx)) return '';
+
+        if (!svg || !svg.includes('<svg') || !svg.includes('</svg>')) {
+          throw new Error('AI 返回的 SVG 内容不完整');
+        }
+        return svg;
+      } catch (error) {
+        if (!isRunContextActive(ctx)) return '';
+        lastError = error;
+        if (attempt < 3) {
+          pushLog(`第 ${slide.pageNumber} 页生成不完整，正在重试。`);
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('AI 返回的 SVG 内容无效');
+  }
+
+  async function runExecutor(options: { resume?: boolean; embedded?: boolean; ctx?: RunContext } = {}) {
     if (!checkActivePpt()) return;
+    const ctx = options.ctx || createRunContext();
+    if (!isRunContextActive(ctx)) return;
 
     if (!designSpec.value || !specLock.value) {
-      await runStrategist();
+      await runStrategist(ctx);
     }
+    if (!isRunContextActive(ctx)) return;
     if (!designSpec.value || !specLock.value) return;
 
     activeStep.value = 'layout';
@@ -1330,86 +1532,15 @@ export const useAgentStore = defineStore('agent', () => {
         : 0;
 
       for (let i = startIndex; i < totalPages; i++) {
+        if (!isRunContextActive(ctx)) return;
         const slide = designSpec.value.outline[i];
         const progress = Math.round(((i) / totalPages) * 100);
         setStepStatus('layout', 'running', progress);
         pushLog(`正在生成第 ${slide.pageNumber} 页：${slide.title}`);
 
-        const imageForSlide = images.value.find(img =>
-          img.slideId === slide.id &&
-          img.selected &&
-          img.url
-        );
-        const imageUrl = await ensureExecutorImageUrl(imageForSlide);
-
-        const spec = designSpec.value!;
-        const lock = specLock.value!;
-        const slimSpec = {
-          projectInfo: spec.projectInfo,
-          canvas: spec.canvas,
-          visualTheme: spec.visualTheme,
-          typography: spec.typography,
-          iconStyle: spec.iconStyle,
-          imageUsage: spec.imageUsage,
-          outline: [],
-          skillExtensions: [],
-        };
-        const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
-        const slimLock = {
-          colors: lock.colors,
-          typography: lock.typography,
-          iconStyle: lock.iconStyle,
-          imageStyle: lock.imageStyle,
-          canvas: lock.canvas,
-          pageRhythm: { [pageKey]: lock.pageRhythm[pageKey] },
-          pageLayouts: { [pageKey]: lock.pageLayouts[pageKey] },
-          pageCharts: lock.pageCharts[pageKey] ? { [pageKey]: lock.pageCharts[pageKey] } : {},
-          skillExtensions: [],
-          forbidden: (lock as any).forbidden || [
-            '<style>',
-            'class',
-            '<foreignObject>',
-            '<mask>',
-            'rgba()',
-            '@font-face',
-            '<animate>',
-            '<script>',
-            'gradient'
-          ],
-        };
-
         try {
-          let svg = '';
-          let lastError: unknown = null;
-          for (let attempt = 1; attempt <= 2; attempt++) {
-            try {
-              svg = await aiApi.executorPageStream(
-                { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl },
-                {
-                  onStart: () => {},
-                  onContent: () => {},
-                  onComplete: () => {},
-                  onError: (message) => {
-                    pushLog(`第 ${slide.pageNumber} 页 API 错误：${message}`);
-                  },
-                }
-              );
-
-              if (!svg || !svg.includes('<svg')) {
-                throw new Error('AI 返回的 SVG 内容无效');
-              }
-              break;
-            } catch (error) {
-              lastError = error;
-              if (attempt === 1) {
-                pushLog(`第 ${slide.pageNumber} 页生成不完整，正在重试。`);
-              }
-            }
-          }
-
-          if (!svg || !svg.includes('<svg')) {
-            throw lastError instanceof Error ? lastError : new Error('AI 返回的 SVG 内容无效');
-          }
+          const svg = await generateSlideSvg(slide, ctx);
+          if (!isRunContextActive(ctx)) return;
 
           const page = {
             pageNumber: slide.pageNumber,
@@ -1441,15 +1572,16 @@ export const useAgentStore = defineStore('agent', () => {
         }
 
         executorCursor.value = i + 1;
-        syncToProject();
+        await syncToProjectNow();
         if (shouldPauseAt('layout')) return;
       }
 
       executorCursor.value = totalPages;
       setStepStatus('layout', 'done', 100);
       pushLog('页面生成完成。');
-      syncToProject();
+      await syncToProjectNow();
     } catch (error) {
+      if (!isRunContextActive(ctx)) return;
       setStepStatus('layout', 'idle', 0);
       const errMsg = error instanceof Error ? error.message : '页面生成失败';
       pushLog(`页面生成失败：${errMsg}`);
@@ -1457,9 +1589,46 @@ export const useAgentStore = defineStore('agent', () => {
       toastStore.error('页面生成失败', errMsg);
       throw error;
     } finally {
-      if (!options.embedded && !isPaused.value) {
+      if (isRunContextActive(ctx) && !options.embedded && !isPaused.value) {
         isRunning.value = false;
       }
+    }
+  }
+
+  async function retrySlidePage(pageNumber: number) {
+    if (!checkActivePpt() || !checkApiKeys() || !designSpec.value || !specLock.value) return;
+    if (retryingPageNumbers.value.has(pageNumber)) return;
+    const ctx = createRunContext();
+    const slide = designSpec.value.outline.find(item => item.pageNumber === pageNumber);
+    if (!slide) return;
+    retryingPageNumbers.value = new Set([...retryingPageNumbers.value, pageNumber]);
+
+    activeStep.value = 'layout';
+    setStepStatus('layout', 'running', Math.round(((pageNumber - 1) / Math.max(1, designSpec.value.outline.length)) * 100));
+    pushLog(`重新生成第 ${pageNumber} 页：${slide.title}`);
+
+    try {
+      const svg = await generateSlideSvg(slide, ctx);
+      if (!isRunContextActive(ctx)) return;
+      const page = { pageNumber: slide.pageNumber, svg, speakerNotes: slide.speakerNotes };
+      const existingPageIndex = svgPages.value.findIndex(item => item.pageNumber === page.pageNumber);
+      if (existingPageIndex >= 0) {
+        svgPages.value[existingPageIndex] = page;
+      } else {
+        svgPages.value.push(page);
+      }
+      setStepStatus('layout', 'done', 100);
+      pushLog(`第 ${pageNumber} 页已重新生成。`);
+      await syncToProjectNow();
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : '未知错误';
+      setStepStatus('layout', 'idle', 0);
+      pushLog(`第 ${pageNumber} 页重试失败：${errMsg}`);
+      await syncToProjectNow();
+    } finally {
+      const nextRetrying = new Set(retryingPageNumbers.value);
+      nextRetrying.delete(pageNumber);
+      retryingPageNumbers.value = nextRetrying;
     }
   }
 
@@ -1480,7 +1649,11 @@ export const useAgentStore = defineStore('agent', () => {
 </svg>`;
   }
 
-  const runLayout = runExecutor;
+  async function runLayout() {
+    const totalPages = designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount;
+    const hasPartialPages = svgPages.value.length > 0 && svgPages.value.length < totalPages;
+    await runExecutor({ resume: hasPartialPages || executorCursor.value > 0 });
+  }
 
   async function runSkills() {
     if (!checkActivePpt()) return;
@@ -1596,6 +1769,7 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     isRunning.value = true;
+    const ctx = createRunContext();
     if (!options.resume) {
       clearPauseState();
       executorCursor.value = 0;
@@ -1608,10 +1782,12 @@ export const useAgentStore = defineStore('agent', () => {
       const shouldRunOutline = !options.resume || !designSpec.value || !specLock.value || outline.value.length === 0;
       if (shouldRunOutline) {
         activeStep.value = 'outline';
-        await runStrategist();
+        await runStrategist(ctx);
+        if (!isRunContextActive(ctx)) return;
         if (shouldPauseAt('images')) return;
       }
 
+      if (!isRunContextActive(ctx)) return;
       activeStep.value = 'images';
 
       if (!needsImageGeneration()) {
@@ -1621,9 +1797,11 @@ export const useAgentStore = defineStore('agent', () => {
         const apiKeyStore = useApiKeyStore();
         if (apiKeyStore.isImageModelConfigured) {
           try {
-            await runImages();
+            await runImages(ctx);
+            if (!isRunContextActive(ctx)) return;
             if (shouldPauseAt('layout')) return;
           } catch (imgError) {
+            if (!isRunContextActive(ctx)) return;
             pushLog(`图片生成失败（${imgError instanceof Error ? imgError.message : '未知错误'}），跳过图片继续生成页面。`);
           }
         } else {
@@ -1634,8 +1812,10 @@ export const useAgentStore = defineStore('agent', () => {
         pushLog('图片已完成，跳过图片生成。');
       }
 
+      if (!isRunContextActive(ctx)) return;
       activeStep.value = 'layout';
-      await runExecutor({ resume: options.resume || resumeStage.value === 'layout', embedded: true });
+      await runExecutor({ resume: options.resume || resumeStage.value === 'layout', embedded: true, ctx });
+      if (!isRunContextActive(ctx)) return;
       if (isPaused.value) return;
 
       activeStep.value = 'preview';
@@ -1643,16 +1823,20 @@ export const useAgentStore = defineStore('agent', () => {
 
       toastStore.success('PPT 生成完成', '可以在预览区查看结果');
     } catch (error) {
+      if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
       pushLog(`PPT 生成失败：${errMsg}`);
       syncToProject();
       toastStore.error('PPT 生成失败', errMsg);
     } finally {
-      if (!isPaused.value) {
+      if (isRunContextActive(ctx) && !isPaused.value) {
         isRunning.value = false;
+        runningProjectId.value = null;
       }
-      streamingText.value = '';
-      currentGeneratingSlide.value = null;
+      if (isRunContextActive(ctx)) {
+        streamingText.value = '';
+        currentGeneratingSlide.value = null;
+      }
     }
   }
 
@@ -1969,6 +2153,9 @@ export const useAgentStore = defineStore('agent', () => {
     const restored = await restoreWorkflow();
     await Promise.all([fetchPrompts(), fetchSkills(), fetchTemplates()]);
     await fetchPptProjects();
+    if (activePpt.value?.state) {
+      restoreProjectState(activePpt.value.state);
+    }
     isDataLoaded.value = true;
     if (restored) {
       pushLog('已恢复上次保存的工作流数据。');
@@ -2002,6 +2189,7 @@ export const useAgentStore = defineStore('agent', () => {
     designSpec,
     specLock,
     svgPages,
+    configOptions,
     selectedPromptId,
     currentGeneratingSlide,
     generatedSlides,
@@ -2023,11 +2211,17 @@ export const useAgentStore = defineStore('agent', () => {
     exportCurrentDeck,
     runFullWorkflow,
     runInputStage,
+    setConfigOptionValue,
+    addConfigOption,
+    updateConfigOption,
+    deleteConfigOption,
     requestPauseWorkflow,
     continueWorkflow,
     resumeRecoveredWorkflow,
-    runImages,
+    runImages: () => runImages(),
     retrySlideImage,
+    retrySlidePage,
+    retryingPageNumbers,
     runLayout,
     runOutline,
     runSkills,

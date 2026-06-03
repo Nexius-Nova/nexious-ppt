@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { ref } from 'vue';
 import { FileText, Image as ImageIcon, SendHorizontal, Upload } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
@@ -8,12 +7,12 @@ import UiInput from '@/components/ui/UiInput.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import ModelSelector from '@/components/common/ModelSelector.vue';
-import type { DeckInput } from '@/types/agent';
-import type { AgentParameters } from '@/types/agent';
+import type { AgentParameters, ConfigOptionGroups, DeckInput } from '@/types/agent';
 
-const props = defineProps<{
+defineProps<{
   modelValue: DeckInput;
   parameters: AgentParameters;
+  configOptions: ConfigOptionGroups;
 }>();
 
 const emit = defineEmits<{
@@ -27,25 +26,6 @@ const fileTypeIcons: Record<string, any> = {
   image: ImageIcon,
   default: FileText
 };
-
-const summaryOptions = [
-  { label: '简洁', value: 'brief' },
-  { label: '均衡', value: 'balanced' },
-  { label: '详细', value: 'detailed' }
-];
-
-const toneOptions = [
-  { label: '专业汇报', value: 'professional' },
-  { label: '叙事表达', value: 'storytelling' },
-  { label: '教学讲解', value: 'teaching' }
-];
-
-const imageOptions = [
-  { label: '写实', value: 'realistic' },
-  { label: '插画', value: 'illustration' },
-  { label: '漫画', value: 'comic' },
-  { label: '扁平化', value: 'flat' }
-];
 
 function getFileIcon(fileName: string) {
   const ext = fileName.split('.').pop()?.toLowerCase();
@@ -88,22 +68,22 @@ function handleRun() {
         <UiField label="摘要长度">
           <UiSelect
             :model-value="parameters.summaryLength"
-            :options="summaryOptions"
-            @update:model-value="$emit('update:parameters', { ...parameters, summaryLength: $event as AgentParameters['summaryLength'] })"
+            :options="configOptions.summaryLength"
+            @update:model-value="$emit('update:parameters', { ...parameters, summaryLength: $event })"
           />
         </UiField>
         <UiField label="语言风格">
           <UiSelect
             :model-value="parameters.tone"
-            :options="toneOptions"
-            @update:model-value="$emit('update:parameters', { ...parameters, tone: $event as AgentParameters['tone'] })"
+            :options="configOptions.tone"
+            @update:model-value="$emit('update:parameters', { ...parameters, tone: $event })"
           />
         </UiField>
         <UiField label="图像风格">
           <UiSelect
             :model-value="parameters.imageStyle"
-            :options="imageOptions"
-            @update:model-value="$emit('update:parameters', { ...parameters, imageStyle: $event as AgentParameters['imageStyle'] })"
+            :options="configOptions.imageStyle"
+            @update:model-value="$emit('update:parameters', { ...parameters, imageStyle: $event })"
           />
         </UiField>
       </div>

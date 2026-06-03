@@ -2,7 +2,7 @@ export type WorkflowStepId = 'input' | 'outline' | 'images' | 'layout' | 'previe
 
 export type StepStatus = 'idle' | 'running' | 'done';
 
-export type ImageStyle = 'realistic' | 'illustration' | 'comic' | 'flat' | '3d' | 'photo';
+export type ImageStyle = string;
 
 export type TemplateStyle = 'auto' | 'business' | 'creative' | 'education' | 'tech' | 'finance';
 
@@ -21,13 +21,22 @@ export interface DeckInput {
 }
 
 export interface AgentParameters {
-  summaryLength: 'brief' | 'balanced' | 'detailed';
+  summaryLength: string;
   slideCount: number;
-  tone: 'professional' | 'storytelling' | 'teaching';
+  tone: string;
   imageStyle: ImageStyle;
   template: TemplateStyle;
   skillIntensity: number;
 }
+
+export type ConfigOptionKey = 'summaryLength' | 'tone' | 'imageStyle';
+
+export interface ConfigOption {
+  value: string;
+  label: string;
+}
+
+export type ConfigOptionGroups = Record<ConfigOptionKey, ConfigOption[]>;
 
 export type SlideLayout = 'text-only' | 'text-image' | 'image-text' | 'full-image' | 'title-center' | 'two-column';
 
@@ -91,6 +100,7 @@ export interface PptProjectState {
   designSpec: DesignSpec | null;
   specLock: SpecLock | null;
   svgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>;
+  configOptions?: ConfigOptionGroups;
   paused?: boolean;
   resumeStage?: WorkflowStepId | null;
   executorCursor?: number;
