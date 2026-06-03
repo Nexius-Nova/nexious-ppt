@@ -1,6 +1,6 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
-import type { DesignSpec, SpecSlide, SpecLock, SkillExtension } from '../types/agent';
+import type { DesignSpec, SpecSlide, SpecLock, SkillExtension, TemplateAsset, TemplateAssetSettings } from '../types/agent';
 
 interface ApiResponse<T = any> {
   success: boolean;
@@ -553,6 +553,7 @@ export const aiApi = {
       summaryLength: string;
       imageStyle: string;
       template: string;
+      templateAsset?: TemplateAsset | null;
       promptContent?: string;
       skills: Array<{ id: string; name: string; instruction?: string }>;
     },
@@ -668,7 +669,7 @@ export interface Template {
   slide_count: number;
   accent: string;
   preview_url: string | null;
-  settings: Record<string, any>;
+  settings: TemplateAssetSettings;
   is_public: boolean;
   created_at: string;
   updated_at: string;
@@ -747,7 +748,7 @@ export const templateApi = {
     slide_count?: number;
     accent?: string;
     preview_url?: string;
-    settings?: Record<string, any>;
+    settings?: TemplateAssetSettings;
     is_public?: boolean;
   }) => api.post<Template>('/api/templates', data),
 
@@ -758,7 +759,7 @@ export const templateApi = {
     slide_count?: number;
     accent?: string;
     preview_url?: string;
-    settings?: Record<string, any>;
+    settings?: TemplateAssetSettings;
     is_public?: boolean;
   }) => api.put<Template>(`/api/templates/${id}`, data),
 

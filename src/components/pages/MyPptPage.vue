@@ -8,9 +8,10 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
-import { projectApi, type Project } from '@/services/api';
+import { projectApi, templateApi, type Project } from '@/services/api';
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import type { PptProjectState, WorkflowStep } from '@/types/agent';
+import { buildTemplatePayloadFromProject } from '@/utils/templateFromProject';
 
 const router = useRouter();
 const agentStore = useAgentStore();
@@ -23,6 +24,7 @@ const showDeleteModal = ref(false);
 const projectToDelete = ref<Project | null>(null);
 const showCreateModal = ref(false);
 const newProjectTitle = ref('');
+const savingTemplateIds = ref<Set<number>>(new Set());
 
 type ProjectDisplayStatus = 'draft' | 'generating' | 'completed';
 type ProjectDisplay = Project & {
@@ -254,6 +256,33 @@ function openProject(project: Project) {
   router.push(`/project/${project.id}/input`);
 }
 
+async function saveProjectAsTemplate(project: Project) {
+  if (savingTemplateIds.value.has(project.id)) return;
+
+  savingTemplateIds.value = new Set([...savingTemplateIds.value, project.id]);
+  try {
+    const state = parseProjectState(project);
+    const payload = buildTemplatePayloadFromProject(
+      { ...project, state },
+      { name: `${project.title || project.topic || '未命名 PPT'} 模板` }
+    );
+    const response = await templateApi.create(payload);
+
+    if (response.success) {
+      toastStore.success('已添加到模板广场', payload.name);
+      await agentStore.fetchTemplates();
+    } else {
+      toastStore.error('保存模板失败', response.message || '请稍后重试');
+    }
+  } catch (error) {
+    toastStore.error('保存模板失败', error instanceof Error ? error.message : '未知错误');
+  } finally {
+    const next = new Set(savingTemplateIds.value);
+    next.delete(project.id);
+    savingTemplateIds.value = next;
+  }
+}
+
 function getStatusBadge(tone: ProjectDisplayStatus) {
   const map = {
     draft: { label: '草稿', tone: 'neutral' as const },
@@ -367,6 +396,14 @@ onMounted(() => {
             <FileText :size="20" />
           </div>
           <div class="project-card__actions">
+            <button
+              class="action-btn action-btn--template"
+              title="保存为模板"
+              :disabled="savingTemplateIds.has(project.id)"
+              @click.stop="saveProjectAsTemplate(project)"
+            >
+              <FileText :size="14" />
+            </button>
             <button class="action-btn action-btn--danger" title="删除" @click.stop="deleteProject(project)">
               <Trash2 :size="14" />
             </button>
@@ -654,6 +691,21 @@ onMounted(() => {
 .action-btn:hover {
   border-color: var(--color-border-strong);
   color: var(--color-text);
+}
+
+.action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.action-btn--template {
+  color: var(--color-accent);
+}
+
+.action-btn--template:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
 }
 
 .action-btn--danger:hover {

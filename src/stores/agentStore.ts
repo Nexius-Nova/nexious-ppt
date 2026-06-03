@@ -27,6 +27,8 @@ import type {
   SlideOutline,
   SpecLock,
   SpecSlide,
+  TemplateAsset,
+  TemplateAssetSettings,
   TemplateStyle,
   VersionSnapshot,
   WorkflowStep,
@@ -36,7 +38,10 @@ import type {
 const cloneSteps = (): WorkflowStep[] => workflowSteps.map((step) => ({ ...step }));
 const cloneSkills = (): SkillDefinition[] => defaultSkills.map((skill) => ({ ...skill, params: { ...skill.params } }));
 const clonePrompts = (): PromptDefinition[] => defaultPrompts.map((prompt) => ({ ...prompt }));
-const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => ({ ...template }));
+const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => ({
+  ...template,
+  settings: template.settings ? structuredClone(template.settings) : undefined,
+}));
 const cloneConfigOptions = (): ConfigOptionGroups => ({
   summaryLength: [
     { value: 'brief', label: '简洁' },
@@ -98,6 +103,7 @@ export const useAgentStore = defineStore('agent', () => {
   const prompts = ref<PromptDefinition[]>(clonePrompts());
   const pptProjects = ref<PptProject[]>([]);
   const templates = ref<PptTemplate[]>(cloneTemplates());
+  const selectedTemplate = ref<TemplateAsset | null>(null);
   const activePptId = ref<string | null>(null);
   const exportArtifacts = ref<ExportArtifact[]>([]);
   const activityLog = ref<string[]>(['系统就绪，等待添加 PPT 项目。']);
@@ -228,6 +234,7 @@ export const useAgentStore = defineStore('agent', () => {
         template: 'auto',
         skillIntensity: 70
       },
+      selectedTemplate: null,
       outline: [],
       images: [],
       exportArtifacts: [],
@@ -281,6 +288,9 @@ export const useAgentStore = defineStore('agent', () => {
     return {
       input: { ...input.value, files: [...input.value.files] },
       parameters: { ...parameters.value },
+      selectedTemplate: selectedTemplate.value
+        ? { ...selectedTemplate.value, settings: structuredClone(selectedTemplate.value.settings) }
+        : null,
       outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
       images: persistable
         ? images.value.map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url }))
@@ -315,6 +325,9 @@ export const useAgentStore = defineStore('agent', () => {
   function restoreProjectState(state: PptProjectState) {
     input.value = { ...state.input, files: [...state.input.files] };
     parameters.value = { ...state.parameters };
+    selectedTemplate.value = state.selectedTemplate
+      ? { ...state.selectedTemplate, settings: structuredClone(state.selectedTemplate.settings || {}) }
+      : null;
     outline.value = state.outline.map(s => ({ ...s }));
     images.value = state.images.map(img => ({ ...img }));
     syncGeneratedSlidesFromImages();
@@ -436,6 +449,115 @@ export const useAgentStore = defineStore('agent', () => {
     if (text.includes('金融') || text.includes('财务') || text.includes('finance')) return 'finance';
     if (text.includes('创意') || text.includes('产品') || text.includes('路演') || text.includes('creative') || text.includes('product') || text.includes('pitch')) return 'creative';
     return 'business';
+  }
+
+  function parseSettingsValue(value: unknown): Record<string, any> {
+    if (!value) return {};
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+    return typeof value === 'object' ? value as Record<string, any> : {};
+  }
+
+  function toStringArray(value: unknown): string[] {
+    if (Array.isArray(value)) return value.map(String).map(item => item.trim()).filter(Boolean);
+    if (typeof value === 'string') {
+      return value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  function buildDefaultTemplateSettings(template: Partial<PptTemplate & TemplateAsset>): TemplateAssetSettings {
+    const category = template.category || '通用';
+    const accent = template.accent || '#334155';
+    return {
+      styleGuide: {
+        visualTone: template.description || `${category}场景的完整 PPT 方案`,
+        colorPalette: [accent, '#172026', '#F7F8F5'],
+        typography: '清晰中文无衬线字体，标题层级明确',
+        iconStyle: '简洁线性图标'
+      },
+      layoutGuide: {
+        cover: '封面突出主题和关键信息',
+        section: '章节页用于承接叙事转折',
+        contentLayouts: ['图文页', '三段式要点页', '对比页'],
+        dataLayouts: ['指标卡', '趋势图', '矩阵分析'],
+        summary: '结尾页提炼结论和下一步行动'
+      },
+      outlinePattern: ['背景与目标', '核心洞察', '方案设计', '执行路径', '总结展望'],
+      previewSlides: [
+        { title: '封面', layout: 'cover', description: '展示主题、受众和场景' },
+        { title: '核心内容', layout: 'content', description: '承载主要观点和论据' },
+        { title: '总结', layout: 'ending', description: '收束结论和行动建议' },
+      ],
+      constraints: {
+        preferredSlideCount: template.slideCount || 10,
+        suitableFor: [category],
+        avoid: ['不要照搬示例文字', '不要固定套用到未选择模板的项目']
+      }
+    };
+  }
+
+  function normalizeTemplateSettings(settings: unknown, template: Partial<PptTemplate & TemplateAsset>): TemplateAssetSettings {
+    const raw = parseSettingsValue(settings);
+    const fallback = buildDefaultTemplateSettings(template);
+    return {
+      styleGuide: {
+        ...fallback.styleGuide,
+        ...(raw.styleGuide || {}),
+        colorPalette: toStringArray(raw.styleGuide?.colorPalette).length
+          ? toStringArray(raw.styleGuide?.colorPalette)
+          : fallback.styleGuide?.colorPalette,
+      },
+      layoutGuide: {
+        ...fallback.layoutGuide,
+        ...(raw.layoutGuide || {}),
+        contentLayouts: toStringArray(raw.layoutGuide?.contentLayouts).length
+          ? toStringArray(raw.layoutGuide?.contentLayouts)
+          : fallback.layoutGuide?.contentLayouts,
+        dataLayouts: toStringArray(raw.layoutGuide?.dataLayouts).length
+          ? toStringArray(raw.layoutGuide?.dataLayouts)
+          : fallback.layoutGuide?.dataLayouts,
+      },
+      outlinePattern: toStringArray(raw.outlinePattern).length ? toStringArray(raw.outlinePattern) : fallback.outlinePattern,
+      previewSlides: Array.isArray(raw.previewSlides) && raw.previewSlides.length
+        ? raw.previewSlides.map((slide: any) => ({
+            title: String(slide.title || '示例页'),
+            layout: String(slide.layout || 'content'),
+            description: slide.description ? String(slide.description) : undefined,
+            svg: typeof slide.svg === 'string' && slide.svg.trim() ? slide.svg : undefined,
+            pageNumber: Number(slide.pageNumber) || undefined,
+          }))
+        : fallback.previewSlides,
+      constraints: {
+        ...fallback.constraints,
+        ...(raw.constraints || {}),
+        suitableFor: toStringArray(raw.constraints?.suitableFor).length
+          ? toStringArray(raw.constraints?.suitableFor)
+          : fallback.constraints?.suitableFor,
+        avoid: toStringArray(raw.constraints?.avoid).length ? toStringArray(raw.constraints?.avoid) : fallback.constraints?.avoid,
+      }
+    };
+  }
+
+  function toTemplateAsset(template: Partial<PptTemplate & TemplateAsset> & { id: string | number; name: string }): TemplateAsset {
+    const base = {
+      id: String(template.id),
+      name: template.name,
+      category: template.category || '',
+      description: template.description || '',
+      slideCount: Number(template.slideCount || (template as any).slide_count || 10),
+      accent: template.accent || '#334155',
+    };
+    return {
+      ...base,
+      settings: normalizeTemplateSettings(template.settings, base),
+    };
   }
 
   function pushLog(message: string) {
@@ -599,7 +721,7 @@ export const useAgentStore = defineStore('agent', () => {
         title: topic,
         topic,
         description: input.value.content.trim() || '自动创建的 PPT 项目',
-        templateId: parameters.value.template || 'auto'
+        templateId: 'auto'
       });
       toastStore.info('已创建 PPT 项目', `已自动创建项目：${topic}`);
     }
@@ -626,7 +748,6 @@ export const useAgentStore = defineStore('agent', () => {
     const freshState = makeDefaultProjectState();
     freshState.input.topic = data.topic.trim();
     freshState.input.content = data.description.trim();
-    freshState.parameters.template = mapTemplateToStyle(data.templateId);
 
     const project: PptProject = {
       id: createId('ppt'),
@@ -662,7 +783,6 @@ export const useAgentStore = defineStore('agent', () => {
     const freshState = makeDefaultProjectState();
     freshState.input.topic = topic;
     freshState.input.content = data.description.trim();
-    freshState.parameters.template = mapTemplateToStyle(data.templateId);
 
     try {
       const response = await projectApi.create({
@@ -1169,7 +1289,8 @@ export const useAgentStore = defineStore('agent', () => {
           tone: parameters.value.tone,
           summaryLength: parameters.value.summaryLength,
           imageStyle: parameters.value.imageStyle,
-          template: parameters.value.template || 'auto',
+          template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
+          templateAsset: selectedTemplate.value,
           promptContent: undefined,
           skills: [],
         },
@@ -2044,7 +2165,15 @@ export const useAgentStore = defineStore('agent', () => {
           category: t.category || '',
           description: t.description || '',
           slideCount: t.slide_count || 10,
-          accent: t.accent || '#D9F26E'
+          accent: t.accent || '#334155',
+          settings: normalizeTemplateSettings(t.settings, {
+            id: String(t.id),
+            name: t.name,
+            category: t.category || '',
+            description: t.description || '',
+            slideCount: t.slide_count || 10,
+            accent: t.accent || '#334155'
+          })
         }));
       }
     } catch (error) {
@@ -2079,28 +2208,30 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  function applyGalleryTemplate(template: { id: number | string; name: string; category?: string | null }) {
-    const templateId = String(template.id);
-    const style = mapTemplateToStyle(templateId);
-
-    parameters.value = {
-      ...parameters.value,
-      template: style
-    };
+  function applyGalleryTemplate(template: Partial<PptTemplate & TemplateAsset> & { id: number | string; name: string }) {
+    const templateAsset = toTemplateAsset(template);
 
     if (activePpt.value) {
-      activePpt.value.templateId = templateId;
+      selectedTemplate.value = templateAsset;
+      activePpt.value.templateId = templateAsset.id;
       activePpt.value.updatedAt = Date.now();
-    } else if (input.value.topic.trim()) {
-      addPptProject({
-        title: input.value.topic.trim(),
-        topic: input.value.topic.trim(),
-        description: input.value.content.trim() || '通过模板广场创建',
-        templateId
-      });
+    } else {
+      const toastStore = useToastStore();
+      toastStore.info('请先选择 PPT 项目', '模板方案只会应用到当前 PPT。');
+      return;
     }
 
-    pushLog(`已应用模板：${template.name}（${template.category || '未分类'}），样式：${style}`);
+    pushLog(`已应用模板方案：${templateAsset.name}`);
+    syncToProject();
+  }
+
+  function clearGalleryTemplate() {
+    selectedTemplate.value = null;
+    if (activePpt.value) {
+      activePpt.value.templateId = 'auto';
+      activePpt.value.updatedAt = Date.now();
+    }
+    pushLog('已清除模板方案。');
     syncToProject();
   }
 
@@ -2243,6 +2374,7 @@ export const useAgentStore = defineStore('agent', () => {
     prompts,
     pptProjects,
     templates,
+    selectedTemplate,
     activePptId,
     activePpt,
     exportArtifacts,
@@ -2320,6 +2452,7 @@ export const useAgentStore = defineStore('agent', () => {
     fetchSkills,
     fetchTemplates,
     applyGalleryTemplate,
+    clearGalleryTemplate,
     initializeData,
     saveWorkflow,
     restoreWorkflow,

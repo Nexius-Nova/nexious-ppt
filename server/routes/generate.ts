@@ -13,7 +13,7 @@ import {
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { StrategistInput, DesignSpec, SpecLock } from '../engine/index.js';
 import { inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
-import { exportWithPptMaster } from '../engine/ppt-master-adapter.js';
+import { exportWithNexiousPpt } from '../engine/ppt-exporter.js';
 
 const router = Router();
 const DEFAULT_USER_ID = 1;
@@ -317,7 +317,7 @@ router.post('/export-pptx', async (req: Request, res: Response) => {
         }
       : buildSpecLock(spec);
 
-    const result = await exportWithPptMaster(
+    const result = await exportWithNexiousPpt(
       pages.map((page: any, index: number) => ({
         pageNumber: page.pageNumber || index + 1,
         svg: page.svg,

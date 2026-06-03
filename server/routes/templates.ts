@@ -9,7 +9,7 @@ router.use(authMiddleware);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { category } = req.query;
-    let sql = 'SELECT id, name, category, description, slide_count, accent, preview_url, is_public, created_at, updated_at FROM templates WHERE (user_id = ? OR is_public = 1)';
+    let sql = 'SELECT id, name, category, description, slide_count, accent, preview_url, settings, is_public, created_at, updated_at FROM templates WHERE (user_id = ? OR is_public = 1)';
     const params: any[] = [req.userId];
     
     if (category && category !== '全部') {

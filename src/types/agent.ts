@@ -90,6 +90,7 @@ export interface PromptDefinition {
 export interface PptProjectState {
   input: DeckInput;
   parameters: AgentParameters;
+  selectedTemplate: TemplateAsset | null;
   outline: SlideOutline[];
   images: GeneratedImage[];
   exportArtifacts: ExportArtifact[];
@@ -126,6 +127,46 @@ export interface PptTemplate {
   description: string;
   slideCount: number;
   accent: string;
+  settings?: TemplateAssetSettings;
+}
+
+export interface TemplateAssetSettings {
+  styleGuide?: {
+    visualTone?: string;
+    colorPalette?: string[];
+    typography?: string;
+    iconStyle?: string;
+  };
+  layoutGuide?: {
+    cover?: string;
+    section?: string;
+    contentLayouts?: string[];
+    dataLayouts?: string[];
+    summary?: string;
+  };
+  outlinePattern?: string[];
+  previewSlides?: Array<{
+    title: string;
+    layout: string;
+    description?: string;
+    svg?: string;
+    pageNumber?: number;
+  }>;
+  constraints?: {
+    preferredSlideCount?: number;
+    suitableFor?: string[];
+    avoid?: string[];
+  };
+}
+
+export interface TemplateAsset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  slideCount: number;
+  accent: string;
+  settings: TemplateAssetSettings;
 }
 
 export interface ExportArtifact {

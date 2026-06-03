@@ -1,47 +1,315 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
-import { Search, LayoutTemplate, Palette, Layers, Star, Eye, FileText, Image, Plus, Edit3, Trash2 } from 'lucide-vue-next';
-import UiButton from '@/components/ui/UiButton.vue';
-import UiInput from '@/components/ui/UiInput.vue';
-import UiSelect from '@/components/ui/UiSelect.vue';
-import UiField from '@/components/ui/UiField.vue';
+import { computed, onMounted, ref } from 'vue';
+import { storeToRefs } from 'pinia';
+import {
+  Check,
+  Eye,
+  FileText,
+  Layers,
+  ListTree,
+  Palette,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-vue-next';
 import UiBadge from '@/components/ui/UiBadge.vue';
+import UiButton from '@/components/ui/UiButton.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
-import { useToastStore } from '@/stores/toastStore';
+import UiField from '@/components/ui/UiField.vue';
+import UiInput from '@/components/ui/UiInput.vue';
+import UiTextarea from '@/components/ui/UiTextarea.vue';
 import { templateApi, type Template } from '@/services/api';
+import { useAgentStore } from '@/stores/agentStore';
+import { useToastStore } from '@/stores/toastStore';
+import type { TemplateAssetSettings } from '@/types/agent';
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
+type EditorForm = {
+  name: string;
+  category: string;
+  description: string;
+  slide_count: number;
+  accent: string;
+  is_public: boolean;
+  visualTone: string;
+  colorPalette: string;
+  typography: string;
+  iconStyle: string;
+  coverLayout: string;
+  sectionLayout: string;
+  contentLayouts: string;
+  dataLayouts: string;
+  summaryLayout: string;
+  outlinePattern: string;
+  previewSlides: string;
+  suitableFor: string;
+  avoid: string;
+};
+
+type EditorSectionId = 'basic' | 'style' | 'layout' | 'outline' | 'rules';
 
 const toastStore = useToastStore();
+const agentStore = useAgentStore();
+const { activePpt, selectedTemplate } = storeToRefs(agentStore);
 
 const templates = ref<Template[]>([]);
 const loading = ref(false);
+const saving = ref(false);
 const searchQuery = ref('');
-const selectedCategory = ref<string | null>(null);
-const showPreviewModal = ref(false);
+const selectedCategory = ref('全部');
 const previewTemplate = ref<Template | null>(null);
+const editingTemplate = ref<Template | null>(null);
+const showPreviewModal = ref(false);
+const showEditor = ref(false);
+const zoomPreviewSlide = ref<NonNullable<TemplateAssetSettings['previewSlides']>[number] | null>(null);
+const activeEditorSection = ref<EditorSectionId>('basic');
+
+const editorForm = ref<EditorForm>(createEmptyForm());
+
+const editorSections: Array<{ id: EditorSectionId; title: string; desc: string }> = [
+  { id: 'basic', title: '基础', desc: '名称、分类、页数' },
+  { id: 'style', title: '主题', desc: '气质、颜色、字体' },
+  { id: 'layout', title: '布局', desc: '封面、内容、数据页' },
+  { id: 'outline', title: '大纲', desc: '结构和示例页' },
+  { id: 'rules', title: '边界', desc: '适用和避免事项' },
+];
 
 const categories = computed(() => {
-  const cats = new Set(templates.value.map(t => t.category).filter(Boolean));
-  return ['全部', ...Array.from(cats)] as string[];
+  const values = templates.value.map((template) => template.category).filter(Boolean) as string[];
+  return ['全部', ...Array.from(new Set(values))];
 });
 
 const filteredTemplates = computed(() => {
-  let result = templates.value;
-  
-  if (selectedCategory.value && selectedCategory.value !== '全部') {
-    result = result.filter(t => t.category === selectedCategory.value);
-  }
-  
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase();
-    result = result.filter(t => 
-      t.name.toLowerCase().includes(query) ||
-      (t.description && t.description.toLowerCase().includes(query)) ||
-      (t.category && t.category.toLowerCase().includes(query))
-    );
-  }
-  
-  return result;
+  const keyword = searchQuery.value.trim().toLowerCase();
+  return templates.value.filter((template) => {
+    const settings = normalizeSettings(template);
+    const content = [
+      template.name,
+      template.category,
+      template.description,
+      settings.styleGuide?.visualTone,
+      ...(settings.outlinePattern || []),
+      ...(settings.layoutGuide?.contentLayouts || []),
+    ].join(' ').toLowerCase();
+    const categoryMatched = selectedCategory.value === '全部' || template.category === selectedCategory.value;
+    const keywordMatched = !keyword || content.includes(keyword);
+    return categoryMatched && keywordMatched;
+  });
 });
+
+const editorColors = computed(() => {
+  const colors = splitLines(editorForm.value.colorPalette)
+    .map((color) => color.trim())
+    .filter((color) => /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color));
+  return colors.length ? colors : [editorForm.value.accent || '#334155'];
+});
+
+const editorContentLayouts = computed(() => splitLines(editorForm.value.contentLayouts));
+const editorDataLayouts = computed(() => splitLines(editorForm.value.dataLayouts));
+const editorOutlineItems = computed(() => splitLines(editorForm.value.outlinePattern));
+const editorSuitableItems = computed(() => splitLines(editorForm.value.suitableFor || editorForm.value.category));
+const editorAvoidItems = computed(() => splitLines(editorForm.value.avoid));
+const editorPreviewSlides = computed(() => parsePreviewSlideLines(editorForm.value.previewSlides));
+const editorCompleteness = computed(() => {
+  const checks = [
+    Boolean(editorForm.value.name.trim()),
+    Boolean(editorForm.value.visualTone.trim()),
+    editorColors.value.length >= 2,
+    editorContentLayouts.value.length > 0,
+    editorOutlineItems.value.length > 0,
+    editorPreviewSlides.value.length > 0,
+  ];
+  return Math.round((checks.filter(Boolean).length / checks.length) * 100);
+});
+
+function createEmptyForm(): EditorForm {
+  return {
+    name: '',
+    category: '',
+    description: '',
+    slide_count: 10,
+    accent: '#334155',
+    is_public: false,
+    visualTone: '',
+    colorPalette: '#334155, #172026, #C9A227',
+    typography: '清晰中文无衬线字体，标题层级明确',
+    iconStyle: '简洁线性图标',
+    coverLayout: '封面突出主题和关键结论',
+    sectionLayout: '章节页承接叙事转折',
+    contentLayouts: '图文页\n三段式要点页\n对比页',
+    dataLayouts: '指标卡\n趋势图\n矩阵分析',
+    summaryLayout: '总结页提炼结论和下一步行动',
+    outlinePattern: '背景与目标\n核心洞察\n方案设计\n执行路径\n总结展望',
+    previewSlides: '封面|cover|展示主题、受众和场景\n核心内容|content|承载主要观点和论据\n总结|ending|收束结论和行动建议',
+    suitableFor: '',
+    avoid: '不要照搬示例文字\n不要固定套用到未选择模板的项目',
+  };
+}
+
+function parseSettings(value: unknown): Record<string, any> {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === 'object' ? value as Record<string, any> : {};
+}
+
+function splitLines(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  if (typeof value === 'string') return value.split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
+  return [];
+}
+
+function parsePreviewSlideLines(value: string) {
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      const [title, layout, description] = line.split('|').map((item) => item?.trim());
+      return {
+        title: title || `示例页 ${index + 1}`,
+        layout: layout || 'content',
+        description: description || undefined,
+      };
+    });
+}
+
+function normalizeSettings(template: Template): TemplateAssetSettings {
+  const raw = parseSettings(template.settings);
+  return {
+    styleGuide: {
+      visualTone: raw.styleGuide?.visualTone || template.description || '按主题定制的演示风格',
+      colorPalette: splitLines(raw.styleGuide?.colorPalette).length
+        ? splitLines(raw.styleGuide?.colorPalette)
+        : [template.accent || '#334155', '#172026', '#C9A227'],
+      typography: raw.styleGuide?.typography || '清晰中文无衬线字体',
+      iconStyle: raw.styleGuide?.iconStyle || '简洁线性图标',
+    },
+    layoutGuide: {
+      cover: raw.layoutGuide?.cover || '封面突出主题和关键结论',
+      section: raw.layoutGuide?.section || '章节页承接叙事转折',
+      contentLayouts: splitLines(raw.layoutGuide?.contentLayouts).length
+        ? splitLines(raw.layoutGuide?.contentLayouts)
+        : ['图文页', '三段式要点页', '对比页'],
+      dataLayouts: splitLines(raw.layoutGuide?.dataLayouts).length
+        ? splitLines(raw.layoutGuide?.dataLayouts)
+        : ['指标卡', '趋势图', '矩阵分析'],
+      summary: raw.layoutGuide?.summary || '总结页提炼结论和下一步行动',
+    },
+    outlinePattern: splitLines(raw.outlinePattern).length
+      ? splitLines(raw.outlinePattern)
+      : ['背景与目标', '核心洞察', '方案设计', '执行路径', '总结展望'],
+    previewSlides: Array.isArray(raw.previewSlides) && raw.previewSlides.length
+      ? raw.previewSlides.map((slide: any) => ({
+          title: String(slide.title || '示例页'),
+          layout: String(slide.layout || 'content'),
+          description: slide.description ? String(slide.description) : undefined,
+          svg: typeof slide.svg === 'string' && slide.svg.trim() ? slide.svg : undefined,
+          pageNumber: Number(slide.pageNumber) || undefined,
+        }))
+      : [
+          { title: '封面', layout: 'cover', description: '展示主题、受众和场景' },
+          { title: '核心内容', layout: 'content', description: '承载主要观点和论据' },
+          { title: '总结', layout: 'ending', description: '收束结论和行动建议' },
+        ],
+    constraints: {
+      preferredSlideCount: raw.constraints?.preferredSlideCount || template.slide_count || 10,
+      suitableFor: splitLines(raw.constraints?.suitableFor).length
+        ? splitLines(raw.constraints?.suitableFor)
+        : [template.category || '通用'],
+      avoid: splitLines(raw.constraints?.avoid).length
+        ? splitLines(raw.constraints?.avoid)
+        : ['不要照搬示例文字', '不要固定套用到未选择模板的项目'],
+    },
+  };
+}
+
+function buildSettingsFromForm(): TemplateAssetSettings {
+  const existingSlides = editingTemplate.value ? normalizeSettings(editingTemplate.value).previewSlides || [] : [];
+  return {
+    styleGuide: {
+      visualTone: editorForm.value.visualTone.trim(),
+      colorPalette: splitLines(editorForm.value.colorPalette),
+      typography: editorForm.value.typography.trim(),
+      iconStyle: editorForm.value.iconStyle.trim(),
+    },
+    layoutGuide: {
+      cover: editorForm.value.coverLayout.trim(),
+      section: editorForm.value.sectionLayout.trim(),
+      contentLayouts: splitLines(editorForm.value.contentLayouts),
+      dataLayouts: splitLines(editorForm.value.dataLayouts),
+      summary: editorForm.value.summaryLayout.trim(),
+    },
+    outlinePattern: splitLines(editorForm.value.outlinePattern),
+    previewSlides: editorForm.value.previewSlides
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line, index) => {
+        const [title, layout, description] = line.split('|').map((item) => item?.trim());
+        const normalizedTitle = title || '示例页';
+        const normalizedLayout = layout || 'content';
+        const existing = existingSlides.find((slide) => slide.title === normalizedTitle && slide.layout === normalizedLayout);
+        return {
+          title: normalizedTitle,
+          layout: normalizedLayout,
+          description: description || existing?.description || `示例页面 ${index + 1}`,
+          svg: existing?.svg,
+          pageNumber: existing?.pageNumber,
+        };
+      }),
+    constraints: {
+      preferredSlideCount: editorForm.value.slide_count,
+      suitableFor: splitLines(editorForm.value.suitableFor || editorForm.value.category),
+      avoid: splitLines(editorForm.value.avoid),
+    },
+  };
+}
+
+function normalizePreviewSvg(svg: string) {
+  const baseUrl = API_BASE_URL.replace(/\/+$/, '');
+  return svg
+    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])\.?\/generated-images\//gi, `$1${baseUrl}/generated-images/`)
+    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])generated-images\//gi, `$1${baseUrl}/generated-images/`);
+}
+
+function openZoomPreview(slide: NonNullable<TemplateAssetSettings['previewSlides']>[number]) {
+  zoomPreviewSlide.value = slide;
+}
+
+function templateToStorePayload(template: Template) {
+  return {
+    id: String(template.id),
+    name: template.name,
+    category: template.category || '',
+    description: template.description || '',
+    slideCount: template.slide_count || 10,
+    accent: template.accent || '#334155',
+    settings: normalizeSettings(template),
+  };
+}
+
+function isApplied(template: Template) {
+  return selectedTemplate.value?.id === String(template.id);
+}
+
+function metricCount(template: Template, key: 'layouts' | 'outline' | 'preview') {
+  const settings = normalizeSettings(template);
+  if (key === 'layouts') {
+    return (settings.layoutGuide?.contentLayouts?.length || 0) + (settings.layoutGuide?.dataLayouts?.length || 0);
+  }
+  if (key === 'outline') return settings.outlinePattern?.length || 0;
+  return settings.previewSlides?.length || 0;
+}
 
 async function fetchTemplates() {
   loading.value = true;
@@ -51,14 +319,11 @@ async function fetchTemplates() {
       templates.value = response.data;
     }
   } catch (error) {
-    console.error('Failed to fetch templates:', error);
+    console.error('加载模板失败:', error);
+    toastStore.error('加载模板失败');
   } finally {
     loading.value = false;
   }
-}
-
-function selectCategory(category: string) {
-  selectedCategory.value = category;
 }
 
 function openPreviewModal(template: Template) {
@@ -66,315 +331,601 @@ function openPreviewModal(template: Template) {
   showPreviewModal.value = true;
 }
 
-const templateFeatures = computed(() => {
-  if (!previewTemplate.value) return [];
-  return [
-    { icon: FileText, label: '页数', value: `${previewTemplate.value.slide_count} 页` },
-    { icon: Layers, label: '分类', value: previewTemplate.value.category || '未分类' },
-    { icon: Palette, label: '主题色', value: previewTemplate.value.accent }
-  ];
-});
-
-const previewSlides = computed(() => {
-  if (!previewTemplate.value) return { slides: [], remaining: 0 };
-  const total = previewTemplate.value.slide_count;
-  const maxShow = 8;
-  const slides = [];
-  for (let i = 1; i <= Math.min(total, maxShow); i++) {
-    slides.push({
-      index: i,
-      isTitle: i === 1,
-      hasImage: i % 3 === 0
-    });
+function applyTemplate(template: Template) {
+  if (!activePpt.value) {
+    toastStore.info('请先选择项目', '模板方案只会应用到已打开的项目。');
+    return;
   }
-  return {
-    slides,
-    remaining: total > maxShow ? total - maxShow : 0
-  };
-});
+  agentStore.applyGalleryTemplate(templateToStorePayload(template));
+  toastStore.success('已应用模板', template.name);
+}
 
-onMounted(() => {
-  fetchTemplates();
-});
-
-// ---- Template Editor ----
-const showEditor = ref(false);
-const editingTemplate = ref<Template | null>(null);
-const saving = ref(false);
-const editorForm = ref({
-  name: '',
-  category: '',
-  description: '',
-  slide_count: 10,
-  accent: '#ef2d2d',
-  is_public: false
-});
+function clearTemplate() {
+  agentStore.clearGalleryTemplate();
+  toastStore.success('已清除模板方案');
+}
 
 function openCreateModal() {
   editingTemplate.value = null;
-  editorForm.value = { name: '', category: '', description: '', slide_count: 10, accent: '#ef2d2d', is_public: false };
+  editorForm.value = createEmptyForm();
+  activeEditorSection.value = 'basic';
   showEditor.value = true;
 }
 
 function openEditModal(template: Template) {
+  const settings = normalizeSettings(template);
   editingTemplate.value = template;
   editorForm.value = {
     name: template.name,
     category: template.category || '',
     description: template.description || '',
-    slide_count: template.slide_count,
-    accent: template.accent || '#ef2d2d',
-    is_public: template.is_public || false
+    slide_count: template.slide_count || settings.constraints?.preferredSlideCount || 10,
+    accent: template.accent || '#334155',
+    is_public: Boolean(template.is_public),
+    visualTone: settings.styleGuide?.visualTone || '',
+    colorPalette: (settings.styleGuide?.colorPalette || []).join(', '),
+    typography: settings.styleGuide?.typography || '',
+    iconStyle: settings.styleGuide?.iconStyle || '',
+    coverLayout: settings.layoutGuide?.cover || '',
+    sectionLayout: settings.layoutGuide?.section || '',
+    contentLayouts: (settings.layoutGuide?.contentLayouts || []).join('\n'),
+    dataLayouts: (settings.layoutGuide?.dataLayouts || []).join('\n'),
+    summaryLayout: settings.layoutGuide?.summary || '',
+    outlinePattern: (settings.outlinePattern || []).join('\n'),
+    previewSlides: (settings.previewSlides || []).map((slide) => [slide.title, slide.layout, slide.description].filter(Boolean).join('|')).join('\n'),
+    suitableFor: (settings.constraints?.suitableFor || []).join('\n'),
+    avoid: (settings.constraints?.avoid || []).join('\n'),
   };
+  activeEditorSection.value = 'basic';
   showEditor.value = true;
 }
 
 async function saveTemplate() {
   if (!editorForm.value.name.trim()) {
-    toastStore.warning('请输入模版名称');
+    toastStore.warning('请输入模板名称');
+    activeEditorSection.value = 'basic';
     return;
   }
+  if (!editorForm.value.visualTone.trim()) {
+    toastStore.warning('请填写视觉气质');
+    activeEditorSection.value = 'style';
+    return;
+  }
+  if (editorOutlineItems.value.length === 0) {
+    toastStore.warning('请至少填写一段大纲结构');
+    activeEditorSection.value = 'outline';
+    return;
+  }
+
+  const payload = {
+    name: editorForm.value.name.trim(),
+    category: editorForm.value.category.trim() || '通用',
+    description: editorForm.value.description.trim(),
+    slide_count: Number(editorForm.value.slide_count) || 10,
+    accent: editorForm.value.accent || '#334155',
+    is_public: editorForm.value.is_public,
+    settings: buildSettingsFromForm(),
+  };
+
   saving.value = true;
   try {
-    if (editingTemplate.value) {
-      const res = await templateApi.update(editingTemplate.value.id, editorForm.value);
-      if (res.success) toastStore.success('模版已更新');
+    const response = editingTemplate.value
+      ? await templateApi.update(editingTemplate.value.id, payload)
+      : await templateApi.create(payload);
+    if (response.success) {
+      toastStore.success(editingTemplate.value ? '模板方案已更新' : '模板方案已创建');
+      showEditor.value = false;
+      await fetchTemplates();
+      await agentStore.fetchTemplates();
     } else {
-      const res = await templateApi.create(editorForm.value);
-      if (res.success) toastStore.success('模版已创建');
+      toastStore.error(response.message || '保存失败');
     }
-    showEditor.value = false;
-    await fetchTemplates();
-  } catch (e: any) {
-    toastStore.error('保存失败', e.message);
+  } catch (error: any) {
+    toastStore.error('保存失败', error.message);
   } finally {
     saving.value = false;
   }
 }
 
+function resetEditorDefaults() {
+  const base = createEmptyForm();
+  editorForm.value = {
+    ...editorForm.value,
+    visualTone: base.visualTone,
+    colorPalette: base.colorPalette,
+    typography: base.typography,
+    iconStyle: base.iconStyle,
+    coverLayout: base.coverLayout,
+    sectionLayout: base.sectionLayout,
+    contentLayouts: base.contentLayouts,
+    dataLayouts: base.dataLayouts,
+    summaryLayout: base.summaryLayout,
+    outlinePattern: base.outlinePattern,
+    previewSlides: base.previewSlides,
+    suitableFor: base.suitableFor,
+    avoid: base.avoid,
+  };
+}
+
 async function deleteTemplate(template: Template) {
-  if (!confirm(`确定要删除模版「${template.name}」吗？`)) return;
+  if (!confirm(`确定删除「${template.name}」吗？`)) return;
   try {
-    const res = await templateApi.delete(template.id);
-    if (res.success) {
-      toastStore.success('模版已删除');
+    const response = await templateApi.delete(template.id);
+    if (response.success) {
+      if (isApplied(template)) clearTemplate();
+      toastStore.success('模板方案已删除');
       await fetchTemplates();
+      await agentStore.fetchTemplates();
+    } else {
+      toastStore.error(response.message || '删除失败');
     }
-  } catch (e: any) {
-    toastStore.error('删除失败', e.message);
+  } catch (error: any) {
+    toastStore.error('删除失败', error.message);
   }
 }
+
+onMounted(fetchTemplates);
 </script>
 
 <template>
   <div class="template-page">
-    <div class="page-header">
-      <div class="page-header__info">
-        <h2>模版广场</h2>
-        <p>选择适合您的 PPT 模版，快速开始创作</p>
+    <header class="page-header">
+      <div>
+        <p class="page-kicker">PPT 方案资产库</p>
+        <h2>模板广场</h2>
+        <p>管理可复用的主题风格、排版布局、大纲结构和示例预览。未应用模板时，AI 会根据输入内容自行设计。</p>
       </div>
-      <UiButton @click="openCreateModal">
-        <Plus :size="14" />
-        创建模版
+      <UiButton variant="primary" @click="openCreateModal">
+        <Plus :size="15" />
+        新建方案
       </UiButton>
-    </div>
+    </header>
 
-    <div class="filters">
-      <div class="search-bar">
-        <UiInput
-          v-model="searchQuery"
-          placeholder="搜索模版..."
-          :prefix-icon="Search"
-        />
-      </div>
+    <section class="toolbar">
+      <UiInput v-model="searchQuery" class="toolbar__search" placeholder="搜索主题、布局、大纲..." :prefix-icon="Search" />
       <div class="category-tabs">
         <button
           v-for="category in categories"
           :key="category"
           class="category-tab"
-          :class="{ 'category-tab--active': selectedCategory === category || (category === '全部' && !selectedCategory) }"
-          @click="selectCategory(category)"
+          :class="{ 'category-tab--active': selectedCategory === category }"
+          @click="selectedCategory = category"
         >
           {{ category }}
         </button>
       </div>
-    </div>
+    </section>
 
-    <div v-if="loading && templates.length === 0" class="loading-state">
-      加载中...
-    </div>
+    <div v-if="loading && templates.length === 0" class="loading-state">正在加载模板方案...</div>
+    <UiEmpty
+      v-else-if="filteredTemplates.length === 0"
+      class="empty-state"
+      :title="searchQuery ? '没有匹配的模板方案' : '暂无模板方案'"
+      :description="searchQuery ? '换个关键词或清空分类后再试。' : '新建一个方案，保存你的 PPT 主题、布局、大纲结构和示例预览。'"
+    />
 
-    <div v-else-if="filteredTemplates.length === 0" class="empty-state">
-      <UiEmpty
-        :title="searchQuery ? '未找到匹配模版' : '暂无模版'"
-        :description="searchQuery ? '尝试其他搜索词或分类' : '请稍后再来'"
-      />
-    </div>
-
-    <div v-else class="template-grid">
-      <div
+    <section v-else class="template-grid">
+      <article
         v-for="template in filteredTemplates"
         :key="template.id"
         class="template-card"
+        :class="{ 'template-card--active': isApplied(template) }"
       >
-        <div class="template-card__preview" :style="{ background: template.accent || '#334155' }">
-          <div class="template-card__preview-content">
-            <div class="preview-slide"></div>
-            <div class="preview-slide"></div>
-            <div class="preview-slide preview-slide--small"></div>
+        <div class="template-preview" :style="{ '--accent': template.accent || '#334155' }">
+          <div class="preview-deck">
+            <div
+              v-for="(slide, index) in normalizeSettings(template).previewSlides?.slice(0, 3)"
+              :key="`${template.id}-${slide.title}-${index}`"
+              class="preview-deck__slide"
+              :class="[`preview-deck__slide--${slide.layout}`, { 'preview-deck__slide--svg': slide.svg }]"
+            >
+              <div
+                v-if="slide.svg"
+                class="preview-deck__svg"
+                role="img"
+                :aria-label="slide.title"
+                v-html="normalizePreviewSvg(slide.svg)"
+              />
+              <template v-else>
+                <span class="preview-deck__index">{{ index + 1 }}</span>
+                <strong>{{ slide.title }}</strong>
+                <span></span>
+                <span></span>
+              </template>
+            </div>
+          </div>
+          <UiBadge v-if="isApplied(template)" tone="success" size="sm">
+            <Check :size="11" />
+            当前使用
+          </UiBadge>
+        </div>
+
+        <div class="template-body">
+          <div class="template-title-row">
+            <h3>{{ template.name }}</h3>
+            <UiBadge tone="neutral" size="sm">{{ template.category || '通用' }}</UiBadge>
+          </div>
+          <p>{{ template.description || normalizeSettings(template).styleGuide?.visualTone }}</p>
+
+          <div class="style-summary">
+            <Palette :size="14" />
+            <span>{{ normalizeSettings(template).styleGuide?.visualTone }}</span>
+          </div>
+
+          <div class="metric-row">
+            <div class="metric">
+              <Layers :size="14" />
+              <span>{{ metricCount(template, 'layouts') }} 类布局</span>
+            </div>
+            <div class="metric">
+              <ListTree :size="14" />
+              <span>{{ metricCount(template, 'outline') }} 段大纲</span>
+            </div>
+            <div class="metric">
+              <FileText :size="14" />
+              <span>{{ metricCount(template, 'preview') }} 页预览</span>
+            </div>
           </div>
         </div>
 
-        <div class="template-card__body">
-          <div class="template-card__header">
-            <h3 class="template-card__name">{{ template.name }}</h3>
-            <UiBadge tone="neutral" size="sm">{{ template.category || '未分类' }}</UiBadge>
-          </div>
-          
-          <p class="template-card__description">{{ template.description }}</p>
-          
-          <div class="template-card__meta">
-            <span class="meta-item">
-              <Layers :size="12" />
-              {{ template.slide_count }} 页
-            </span>
-          </div>
-        </div>
-
-        <div class="template-card__footer">
-          <UiButton
-            variant="secondary"
-            size="sm"
-            @click="openPreviewModal(template)"
-          >
+        <footer class="template-actions">
+          <UiButton variant="secondary" size="sm" @click="openPreviewModal(template)">
             <Eye :size="14" />
-            查看
+            查看方案
           </UiButton>
-          <button class="action-btn" title="编辑" @click="openEditModal(template)">
-            <Edit3 :size="14" />
+          <UiButton variant="primary" size="sm" :disabled="!activePpt || isApplied(template)" @click="applyTemplate(template)">
+            {{ isApplied(template) ? '已应用' : '应用模板' }}
+          </UiButton>
+          <button class="icon-action" title="编辑" @click="openEditModal(template)">
+            <Pencil :size="14" />
           </button>
-          <button class="action-btn action-btn--danger" title="删除" @click="deleteTemplate(template)">
+          <button class="icon-action icon-action--danger" title="删除" @click="deleteTemplate(template)">
             <Trash2 :size="14" />
           </button>
-        </div>
-      </div>
-    </div>
+        </footer>
+      </article>
+    </section>
 
     <Teleport to="body">
-      <div v-if="showPreviewModal" class="modal-overlay" @click.self="showPreviewModal = false">
-        <div class="modal modal--lg">
-          <div class="modal__header">
-            <h3>模版详情</h3>
-            <button class="modal__close" @click="showPreviewModal = false">×</button>
-          </div>
-          <div class="modal__body">
-            <div class="preview-header" :style="{ background: previewTemplate?.accent || '#334155' }">
-              <div class="preview-header__content">
-                <h2>{{ previewTemplate?.name }}</h2>
-                <UiBadge tone="neutral">{{ previewTemplate?.category || '未分类' }}</UiBadge>
+      <div v-if="showPreviewModal && previewTemplate" class="modal-overlay" @click.self="showPreviewModal = false">
+        <div class="modal modal--preview">
+          <header class="modal-header">
+            <div>
+              <p class="modal-kicker">方案详情</p>
+              <h3>{{ previewTemplate.name }}</h3>
+            </div>
+            <button class="modal-close" @click="showPreviewModal = false">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <div class="modal-body">
+            <div class="detail-hero" :style="{ '--accent': previewTemplate.accent || '#334155' }">
+              <div>
+                <UiBadge tone="neutral" size="sm">{{ previewTemplate.category || '通用' }}</UiBadge>
+                <p>{{ previewTemplate.description || normalizeSettings(previewTemplate).styleGuide?.visualTone }}</p>
               </div>
+              <strong>{{ previewTemplate.slide_count }} 页参考</strong>
             </div>
 
-            <div class="preview-info">
-              <div class="preview-description">
-                <h4>模版描述</h4>
-                <p>{{ previewTemplate?.description }}</p>
-              </div>
-
-              <div class="preview-features">
-                <div
-                  v-for="feature in templateFeatures"
-                  :key="feature.label"
-                  class="feature-item"
-                >
-                  <div class="feature-item__icon">
-                    <component :is="feature.icon" :size="16" />
-                  </div>
-                  <div class="feature-item__content">
-                    <span class="feature-item__label">{{ feature.label }}</span>
-                    <span class="feature-item__value">{{ feature.value }}</span>
-                  </div>
+            <div class="detail-grid">
+              <section class="detail-block">
+                <h4><Palette :size="15" /> 主题风格</h4>
+                <p>{{ normalizeSettings(previewTemplate).styleGuide?.visualTone }}</p>
+                <div class="swatches">
+                  <span
+                    v-for="color in normalizeSettings(previewTemplate).styleGuide?.colorPalette"
+                    :key="color"
+                    class="swatch"
+                    :style="{ background: color }"
+                    :title="color"
+                  ></span>
                 </div>
-              </div>
+                <p>{{ normalizeSettings(previewTemplate).styleGuide?.typography }}</p>
+                <p>{{ normalizeSettings(previewTemplate).styleGuide?.iconStyle }}</p>
+              </section>
 
-              <div class="preview-slides">
-                <h4>页面预览</h4>
-                <div class="slide-previews">
+              <section class="detail-block">
+                <h4><Layers :size="15" /> 排版布局</h4>
+                <p>封面：{{ normalizeSettings(previewTemplate).layoutGuide?.cover }}</p>
+                <p>章节：{{ normalizeSettings(previewTemplate).layoutGuide?.section }}</p>
+                <div class="tag-list">
+                  <span v-for="layout in normalizeSettings(previewTemplate).layoutGuide?.contentLayouts" :key="layout">{{ layout }}</span>
+                  <span v-for="layout in normalizeSettings(previewTemplate).layoutGuide?.dataLayouts" :key="layout">{{ layout }}</span>
+                </div>
+              </section>
+
+              <section class="detail-block">
+                <h4><ListTree :size="15" /> 大纲结构</h4>
+                <ol class="outline-list">
+                  <li v-for="item in normalizeSettings(previewTemplate).outlinePattern" :key="item">{{ item }}</li>
+                </ol>
+              </section>
+
+              <section class="detail-block">
+                <h4><FileText :size="15" /> 示例 PPT 预览</h4>
+                <div class="ppt-preview-grid" :style="{ '--accent': previewTemplate.accent || '#334155' }">
                   <div
-                    v-for="slide in previewSlides.slides"
-                    :key="slide.index"
-                    class="slide-preview-card"
+                    v-for="(slide, index) in normalizeSettings(previewTemplate).previewSlides"
+                    :key="`${slide.title}-${slide.layout}`"
+                    class="ppt-preview-slide"
+                    :class="[`ppt-preview-slide--${slide.layout}`, { 'ppt-preview-slide--svg': slide.svg }]"
                   >
-                    <div class="slide-preview-card__number">{{ slide.index }}</div>
-                    <div class="slide-preview-card__content">
+                    <button class="ppt-preview-slide__stage" type="button" @click="openZoomPreview(slide)">
                       <div
-                        class="slide-preview-card__title"
-                        :style="{ background: previewTemplate?.accent || '#334155' }"
-                      ></div>
-                      <div class="slide-preview-card__bullets">
-                        <div class="slide-preview-card__bullet"></div>
-                        <div class="slide-preview-card__bullet"></div>
-                        <div v-if="!slide.isTitle" class="slide-preview-card__bullet slide-preview-card__bullet--short"></div>
+                        v-if="slide.svg"
+                        class="ppt-preview-slide__svg"
+                        role="img"
+                        :aria-label="slide.title"
+                        v-html="normalizePreviewSvg(slide.svg)"
+                      />
+                      <template v-else>
+                      <span class="ppt-preview-slide__number">{{ index + 1 }}</span>
+                      <strong>{{ slide.title }}</strong>
+                      <div class="ppt-preview-slide__body">
+                        <span></span>
+                        <span></span>
+                        <span></span>
                       </div>
-                      <div v-if="slide.hasImage" class="slide-preview-card__image">
-                        <Image :size="14" />
-                      </div>
-                    </div>
-                  </div>
-                  <div v-if="previewSlides.remaining > 0" class="slide-more-card">
-                    +{{ previewSlides.remaining }}页
+                      <p v-if="slide.description">{{ slide.description }}</p>
+                      </template>
+                    </button>
+                    <div class="ppt-preview-slide__meta">{{ slide.layout }}</div>
                   </div>
                 </div>
-              </div>
+              </section>
             </div>
           </div>
-          <div class="modal__footer">
+
+          <footer class="modal-footer">
             <UiButton variant="secondary" @click="showPreviewModal = false">关闭</UiButton>
-          </div>
+            <UiButton variant="primary" :disabled="!activePpt || isApplied(previewTemplate)" @click="applyTemplate(previewTemplate)">
+              {{ isApplied(previewTemplate) ? '已应用' : '应用模板' }}
+            </UiButton>
+          </footer>
         </div>
       </div>
 
-      <!-- Editor Modal -->
-      <div v-if="showEditor" class="modal-overlay" @click.self="showEditor = false">
-        <div class="modal modal--lg">
-          <div class="modal__header">
-            <h3>{{ editingTemplate ? '编辑模版' : '创建模版' }}</h3>
-            <button class="modal__close" @click="showEditor = false">×</button>
-          </div>
-          <div class="modal__body">
-            <div class="editor-grid">
-              <UiField label="模版名称" required>
-                <UiInput v-model="editorForm.name" placeholder="例如：极简商务" />
-              </UiField>
-              <UiField label="分类">
-                <UiInput v-model="editorForm.category" placeholder="例如：商务、教育、创意" />
-              </UiField>
+      <div v-if="zoomPreviewSlide" class="svg-preview-zoom" @click.self="zoomPreviewSlide = null">
+        <div class="svg-preview-zoom__panel">
+          <header class="svg-preview-zoom__header">
+            <div>
+              <p class="modal-kicker">示例预览</p>
+              <h3>{{ zoomPreviewSlide.title }}</h3>
+              <span>{{ zoomPreviewSlide.layout }}</span>
             </div>
-            <UiField label="描述">
-              <textarea v-model="editorForm.description" class="editor-textarea" placeholder="描述模版的适用场景..." rows="2"></textarea>
-            </UiField>
-            <div class="editor-grid">
-              <UiField label="页数">
-                <input v-model.number="editorForm.slide_count" type="number" min="3" max="30" class="editor-number" />
-              </UiField>
-              <UiField label="主题色">
-                <div class="color-picker-row">
-                  <input v-model="editorForm.accent" type="color" class="color-picker" />
-                  <span class="color-value">{{ editorForm.accent }}</span>
+            <button class="modal-close" title="关闭预览" @click="zoomPreviewSlide = null">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <div class="svg-preview-zoom__body">
+            <div class="svg-preview-zoom__canvas">
+              <div
+                v-if="zoomPreviewSlide.svg"
+                class="svg-preview-zoom__svg"
+                role="img"
+                :aria-label="zoomPreviewSlide.title"
+                v-html="normalizePreviewSvg(zoomPreviewSlide.svg)"
+              />
+              <div v-else class="svg-preview-zoom__fallback" :class="`ppt-preview-slide--${zoomPreviewSlide.layout}`">
+                <span class="ppt-preview-slide__number">{{ zoomPreviewSlide.pageNumber || 1 }}</span>
+                <strong>{{ zoomPreviewSlide.title }}</strong>
+                <div class="ppt-preview-slide__body">
+                  <span></span>
+                  <span></span>
+                  <span></span>
                 </div>
-              </UiField>
+                <p v-if="zoomPreviewSlide.description">{{ zoomPreviewSlide.description }}</p>
+              </div>
             </div>
-            <label class="editor-checkbox">
-              <input v-model="editorForm.is_public" type="checkbox" />
-              <span>公开模版（对其他用户可见）</span>
-            </label>
           </div>
-          <div class="modal__footer">
+
+          <footer class="svg-preview-zoom__footer">
+            <UiButton variant="primary" @click="zoomPreviewSlide = null">关闭</UiButton>
+          </footer>
+        </div>
+      </div>
+
+      <div v-if="showEditor" class="modal-overlay" @click.self="showEditor = false">
+        <div class="modal modal--editor">
+          <header class="modal-header">
+            <div>
+              <p class="modal-kicker">{{ editingTemplate ? '编辑方案' : '新建方案' }}</p>
+              <h3>{{ editingTemplate ? editorForm.name : '模板方案' }}</h3>
+            </div>
+            <button class="modal-close" @click="showEditor = false">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <div class="modal-body editor-body editor-body--structured">
+            <aside class="editor-nav" aria-label="模板方案编辑分区">
+              <button
+                v-for="section in editorSections"
+                :key="section.id"
+                type="button"
+                class="editor-nav__item"
+                :class="{ 'editor-nav__item--active': activeEditorSection === section.id }"
+                @click="activeEditorSection = section.id"
+              >
+                <strong>{{ section.title }}</strong>
+                <span>{{ section.desc }}</span>
+              </button>
+
+              <div class="editor-score">
+                <span>完整度</span>
+                <strong>{{ editorCompleteness }}%</strong>
+                <div class="editor-score__bar">
+                  <i :style="{ width: `${editorCompleteness}%` }"></i>
+                </div>
+              </div>
+
+              <button class="editor-reset" type="button" @click="resetEditorDefaults">恢复默认结构</button>
+            </aside>
+
+            <section class="editor-workbench">
+              <div v-show="activeEditorSection === 'basic'" class="editor-section">
+                <h4>基础信息</h4>
+                <div class="editor-grid">
+                  <UiField label="方案名称" required>
+                    <UiInput v-model="editorForm.name" placeholder="例如：年度经营复盘" />
+                  </UiField>
+                  <UiField label="分类">
+                    <UiInput v-model="editorForm.category" placeholder="例如：商务、产品、教育" />
+                  </UiField>
+                </div>
+                <UiField label="说明">
+                  <UiTextarea v-model="editorForm.description" :rows="4" placeholder="描述适用场景、受众和表达目标" />
+                </UiField>
+                <div class="editor-grid">
+                  <UiField label="参考页数">
+                    <input v-model.number="editorForm.slide_count" class="plain-input" type="number" min="3" max="40" />
+                  </UiField>
+                  <UiField label="主色">
+                    <div class="color-row">
+                      <input v-model="editorForm.accent" class="color-input" type="color" />
+                      <span>{{ editorForm.accent }}</span>
+                    </div>
+                  </UiField>
+                </div>
+                <label class="checkbox-row">
+                  <input v-model="editorForm.is_public" type="checkbox" />
+                  <span>公开给其他用户</span>
+                </label>
+              </div>
+
+              <div v-show="activeEditorSection === 'style'" class="editor-section">
+                <h4>主题风格</h4>
+                <UiField label="视觉气质" required>
+                  <UiInput v-model="editorForm.visualTone" placeholder="例如：克制、清晰、适合管理层汇报" />
+                </UiField>
+                <UiField label="色板">
+                  <UiTextarea v-model="editorForm.colorPalette" :rows="4" placeholder="每行或逗号分隔一个 HEX 颜色，例如 #334155" />
+                </UiField>
+                <div class="editor-swatches">
+                  <span v-for="color in editorColors" :key="color" :style="{ background: color }" :title="color"></span>
+                </div>
+                <div class="editor-grid">
+                  <UiField label="字体建议">
+                    <UiInput v-model="editorForm.typography" />
+                  </UiField>
+                  <UiField label="图标风格">
+                    <UiInput v-model="editorForm.iconStyle" />
+                  </UiField>
+                </div>
+              </div>
+
+              <div v-show="activeEditorSection === 'layout'" class="editor-section">
+                <h4>排版布局</h4>
+                <div class="editor-grid">
+                  <UiField label="封面">
+                    <UiInput v-model="editorForm.coverLayout" />
+                  </UiField>
+                  <UiField label="章节页">
+                    <UiInput v-model="editorForm.sectionLayout" />
+                  </UiField>
+                </div>
+                <UiField label="内容页布局">
+                  <UiTextarea v-model="editorForm.contentLayouts" :rows="5" placeholder="每行一个布局，例如：图文页" />
+                </UiField>
+                <UiField label="数据页布局">
+                  <UiTextarea v-model="editorForm.dataLayouts" :rows="4" placeholder="每行一个布局，例如：指标卡" />
+                </UiField>
+                <UiField label="总结页">
+                  <UiInput v-model="editorForm.summaryLayout" />
+                </UiField>
+              </div>
+
+              <div v-show="activeEditorSection === 'outline'" class="editor-section">
+                <h4>大纲与示例</h4>
+                <UiField label="大纲结构" required>
+                  <UiTextarea v-model="editorForm.outlinePattern" :rows="6" placeholder="每行一个章节，例如：背景与目标" />
+                </UiField>
+                <UiField label="示例 PPT 预览">
+                  <UiTextarea v-model="editorForm.previewSlides" :rows="6" placeholder="每行格式：标题|布局|说明" />
+                </UiField>
+              </div>
+
+              <div v-show="activeEditorSection === 'rules'" class="editor-section">
+                <h4>适用边界</h4>
+                <div class="editor-grid">
+                  <UiField label="适用场景">
+                    <UiTextarea v-model="editorForm.suitableFor" :rows="7" placeholder="每行一个场景" />
+                  </UiField>
+                  <UiField label="避免事项">
+                    <UiTextarea v-model="editorForm.avoid" :rows="7" placeholder="每行一条限制" />
+                  </UiField>
+                </div>
+              </div>
+            </section>
+
+            <aside class="editor-preview">
+              <div class="editor-preview__head">
+                <span>实时预览</span>
+                <strong>{{ editorForm.name || '未命名方案' }}</strong>
+              </div>
+
+              <div class="editor-preview__slide" :style="{ '--accent': editorForm.accent || '#334155' }">
+                <span>{{ editorForm.category || '通用' }}</span>
+                <h4>{{ editorForm.name || '模板方案' }}</h4>
+                <p>{{ editorForm.visualTone || editorForm.description || '填写主题风格后会展示在这里。' }}</p>
+                <div class="editor-preview__bars">
+                  <i></i>
+                  <i></i>
+                  <i></i>
+                </div>
+              </div>
+
+              <div class="editor-preview__block">
+                <span>色板</span>
+                <div class="editor-swatches">
+                  <span v-for="color in editorColors" :key="`preview-${color}`" :style="{ background: color }" :title="color"></span>
+                </div>
+              </div>
+
+              <div class="editor-preview__block">
+                <span>布局</span>
+                <div class="editor-chip-list">
+                  <i v-for="layout in [...editorContentLayouts, ...editorDataLayouts].slice(0, 6)" :key="layout">{{ layout }}</i>
+                </div>
+              </div>
+
+              <div class="editor-preview__block">
+                <span>大纲</span>
+                <ol>
+                  <li v-for="item in editorOutlineItems.slice(0, 5)" :key="item">{{ item }}</li>
+                </ol>
+              </div>
+
+              <div class="editor-preview__block">
+                <span>示例页</span>
+                <div class="editor-mini-slides">
+                  <button
+                    v-for="slide in editorPreviewSlides.slice(0, 3)"
+                    :key="`${slide.title}-${slide.layout}`"
+                    type="button"
+                  >
+                    <strong>{{ slide.title }}</strong>
+                    <small>{{ slide.layout }}</small>
+                  </button>
+                </div>
+              </div>
+
+              <div class="editor-preview__block">
+                <span>边界</span>
+                <p>{{ editorSuitableItems.slice(0, 2).join('、') || '未填写适用场景' }}</p>
+                <p>{{ editorAvoidItems.slice(0, 2).join('、') || '未填写避免事项' }}</p>
+              </div>
+            </aside>
+          </div>
+
+          <footer class="modal-footer">
             <UiButton variant="secondary" @click="showEditor = false">取消</UiButton>
-            <UiButton :disabled="saving || !editorForm.name.trim()" @click="saveTemplate">
-              {{ editingTemplate ? '保存' : '创建' }}
+            <UiButton variant="primary" :loading="saving" :disabled="!editorForm.name.trim()" @click="saveTemplate">
+              {{ editingTemplate ? '保存方案' : '创建方案' }}
             </UiButton>
-          </div>
+          </footer>
         </div>
       </div>
     </Teleport>
@@ -385,183 +936,327 @@ async function deleteTemplate(template: Template) {
 .template-page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 20px;
+  gap: 18px;
   width: 100%;
-  margin: 0 auto;
+  padding: 20px;
 }
 
 .page-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--color-border);
 }
 
-.page-header__info h2 {
-  margin: 0;
-  font-size: 24px;
+.page-kicker,
+.modal-kicker {
+  margin: 0 0 4px;
+  color: var(--color-accent);
+  font-size: 12px;
   font-weight: 700;
+}
+
+.page-header h2,
+.modal-header h3 {
+  margin: 0;
   color: var(--color-text);
 }
 
-.page-header__info p {
-  margin: 4px 0 0;
-  font-size: 14px;
+.page-header h2 {
+  font-size: 25px;
+}
+
+.page-header p:last-child {
+  max-width: 720px;
+  margin: 8px 0 0;
   color: var(--color-subtle);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
-.filters {
-  display: flex;
-  flex-direction: column;
+.toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) 1fr;
   gap: 12px;
+  align-items: center;
 }
 
-.search-bar {
-  max-width: 400px;
+.toolbar__search {
+  width: 100%;
 }
 
 .category-tabs {
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
 .category-tab {
-  padding: 6px 14px;
+  min-height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--color-border);
-  border-radius: 20px;
+  border-radius: 8px;
   background: var(--color-surface);
   color: var(--color-muted);
-  font-size: 13px;
-  font-weight: 500;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  font-size: 12px;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
 }
 
-.category-tab:hover {
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
-
+.category-tab:hover,
 .category-tab--active {
   border-color: var(--color-accent);
-  background: var(--color-accent-soft);
   color: var(--color-accent);
+  background: var(--color-accent-soft);
 }
 
-.loading-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 60px;
-  color: var(--color-muted);
-}
-
+.loading-state,
 .empty-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 60px;
+  padding: 64px 20px;
 }
 
 .template-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
 }
 
 .template-card {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-surface);
   overflow: hidden;
-  transition: all var(--transition-fast);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
-.template-card:hover {
+.template-card:hover,
+.template-card--active {
   border-color: var(--color-border-strong);
   box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
-.template-card__preview {
-  position: relative;
-  height: 140px;
-  padding: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.template-card--active {
+  border-color: var(--color-success);
 }
 
-.template-card__preview-content {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-  max-width: 160px;
-}
-
-.preview-slide {
-  height: 20px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.3);
-}
-
-.preview-slide--small {
-  width: 60%;
-  height: 12px;
-}
-
-.template-card__body {
-  flex: 1;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.template-card__header {
+.template-preview {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  min-height: 150px;
+  padding: 18px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--color-panel));
+  border-bottom: 1px solid var(--color-border);
+}
+
+.preview-deck {
+  position: relative;
+  width: min(100%, 238px);
+  min-height: 122px;
+}
+
+.preview-deck__slide {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 178px;
+  aspect-ratio: 16 / 9;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--color-border));
+  border-radius: 6px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.preview-deck__slide--svg {
+  padding: 0;
+  overflow: hidden;
+}
+
+.preview-deck__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.preview-deck__svg :deep(svg),
+.ppt-preview-slide__svg :deep(svg),
+.svg-preview-zoom__svg :deep(svg) {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-deck__slide:nth-child(1) {
+  left: 0;
+  top: 0;
+  z-index: 3;
+}
+
+.preview-deck__slide:nth-child(2) {
+  left: 28px;
+  top: 12px;
+  z-index: 2;
+}
+
+.preview-deck__slide:nth-child(3) {
+  left: 56px;
+  top: 24px;
+  z-index: 1;
+}
+
+.preview-deck__index {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  color: var(--color-muted);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.preview-deck__slide strong {
+  width: 76%;
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-deck__slide > span:not(.preview-deck__index) {
+  display: block;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--color-border);
+}
+
+.preview-deck__slide > span:nth-of-type(2) {
+  width: 82%;
+}
+
+.preview-deck__slide > span:nth-of-type(3) {
+  width: 52%;
+}
+
+.preview-deck__slide--cover strong,
+.preview-deck__slide--ending strong {
+  margin-top: 18px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.preview-deck__slide--content-image::after,
+.preview-deck__slide--content-chart::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  top: 30px;
+  width: 42px;
+  height: 38px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--color-border));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--color-panel));
+}
+
+.template-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.template-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.template-title-row h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 16px;
+}
+
+.template-body p {
+  margin: 0;
+  color: var(--color-subtle);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.style-summary,
+.metric {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.style-summary {
+  align-items: flex-start;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+
+.metric-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
 }
 
-.template-card__name {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
+.metric {
+  justify-content: center;
+  min-height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
 }
 
-.template-card__description {
-  margin: 0;
-  font-size: 13px;
-  color: var(--color-subtle);
-  line-height: 1.5;
-}
-
-.template-card__meta {
-  display: flex;
-  gap: 12px;
-  margin-top: 4px;
-}
-
-.meta-item {
+.template-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--color-muted);
-}
-
-.template-card__footer {
-  display: flex;
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--color-border);
+}
+
+.icon-action {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.icon-action:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+  background: var(--color-panel);
+}
+
+.icon-action--danger:hover {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 .modal-overlay {
@@ -571,340 +1266,702 @@ async function deleteTemplate(template: Template) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  padding: 20px;
+  background: rgba(17, 24, 39, 0.52);
 }
 
 .modal {
-  width: 100%;
-  max-width: 500px;
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 920px);
+  max-height: min(92vh, 920px);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--color-surface);
   box-shadow: var(--shadow-panel);
 }
 
-.modal--lg {
-  max-width: 600px;
+.modal--editor {
+  width: min(100%, 1180px);
 }
 
-.modal__header {
+.modal-header,
+.modal-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  gap: 12px;
+  padding: 16px 18px;
   border-bottom: 1px solid var(--color-border);
 }
 
-.modal__header h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text);
+.modal-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--color-border);
+  border-bottom: 0;
 }
 
-.modal__close {
+.modal-close {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
   color: var(--color-muted);
-  font-size: 20px;
   cursor: pointer;
-  transition: all var(--transition-fast);
 }
 
-.modal__close:hover {
-  background: var(--color-panel);
-  color: var(--color-text);
+.modal-body {
+  overflow: auto;
+  padding: 18px;
 }
 
-.modal__body {
-  padding: 0;
-}
-
-.modal__footer {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  padding: 16px 20px;
-  border-top: 1px solid var(--color-border);
-}
-
-.preview-header {
-  padding: 24px 20px;
-  color: white;
-}
-
-.preview-header__content {
+.svg-preview-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 10010;
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(17, 24, 39, 0.58);
 }
 
-.preview-header h2 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.preview-info {
-  padding: 20px;
+.svg-preview-zoom__panel {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  width: min(1120px, 96vw);
+  max-height: 94vh;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-panel);
 }
 
-.preview-description h4 {
-  margin: 0 0 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+.svg-preview-zoom__header,
+.svg-preview-zoom__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
 }
 
-.preview-description p {
+.svg-preview-zoom__footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--color-border);
+  border-bottom: 0;
+}
+
+.svg-preview-zoom__header h3 {
   margin: 0;
-  font-size: 14px;
   color: var(--color-text);
+  font-size: 16px;
+}
+
+.svg-preview-zoom__header span {
+  display: inline-flex;
+  margin-top: 4px;
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.svg-preview-zoom__body {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  background: var(--color-panel);
+}
+
+.svg-preview-zoom__canvas {
+  display: grid;
+  place-items: center;
+  width: min(100%, 1040px);
+  aspect-ratio: 16 / 9;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.svg-preview-zoom__svg {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.svg-preview-zoom__fallback {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 100%;
+  height: 100%;
+  padding: 44px;
+  color: var(--color-text);
+}
+
+.detail-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--color-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--color-panel));
+}
+
+.detail-hero p {
+  margin: 10px 0 0;
+  color: var(--color-subtle);
   line-height: 1.6;
 }
 
-.preview-features {
+.detail-hero strong {
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+
+.detail-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.detail-block,
+.editor-section {
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+
+.detail-block h4,
+.editor-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.detail-block p {
+  margin: 6px 0;
+  color: var(--color-subtle);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.swatches,
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.swatch {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.tag-list span {
+  padding: 5px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.outline-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.ppt-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
-.feature-item {
+.ppt-preview-slide {
+  min-width: 0;
+}
+
+.ppt-preview-slide__stage {
+  position: relative;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--color-border));
+  border-radius: 7px;
+  background: var(--color-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: zoom-in;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.ppt-preview-slide__stage:hover {
+  border-color: color-mix(in srgb, var(--accent) 54%, var(--color-border-strong));
+  box-shadow: var(--shadow-sm);
+}
+
+.ppt-preview-slide--svg .ppt-preview-slide__stage {
+  padding: 0;
+}
+
+.ppt-preview-slide__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.ppt-preview-slide__number {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.ppt-preview-slide__stage strong {
+  max-width: 82%;
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.ppt-preview-slide__body {
+  display: grid;
+  gap: 6px;
+  width: 62%;
+}
+
+.ppt-preview-slide__body span {
+  height: 7px;
+  border-radius: 4px;
+  background: var(--color-border);
+}
+
+.ppt-preview-slide__body span:nth-child(2) {
+  width: 80%;
+}
+
+.ppt-preview-slide__body span:nth-child(3) {
+  width: 56%;
+}
+
+.ppt-preview-slide__stage p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-subtle);
+  font-size: 10px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ppt-preview-slide--cover .ppt-preview-slide__stage,
+.ppt-preview-slide--ending .ppt-preview-slide__stage {
+  justify-content: center;
+}
+
+.ppt-preview-slide--cover .ppt-preview-slide__stage strong,
+.ppt-preview-slide--ending .ppt-preview-slide__stage strong {
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.ppt-preview-slide--content-image .ppt-preview-slide__stage::after,
+.ppt-preview-slide--content-chart .ppt-preview-slide__stage::after {
+  content: '';
+  position: absolute;
+  right: 14px;
+  top: 44px;
+  width: 34%;
+  height: 38%;
+  border: 1px dashed color-mix(in srgb, var(--accent) 44%, var(--color-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--color-panel));
+}
+
+.ppt-preview-slide__meta {
+  margin-top: 6px;
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.editor-body--structured {
+  display: grid;
+  grid-template-columns: 188px minmax(0, 1fr) 280px;
+  gap: 14px;
+  align-items: start;
+  min-height: 560px;
+}
+
+.editor-nav,
+.editor-preview {
+  position: sticky;
+  top: 0;
+  display: grid;
   gap: 10px;
+  align-self: start;
+}
+
+.editor-nav__item,
+.editor-reset {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.editor-nav__item {
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px;
+}
+
+.editor-nav__item strong {
+  font-size: 13px;
+}
+
+.editor-nav__item span {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.editor-nav__item:hover,
+.editor-nav__item--active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.editor-score {
+  display: grid;
+  gap: 7px;
   padding: 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-panel);
 }
 
-.feature-item__icon {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: var(--color-surface);
-  color: var(--color-accent);
-}
-
-.feature-item__content {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.feature-item__label {
-  font-size: 11px;
+.editor-score span,
+.editor-preview__block > span,
+.editor-preview__head span {
   color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.feature-item__value {
-  font-size: 13px;
-  font-weight: 600;
+.editor-score strong {
   color: var(--color-text);
+  font-size: 20px;
 }
 
-.preview-slides h4 {
-  margin: 0 0 12px;
-  font-size: 13px;
-  font-weight: 600;
+.editor-score__bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--color-border);
+}
+
+.editor-score__bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent);
+}
+
+.editor-reset {
+  min-height: 34px;
+  padding: 0 12px;
   color: var(--color-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: 12px;
+  text-align: center;
 }
 
-.slide-previews {
+.editor-workbench {
+  min-width: 0;
+}
+
+.editor-workbench .editor-section {
+  min-height: 540px;
+}
+
+.editor-swatches {
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
-.slide-preview-card {
-  display: flex;
-  gap: 8px;
-  padding: 10px;
+.editor-swatches span {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.editor-preview {
+  padding: 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-panel);
-  min-width: 0;
-  flex: 1 1 calc(50% - 4px);
-  min-width: 180px;
 }
 
-.slide-preview-card__number {
+.editor-preview__head {
   display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  background: var(--color-surface);
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--color-muted);
-  flex-shrink: 0;
-}
-
-.slide-preview-card__content {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-}
-
-.slide-preview-card__title {
-  height: 8px;
-  border-radius: 3px;
-  width: 70%;
-}
-
-.slide-preview-card__bullets {
-  display: flex;
-  flex-direction: column;
   gap: 4px;
 }
 
-.slide-preview-card__bullet {
-  height: 5px;
-  border-radius: 2px;
-  background: var(--color-border);
-  width: 90%;
-}
-
-.slide-preview-card__bullet--short {
-  width: 55%;
-}
-
-.slide-preview-card__image {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 28px;
-  border-radius: 4px;
-  background: var(--color-surface);
-  border: 1px dashed var(--color-border);
-  color: var(--color-muted);
-}
-
-.slide-more-card {
-  display: grid;
-  place-items: center;
-  padding: 10px 16px;
-  border: 1px dashed var(--color-border);
-  border-radius: 8px;
-  background: var(--color-panel);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-muted);
+.editor-preview__head strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 15px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Template editor styles */
-.editor-grid {
+.editor-preview__slide {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 10px;
+  aspect-ratio: 16 / 9;
+  padding: 16px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--color-border));
+  border-radius: 8px;
+  background: var(--color-surface);
 }
 
-.editor-textarea {
-  width: 100%;
-  padding: 8px 12px;
+.editor-preview__slide span {
+  justify-self: start;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--color-border));
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.editor-preview__slide h4 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 16px;
+}
+
+.editor-preview__slide p,
+.editor-preview__block p {
+  margin: 0;
+  color: var(--color-subtle);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.editor-preview__bars {
+  display: grid;
+  gap: 5px;
+  align-self: end;
+}
+
+.editor-preview__bars i {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+
+.editor-preview__bars i:nth-child(1) {
+  width: 76%;
+}
+
+.editor-preview__bars i:nth-child(2) {
+  width: 58%;
+}
+
+.editor-preview__bars i:nth-child(3) {
+  width: 42%;
+}
+
+.editor-preview__block {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.editor-chip-list,
+.editor-mini-slides {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.editor-chip-list i {
+  padding: 4px 7px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: var(--color-panel);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.editor-preview__block ol {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
   color: var(--color-text);
-  font-size: 13px;
-  font-family: inherit;
-  resize: vertical;
-  outline: none;
-  transition: border-color var(--transition-fast);
+  font-size: 12px;
 }
 
-.editor-textarea:focus {
-  border-color: var(--color-accent);
-}
-
-.editor-number {
-  width: 100%;
-  padding: 8px 12px;
+.editor-mini-slides button {
+  display: grid;
+  gap: 4px;
+  width: calc(50% - 3px);
+  min-height: 54px;
+  padding: 8px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: var(--color-panel);
+  background: var(--color-surface);
   color: var(--color-text);
-  font-size: 13px;
-  outline: none;
-  transition: border-color var(--transition-fast);
+  text-align: left;
 }
 
-.editor-number:focus {
+.editor-mini-slides strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-mini-slides small {
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.plain-input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.plain-input:focus {
   border-color: var(--color-accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
-.color-picker-row {
+.color-row {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 40px;
 }
 
-.color-picker {
-  width: 36px;
+.color-input {
+  width: 42px;
   height: 36px;
   padding: 2px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: var(--color-panel);
-  cursor: pointer;
+  background: var(--color-surface);
 }
 
-.color-value {
+.color-row span {
+  color: var(--color-muted);
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--color-muted);
 }
 
-.editor-checkbox {
-  display: flex;
+.checkbox-row {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
+  color: var(--color-muted);
   font-size: 13px;
-  color: var(--color-muted);
-  cursor: pointer;
 }
 
-.action-btn {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  color: var(--color-muted);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  flex-shrink: 0;
-}
+@media (max-width: 860px) {
+  .page-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
 
-.action-btn:hover {
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
+  .toolbar,
+  .detail-grid,
+  .editor-body--structured,
+  .editor-grid,
+  .ppt-preview-grid {
+    grid-template-columns: 1fr;
+  }
 
-.action-btn--danger:hover {
-  border-color: var(--color-danger);
-  color: var(--color-danger);
+  .editor-nav,
+  .editor-preview {
+    position: static;
+  }
+
+  .editor-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .editor-score,
+  .editor-reset {
+    grid-column: 1 / -1;
+  }
+
+  .editor-workbench .editor-section {
+    min-height: auto;
+  }
+
+  .metric-row {
+    grid-template-columns: 1fr;
+  }
+
+  .template-actions {
+    flex-wrap: wrap;
+  }
 }
 </style>

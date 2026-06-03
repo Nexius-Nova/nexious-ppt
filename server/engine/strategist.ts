@@ -1,5 +1,5 @@
 import type { DesignSpec, SpecSlide, SkillExtension } from './spec.js';
-import { CANVAS_FORMATS, INDUSTRY_COLORS, normalizeColors, normalizeTypography } from './spec.js';
+import { CANVAS_FORMATS, normalizeColors, normalizeTypography } from './spec.js';
 
 export interface StrategistInput {
   topic: string;
@@ -8,6 +8,36 @@ export interface StrategistInput {
   summaryLength: string;
   imageStyle: string;
   template: string;
+  templateAsset?: {
+    id: string;
+    name: string;
+    category?: string;
+    description?: string;
+    slideCount?: number;
+    accent?: string;
+    settings?: {
+      styleGuide?: {
+        visualTone?: string;
+        colorPalette?: string[];
+        typography?: string;
+        iconStyle?: string;
+      };
+      layoutGuide?: {
+        cover?: string;
+        section?: string;
+        contentLayouts?: string[];
+        dataLayouts?: string[];
+        summary?: string;
+      };
+      outlinePattern?: string[];
+      previewSlides?: Array<{ title: string; layout: string; description?: string }>;
+      constraints?: {
+        preferredSlideCount?: number;
+        suitableFor?: string[];
+        avoid?: string[];
+      };
+    };
+  } | null;
   promptContent?: string;
   skills: Array<{ id: string; name: string; instruction?: string }>;
 }
@@ -20,45 +50,21 @@ const MODE_BY_TONE: Record<string, DesignSpec['visualTheme']['mode']> = {
 
 export function buildStrategistPrompt(input: StrategistInput): { system: string; user: string } {
   const canvas = CANVAS_FORMATS.ppt169;
-  const isAutoTemplate = !input.template || input.template === 'auto';
-  const colors = INDUSTRY_COLORS[input.template] || INDUSTRY_COLORS[resolveFallbackTemplate(input)];
+  const selectedTemplate = input.templateAsset || null;
   const mode = MODE_BY_TONE[input.tone] || 'versatile';
-  const lengthGuide =
-    input.summaryLength === 'detailed'
-      ? '详细：每页 4-6 个要点，讲稿需要能支撑演讲。'
-      : input.summaryLength === 'brief'
-        ? '简洁：每页 2-3 个要点，避免堆叠信息。'
-        : '均衡：每页 3-5 个要点，表达完整但保持可读。';
+  const lengthGuide = getLengthGuide(input.summaryLength);
+  const templateGuide = buildTemplateGuide(input);
+  const colorGuide = buildColorGuide(selectedTemplate);
 
   const skillExtensions: SkillExtension[] = input.skills.map((s) => ({
     skillId: s.id,
     skillName: s.name,
     strategistPrompt: s.instruction || undefined,
   }));
-  const colorGuide = isAutoTemplate
-    ? `      "primary": "根据主题选择，不要固定使用默认蓝灰或商务灰绿",
-      "secondary": "与 primary 明显区分的 HEX 色",
-      "accent": "用于强调的 HEX 色，必须与 primary/secondary 区分",
-      "background": "浅色或深色 HEX 背景，由主题决定",
-      "surface": "内容承载面 HEX 色",
-      "text": "正文 HEX 色",
-      "muted": "辅助文字 HEX 色",
-      "border": "边框 HEX 色"`
-    : `      "primary": "${colors.primary}",
-      "secondary": "${colors.secondary}",
-      "accent": "${colors.accent}",
-      "background": "${colors.background}",
-      "surface": "${colors.surface}",
-      "text": "${colors.text}",
-      "muted": "${colors.muted}",
-      "border": "${colors.border}"`;
-  const templateGuide = isAutoTemplate
-    ? '模板风格：AI 自动决定。不要套用固定 business 模板；每次都要根据主题重新选择页面节奏、版式组合、颜色和视觉气质。不要输出统一灰底 bullet 版式，封面、目录、图文页、结论页必须有不同构图。'
-    : `模板风格：${input.template}。这是当前用户明确选择的风格参考。`;
 
-  const system = `你是 PPT Master 管线中的 Strategist。你要把用户输入转成可执行的设计规格 JSON，后续 Executor 会逐页手写 SVG，并由 ppt-master/scripts/finalize_svg.py 与 svg_to_pptx.py 导出为 PowerPoint。
+  const system = `你是 PPT Master 流程中的 Strategist。你的任务是把用户输入转换为可执行的 PPT 设计规格 JSON，后续 Executor 会逐页生成 SVG 并导出 PowerPoint。
 
-请只输出严格 JSON，不要 Markdown，不要解释文字。JSON 必须符合以下结构：
+只输出严格 JSON，不要输出 Markdown，不要解释。JSON 必须符合以下结构：
 {
   "projectInfo": {
     "title": "演示文稿标题",
@@ -69,7 +75,7 @@ export function buildStrategistPrompt(input: StrategistInput): { system: string;
   "canvas": { "format": "ppt169", "width": ${canvas.width}, "height": ${canvas.height} },
   "visualTheme": {
     "mode": "versatile|consulting|top-consulting",
-    "style": "一句话描述视觉方向，不使用渐变",
+    "style": "一句话描述视觉方向，不能使用渐变",
     "colors": {
 ${colorGuide}
     }
@@ -85,7 +91,7 @@ ${colorGuide}
     "subtitleSize": 26,
     "annotationSize": 14
   },
-  "iconStyle": "tabler-outline",
+  "iconStyle": "chunk-filled|tabler-filled|tabler-outline|phosphor-duotone|none",
   "imageUsage": "none|ai-generated|user-provided|placeholder",
   "outline": [
     {
@@ -97,31 +103,33 @@ ${colorGuide}
       "visualPrompt": "仅当确实需要配图时填写",
       "layout": "cover|chapter|toc|content|content-image|content-chart|ending",
       "rhythm": "anchor|dense|breathing",
-      "chartHint": "仅图表页填写，使用 ppt-master/templates/charts 中常见类型，如 bar_chart、timeline、matrix_2x2"
+      "chartHint": "仅图表页填写，如 bar_chart、timeline、matrix_2x2"
     }
   ]
 }
 
 硬性规则：
-1. 不要提出等待确认；当前应用内直接执行生成。
-2. 第一页必须是 cover，最后一页建议是 ending。内容足够时可加入 toc 或 chapter。
-3. 页面数量根据内容决定，通常 6-12 页；若材料很少可 4-6 页。
+1. 不要等待确认，直接生成完整规格。
+2. 第一页必须是 cover，最后一页建议是 ending；内容足够时可以加入 toc 或 chapter。
+3. 页数根据内容决定，通常 6-12 页；材料很少时可以 4-6 页。
 4. rhythm 必须服务叙事：cover、toc、chapter、ending 用 anchor；信息密集页用 dense；单一观点或关键结论页用 breathing。
-5. 颜色只能用 HEX，必须避免渐变和一整套单色系；至少包含 3 个有区分度的色相，整体与主题一致。auto 模式下不得照抄示例或 fallback 色板。
-6. visualTheme.colors 中必须保留上方字段，不要增加 rgba、透明色或渐变描述。
-7. layout 与内容一致：图表页用 content-chart；内容明确要求配图、插图、场景图、示意图、封面图，或图片能明显提升表达时，用 content-image 并填写 visualPrompt。
-8. speakerNotes 使用中文，能帮助演讲者自然讲述。
-9. ${lengthGuide}
-10. 默认视觉模式为 ${mode}。
-11. ${templateGuide}
-12. pageLayouts 必须体现变化：不要连续 3 页使用相同构图；每页 layout、rhythm、visualPrompt 要和内容强相关。`;
+5. 颜色只能使用 HEX；不能使用渐变、rgba 或透明色；整体至少包含 3 个有区分度的色相，避免一整套单色系。
+6. 未选择模板方案时，AI 必须根据主题自主决定主题风格、排版布局、大纲结构和颜色，不得固定套用 business、tech 或任何默认风格。
+7. 只有 templateAsset 存在时，才参考模板方案。模板方案只影响当前项目，不允许变成全局风格。
+8. 模板是参考约束，不是示例文案。可以参考主题、布局、大纲结构和示例页形式，但必须结合用户内容重新组织。
+9. layout 要和内容一致：图表页用 content-chart；需要配图、场景图、示意图、封面图，或图片能明显提升表达时，用 content-image 并填写 visualPrompt。
+10. speakerNotes 使用中文，能帮助演讲者自然讲述。
+11. ${lengthGuide}
+12. 默认视觉模式为 ${mode}。
+13. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、visualPrompt 都要和内容强相关。
+14. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。`;
 
-  const user = `主题：${input.topic}
-内容资料：
-${input.content || '用户未提供详细资料，请基于主题生成结构完整、信息可信但不过度编造的演示文稿。'}
+  const user = `主题：${input.topic || '未命名主题'}
+内容资料：${input.content || '用户未提供详细资料，请基于主题生成结构完整、信息可信但不过度编造的演示文稿。'}
 
-语气：${input.tone}
+语言风格：${input.tone}
 图片风格：${input.imageStyle}
+
 ${templateGuide}
 ${input.promptContent ? `\n额外提示词：\n${input.promptContent}` : ''}
 ${skillExtensions.length > 0 ? `\n启用的 Skill 扩展：\n${skillExtensions.map((s) => `- ${s.skillName}: ${s.strategistPrompt || '无额外说明'}`).join('\n')}` : ''}
@@ -172,6 +180,66 @@ export function parseStrategistOutput(raw: string, input: StrategistInput): Desi
   };
 }
 
+function buildColorGuide(templateAsset: StrategistInput['templateAsset']) {
+  const palette = templateAsset?.settings?.styleGuide?.colorPalette?.filter(Boolean) || [];
+  if (templateAsset && palette.length >= 3) {
+    return `      "primary": "${palette[0]}",
+      "secondary": "${palette[1]}",
+      "accent": "${palette[2]}",
+      "background": "根据模板色板选择的 HEX 背景色",
+      "surface": "内容承载面的 HEX 颜色",
+      "text": "正文 HEX 颜色",
+      "muted": "辅助文字 HEX 颜色",
+      "border": "边框 HEX 颜色"`;
+  }
+
+  return `      "primary": "根据主题选择的 HEX 颜色，不要固定使用默认蓝灰或商务灰绿",
+      "secondary": "与 primary 明显区分的 HEX 颜色",
+      "accent": "用于强调的 HEX 颜色，必须与 primary/secondary 区分",
+      "background": "浅色或深色 HEX 背景，由主题决定",
+      "surface": "内容承载面的 HEX 颜色",
+      "text": "正文 HEX 颜色",
+      "muted": "辅助文字 HEX 颜色",
+      "border": "边框 HEX 颜色"`;
+}
+
+function buildTemplateGuide(input: StrategistInput) {
+  const template = input.templateAsset;
+  if (!template) {
+    return '模板方案：未选择。请由 AI 根据当前主题、资料、受众和场景自主决定主题风格、排版布局、大纲结构、色彩和视觉节奏。不要沿用上一次项目或历史模板的风格。';
+  }
+
+  const settings = template.settings || {};
+  const style = settings.styleGuide || {};
+  const layout = settings.layoutGuide || {};
+  const constraints = settings.constraints || {};
+  return `模板方案：已选择「${template.name}」，仅作为当前项目参考。
+分类：${template.category || '未分类'}
+说明：${template.description || '无'}
+主题风格：
+- 视觉气质：${style.visualTone || '未设置'}
+- 色彩参考：${(style.colorPalette || []).join('、') || template.accent || '未设置'}
+- 字体建议：${style.typography || '清晰中文排版'}
+- 图标风格：${style.iconStyle || '简洁图标'}
+排版布局：
+- 封面：${layout.cover || '按主题设计'}
+- 章节：${layout.section || '按叙事需要设置'}
+- 内容页：${(layout.contentLayouts || []).join('、') || '结合内容灵活安排'}
+- 数据页：${(layout.dataLayouts || []).join('、') || '按数据表达选择'}
+- 总结页：${layout.summary || '收束结论和行动建议'}
+大纲结构参考：${(settings.outlinePattern || []).join(' -> ') || '按内容生成'}
+示例 PPT 预览：${(settings.previewSlides || []).map((slide) => `${slide.title}（${slide.layout}${slide.description ? `：${slide.description}` : ''}）`).join('；') || '无'}
+适用场景：${(constraints.suitableFor || []).join('、') || '未设置'}
+避免：${(constraints.avoid || []).join('、') || '不要照搬示例文字'}
+参考页数：${constraints.preferredSlideCount || template.slideCount || '由内容决定'}`;
+}
+
+function getLengthGuide(summaryLength: string) {
+  if (summaryLength === 'detailed') return '详细：每页 4-6 个要点，讲稿需要能支撑演讲。';
+  if (summaryLength === 'brief') return '简洁：每页 2-3 个要点，避免堆砌信息。';
+  return '均衡：每页 3-5 个要点，表达完整但保持可读。';
+}
+
 function normalizeCanvas(canvas: any): DesignSpec['canvas'] {
   if (canvas?.format === 'ppt43') {
     return CANVAS_FORMATS.ppt43;
@@ -214,7 +282,6 @@ function normalizeOutline(rawOutline: any[], input: StrategistInput): SpecSlide[
 }
 
 function resolveFallbackTemplate(input: StrategistInput): string {
-  if (input.template && input.template !== 'auto') return input.template;
   const text = `${input.topic} ${input.content}`.toLowerCase();
   if (/(金融|财务|投资|基金|银行|证券|保险|finance|financial|bank|invest)/i.test(text)) return 'finance';
   if (/(科技|技术|ai|人工智能|大模型|算法|芯片|软件|平台|数据|tech|software|model|cloud)/i.test(text)) return 'tech';
@@ -243,16 +310,25 @@ function buildFallbackSpec(input: StrategistInput): DesignSpec {
   const typography = normalizeTypography(undefined);
 
   return {
-    projectInfo: { title: input.topic || '未命名 PPT', topic: input.topic || '未命名主题', audience: '通用受众', occasion: '通用演示' },
+    projectInfo: {
+      title: input.topic || '未命名 PPT',
+      topic: input.topic || '未命名主题',
+      audience: '通用受众',
+      occasion: '通用演示',
+    },
     canvas: CANVAS_FORMATS.ppt169,
-    visualTheme: { mode: MODE_BY_TONE[input.tone] || 'versatile', style: '根据主题定制的清晰演示风格，不使用渐变', colors },
+    visualTheme: {
+      mode: MODE_BY_TONE[input.tone] || 'versatile',
+      style: '根据主题定制的清晰演示风格，不使用渐变',
+      colors,
+    },
     typography,
     iconStyle: 'tabler-outline',
     imageUsage: input.imageStyle === 'none' ? 'none' : 'placeholder',
     outline: [
       { id: 'slide-1', pageNumber: 1, title: input.topic || '项目概览', bullets: [], speakerNotes: '开场介绍本次演示的主题和目标。', visualPrompt: '', layout: 'cover', rhythm: 'anchor' },
       { id: 'slide-2', pageNumber: 2, title: '核心背景', bullets: ['问题背景与现状', '关键机会与挑战', '本次汇报的判断框架'], speakerNotes: '说明为什么这个主题值得讨论，并建立听众的共同上下文。', visualPrompt: '', layout: 'content', rhythm: 'dense' },
-      { id: 'slide-3', pageNumber: 3, title: '关键方案', bullets: ['方案一：明确目标与边界', '方案二：拆解执行路径', '方案三：建立反馈机制'], speakerNotes: '围绕可执行性展开方案，突出主次关系。', visualPrompt: '', layout: 'content', rhythm: 'dense' },
+      { id: 'slide-3', pageNumber: 3, title: '关键方案', bullets: ['明确目标与边界', '拆解执行路径', '建立反馈机制'], speakerNotes: '围绕可执行性展开方案，突出主次关系。', visualPrompt: '', layout: 'content', rhythm: 'dense' },
       { id: 'slide-4', pageNumber: 4, title: '总结与下一步', bullets: ['形成共识', '明确责任', '推进落地'], speakerNotes: '收束观点，并给出下一步行动建议。', visualPrompt: '', layout: 'ending', rhythm: 'anchor' },
     ],
     skillExtensions: [],

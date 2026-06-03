@@ -86,6 +86,7 @@ const exportProgress = ref(0);
 const isExporting = ref(false);
 const exportHistory = ref<Array<{ id: string; filename: string; format: 'pptx' | 'pdf'; status: 'ready' | 'queued' | 'exporting'; createdAt: number }>>([]);
 const previewingImage = ref<GeneratedImage | null>(null);
+const routeReady = ref(false);
 
 useShortcuts([
   {
@@ -364,6 +365,7 @@ let isSyncingRouteStep = false;
 
 async function syncStepWithRoute() {
   const token = ++routeSyncToken;
+  routeReady.value = false;
   const path = route.path;
   const routeToStep: Record<string, string> = {
     '/': 'my-ppt',
@@ -394,15 +396,19 @@ async function syncStepWithRoute() {
     } finally {
       if (token === routeSyncToken) {
         isSyncingRouteStep = false;
+        routeReady.value = true;
       }
     }
   } else {
     isSyncingRouteStep = false;
     store.activeStep = (routeToStep[path] || 'my-ppt') as WorkflowStepId;
+    if (token === routeSyncToken) {
+      routeReady.value = true;
+    }
   }
 }
 
-watch(() => route.fullPath, () => { void syncStepWithRoute(); }, { immediate: true });
+watch(() => route.fullPath, () => { void syncStepWithRoute(); });
 
 watch(() => store.activeStep, (step) => {
   if (isSyncingRouteStep) return;
@@ -417,7 +423,7 @@ watch(() => store.activeStep, (step) => {
 
 onMounted(async () => {
   await store.initializeData();
-  syncStepWithRoute();
+  await syncStepWithRoute();
   void store.resumeRecoveredWorkflow();
 });
 
@@ -549,7 +555,12 @@ async function retryImage(slideId: string) {
     />
 
     <main class="workspace-main">
-      <template v-if="isPageView">
+      <div v-if="!routeReady" class="workspace-route-loading">
+        <Loader2 class="spin" :size="18" />
+        <span>正在打开页面...</span>
+      </div>
+
+      <template v-else-if="isPageView">
         <MyPptPage v-if="activeStep === 'my-ppt'" />
         <PromptManagePage v-else-if="activeStep === 'prompts'" />
         <SkillManagePage v-else-if="activeStep === 'skills'" />
@@ -1008,6 +1019,16 @@ async function retryImage(slideId: string) {
   min-height: 0;
   overflow: auto;
   background: var(--color-bg);
+}
+
+.workspace-route-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 100%;
+  color: var(--color-subtle);
+  font-size: 14px;
 }
 
 .workspace-step-header {
@@ -1522,8 +1543,6 @@ async function retryImage(slideId: string) {
   position: relative;
   display: grid;
   place-items: center;
-  width: 88px;
-  height: 50px;
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--color-border);

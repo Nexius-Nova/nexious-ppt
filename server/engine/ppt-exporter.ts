@@ -1,17 +1,16 @@
-import { spawn } from 'node:child_process';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DesignSpec, SpecLock } from './spec.js';
-import { inlineRemoteImages } from './svg-to-pptx.js';
+import { convertSvgPagesToPptx, inlineRemoteImages } from './svg-to-pptx.js';
 
-export interface PptMasterPage {
+export interface PptExportPage {
   pageNumber?: number;
   svg: string;
   speakerNotes?: string;
 }
 
-export interface PptMasterExportResult {
+export interface PptExportResult {
   buffer: Buffer;
   fileName: string;
   projectPath: string;
@@ -21,9 +20,7 @@ export interface PptMasterExportResult {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
-const PPT_MASTER_DIR = path.join(ROOT_DIR, 'ppt-master');
-const GENERATED_ROOT = path.join(ROOT_DIR, '.generated', 'ppt-master');
-const SCRIPT_DIR = path.join(PPT_MASTER_DIR, 'scripts');
+const GENERATED_ROOT = path.join(ROOT_DIR, '.generated', 'nexious-ppt');
 
 export function renderSpecLockMarkdown(lock: SpecLock): string {
   const c = lock.colors;
@@ -165,45 +162,49 @@ ${slide.bullets.map((bullet) => `  - ${bullet}`).join('\n') || '  - None'}
 `;
 }
 
-export async function exportWithPptMaster(
-  pages: PptMasterPage[],
+export async function exportWithNexiousPpt(
+  pages: PptExportPage[],
   spec: DesignSpec,
   lock: SpecLock,
-): Promise<PptMasterExportResult> {
+): Promise<PptExportResult> {
   if (!pages.length) {
     throw new Error('没有可导出的 SVG 页面');
   }
 
-  const projectPath = await prepareProjectDirectory(spec, lock, pages);
   const logs: string[] = [];
+  const preparedPages = await Promise.all(
+    pages.map(async (page, index) => {
+      const pageNumber = page.pageNumber || index + 1;
+      const inlinedSvg = await inlineRemoteImages(page.svg);
+      const svg = normalizeSvgForExport(inlinedSvg, spec, pageNumber);
+      return {
+        pageNumber,
+        svg,
+        speakerNotes: page.speakerNotes || spec.outline[index]?.speakerNotes || '',
+      };
+    })
+  );
 
-  await runPythonScript('svg_quality_checker.py', [projectPath], logs);
-  await runPythonScript('total_md_split.py', [projectPath], logs);
-  await runPythonScript('finalize_svg.py', [projectPath], logs);
-  await runPythonScript('svg_to_pptx.py', [projectPath, '--only', 'native'], logs);
-
-  const exportsDir = path.join(projectPath, 'exports');
-  const files = await readdir(exportsDir);
-  const pptxFiles = files.filter((file) => file.endsWith('.pptx')).sort();
-  const nativeFiles = pptxFiles.filter((file) => !file.endsWith('_svg.pptx'));
-  const fileName = (nativeFiles.length > 0 ? nativeFiles : pptxFiles).at(-1);
-  if (!fileName) {
-    throw new Error('ppt-master 未生成 PPTX 文件');
-  }
-
-  const { readFile } = await import('node:fs/promises');
-  const buffer = await readFile(path.join(exportsDir, fileName));
+  const projectPath = await prepareExportDirectory(spec, lock, preparedPages, logs);
+  const buffer = await convertSvgPagesToPptx(preparedPages, spec, lock);
+  const fileName = `${sanitizeName(spec.projectInfo.title || 'nexious-deck')}_${Date.now()}.pptx`;
+  await mkdir(path.join(projectPath, 'exports'), { recursive: true });
+  await writeFile(path.join(projectPath, 'exports', fileName), buffer);
+  logs.push('内置导出器已完成 PPTX 生成。');
   return { buffer, fileName, projectPath, logs };
 }
 
-async function prepareProjectDirectory(spec: DesignSpec, lock: SpecLock, pages: PptMasterPage[]) {
+async function prepareExportDirectory(
+  spec: DesignSpec,
+  lock: SpecLock,
+  pages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>,
+  logs: string[],
+) {
   const safeTitle = sanitizeName(spec.projectInfo.title || 'nexious_deck');
   const projectPath = path.join(GENERATED_ROOT, `${safeTitle}_${Date.now()}`);
 
   await mkdir(projectPath, { recursive: true });
   await mkdir(path.join(projectPath, 'sources'), { recursive: true });
-  await mkdir(path.join(projectPath, 'images'), { recursive: true });
-  await mkdir(path.join(projectPath, 'templates'), { recursive: true });
   await mkdir(path.join(projectPath, 'notes'), { recursive: true });
   await mkdir(path.join(projectPath, 'svg_output'), { recursive: true });
 
@@ -215,15 +216,14 @@ async function prepareProjectDirectory(spec: DesignSpec, lock: SpecLock, pages: 
   for (let i = 0; i < pages.length; i += 1) {
     const pageNumber = pages[i].pageNumber || i + 1;
     const fileName = `${String(pageNumber).padStart(2, '0')}_${sanitizeName(spec.outline[i]?.title || `slide_${pageNumber}`)}.svg`;
-    const inlinedSvg = await inlineRemoteImages(pages[i].svg);
-    const svg = normalizeSvgForPptMaster(inlinedSvg, spec, pageNumber);
-    await writeFile(path.join(projectPath, 'svg_output', fileName), svg, 'utf-8');
+    await writeFile(path.join(projectPath, 'svg_output', fileName), pages[i].svg, 'utf-8');
   }
 
+  logs.push(`导出快照已保存：${projectPath}`);
   return projectPath;
 }
 
-export function normalizeSvgForPptMaster(rawSvg: string, spec: DesignSpec, pageNumber: number): string {
+export function normalizeSvgForExport(rawSvg: string, spec: DesignSpec, pageNumber: number): string {
   let svg = extractSvg(rawSvg);
   svg = repairCommonSvgBreakage(svg, spec);
   if (isWellFormedXml(svg)) {
@@ -234,13 +234,13 @@ export function normalizeSvgForPptMaster(rawSvg: string, spec: DesignSpec, pageN
 }
 
 function extractSvg(rawSvg: string): string {
-  let svg = rawSvg.trim();
+  let svg = String(rawSvg || '').trim();
   if (svg.startsWith('```')) {
     svg = svg.replace(/^```(?:svg|xml)?\s*\n?/, '').replace(/\n?```\s*$/, '');
   }
 
-  const start = svg.indexOf('<svg');
-  const end = svg.lastIndexOf('</svg>');
+  const start = svg.search(/<svg\b/i);
+  const end = svg.toLowerCase().lastIndexOf('</svg>');
   if (start >= 0 && end >= start) {
     svg = svg.slice(start, end + 6);
   }
@@ -248,33 +248,40 @@ function extractSvg(rawSvg: string): string {
 }
 
 function repairCommonSvgBreakage(rawSvg: string, spec: DesignSpec): string {
-  const safeTitleFamily = escapeAttrValue(spec.typography.titleFamily);
   const safeBodyFamily = escapeAttrValue(spec.typography.bodyFamily);
   let svg = rawSvg;
 
   svg = flattenNestedSvgRoots(svg);
+  svg = svg.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+  svg = svg.replace(/\sclass\s*=\s*(['"])[\s\S]*?\1/gi, '');
   svg = svg.replace(/\sfont-family=""[^"]+",\s*"[^"]+",\s*([^"]+)"/g, ` font-family="${safeBodyFamily}"`);
   svg = svg.replace(/\sfont-family="'([^"]*?)"/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/'/g, ''))}"`);
   svg = svg.replace(/\sfont-family='([^']*)'/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/"/g, ''))}"`);
   svg = svg.replace(/\sfont-family="([^"]*)"/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/"/g, ''))}"`);
-
+  svg = svg.replace(/rgba\(\s*([^)]+)\)/gi, '#000000');
   svg = removeDuplicateAttributes(svg);
   svg = escapeTextNodes(svg);
 
-  if (!/\sxmlns=/.test(svg.slice(0, Math.max(svg.indexOf('>'), 0)))) {
-    svg = svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
-  }
-  if (!/\sviewBox=/.test(svg.slice(0, Math.max(svg.indexOf('>'), 0)))) {
-    svg = svg.replace('<svg', `<svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"`);
-  }
-  if (!/\swidth=/.test(svg.slice(0, Math.max(svg.indexOf('>'), 0)))) {
-    svg = svg.replace('<svg', `<svg width="${spec.canvas.width}"`);
-  }
-  if (!/\sheight=/.test(svg.slice(0, Math.max(svg.indexOf('>'), 0)))) {
-    svg = svg.replace('<svg', `<svg height="${spec.canvas.height}"`);
+  const svgOpen = svg.match(/<svg\b[^>]*>/i)?.[0] || '';
+  if (!svgOpen) {
+    return svg;
   }
 
-  return svg;
+  let patchedOpen = svgOpen;
+  if (!/\sxmlns=/.test(patchedOpen)) {
+    patchedOpen = patchedOpen.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  if (!/\sviewBox=/.test(patchedOpen)) {
+    patchedOpen = patchedOpen.replace('<svg', `<svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"`);
+  }
+  if (!/\swidth=/.test(patchedOpen)) {
+    patchedOpen = patchedOpen.replace('<svg', `<svg width="${spec.canvas.width}"`);
+  }
+  if (!/\sheight=/.test(patchedOpen)) {
+    patchedOpen = patchedOpen.replace('<svg', `<svg height="${spec.canvas.height}"`);
+  }
+
+  return svg.replace(svgOpen, patchedOpen);
 }
 
 function flattenNestedSvgRoots(rawSvg: string): string {
@@ -371,12 +378,8 @@ function isWellFormedXml(svg: string): boolean {
     }
   }
 
-  if (stack.length !== 0) return false;
   const stripped = svg.replace(tagPattern, '');
-  if (/[<>]/.test(stripped)) {
-    return false;
-  }
-  return true;
+  return stack.length === 0 && !/[<>]/.test(stripped);
 }
 
 function buildSafeFallbackSvg(spec: DesignSpec, pageNumber: number): string {
@@ -414,7 +417,7 @@ ${spec.outline.map((slide) => `## ${slide.title}\n${slide.bullets.map((bullet) =
 `;
 }
 
-function renderTotalNotes(pages: PptMasterPage[], spec: DesignSpec): string {
+function renderTotalNotes(pages: Array<{ pageNumber: number; speakerNotes: string }>, spec: DesignSpec): string {
   return pages.map((page, index) => {
     const pageNumber = page.pageNumber || index + 1;
     const title = spec.outline[index]?.title || `Slide ${pageNumber}`;
@@ -423,51 +426,6 @@ function renderTotalNotes(pages: PptMasterPage[], spec: DesignSpec): string {
 ${page.speakerNotes || spec.outline[index]?.speakerNotes || ''}
 `;
   }).join('\n---\n\n');
-}
-
-async function runPythonScript(scriptName: string, args: string[], logs: string[]) {
-  const scriptPath = path.join(SCRIPT_DIR, scriptName);
-  try {
-    await runCommand('python', [scriptPath, ...args], logs);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('not recognized')) {
-      await runCommand('python3', [scriptPath, ...args], logs);
-      return;
-    }
-    throw error;
-  }
-}
-
-function runCommand(command: string, args: string[], logs: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: PPT_MASTER_DIR,
-      shell: false,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      stdout += text;
-      logs.push(text);
-    });
-    child.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      stderr += text;
-      logs.push(text);
-    });
-    child.on('error', (error) => reject(error));
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`${command} ${args.join(' ')} 执行失败，退出码 ${code}\n${stderr || stdout}`));
-    });
-  });
 }
 
 function sanitizeName(value: string): string {
@@ -481,4 +439,12 @@ function sanitizeName(value: string): string {
 
 export async function clearGeneratedProjects() {
   await rm(GENERATED_ROOT, { recursive: true, force: true });
+}
+
+export async function listGeneratedExports() {
+  try {
+    return await readdir(GENERATED_ROOT, { recursive: true });
+  } catch {
+    return [];
+  }
 }
