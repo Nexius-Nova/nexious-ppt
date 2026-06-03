@@ -3,7 +3,6 @@ import { computed, ref } from 'vue';
 import { Save, RotateCcw } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
-import UiSelect from '@/components/ui/UiSelect.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { useAgentStore } from '@/stores/agentStore';
 import type { AgentParameters } from '@/types/agent';
@@ -133,11 +132,18 @@ function setParamValue(key: ConfigKey, value: string) {
         <div class="param-card__body">
           <p class="param-card__description">{{ def.description }}</p>
 
-          <UiSelect
-            :model-value="getParamValue(def.key)"
-            :options="[...def.options]"
-            @update:model-value="setParamValue(def.key, String($event))"
-          />
+          <div class="setting-options" role="group" :aria-label="def.label">
+            <button
+              v-for="option in def.options"
+              :key="option.value"
+              type="button"
+              class="setting-option"
+              :class="{ 'setting-option--active': getParamValue(def.key) === option.value }"
+              @click="setParamValue(def.key, option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -238,6 +244,36 @@ function setParamValue(key: ConfigKey, value: string) {
 
 .param-card__value {
   margin-top: 8px;
+}
+
+.setting-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.setting-option {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.setting-option:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.setting-option--active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 700;
 }
 
 .config-footer {

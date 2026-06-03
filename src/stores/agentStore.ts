@@ -37,7 +37,7 @@ const clonePrompts = (): PromptDefinition[] => defaultPrompts.map((prompt) => ({
 const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => ({ ...template }));
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-const MAX_ACTIVITY_LOGS = 500;
+const MAX_ACTIVITY_LOGS = 5000;
 const normalizeProjectText = (value: unknown) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const projectIdentityKey = (project: Pick<PptProject, 'title' | 'topic'>) =>
   `${normalizeProjectText(project.title)}::${normalizeProjectText(project.topic)}`;
@@ -90,11 +90,48 @@ export const useAgentStore = defineStore('agent', () => {
   const generatedSlides = ref<Set<string>>(new Set());
   const isDataLoaded = ref(false);
   const recoveredActiveWorkflow = ref(false);
+  const workflowRunToken = ref(0);
+  const runningProjectId = ref<string | null>(null);
 
   const enabledSkills = computed(() => skills.value.filter((skill) => skill.enabled).sort((a, b) => a.order - b.order));
   const selectedImages = computed(() => images.value.filter((image) => image.selected));
   const activeStepMeta = computed(() => steps.value.find((step) => step.id === activeStep.value));
   const activePpt = computed(() => pptProjects.value.find((project) => project.id === activePptId.value) || null);
+
+  type RunContext = { token: number; projectId: string | null };
+
+  function createRunContext(): RunContext {
+    workflowRunToken.value += 1;
+    runningProjectId.value = activePptId.value;
+    return { token: workflowRunToken.value, projectId: activePptId.value };
+  }
+
+  function currentRunContext(): RunContext {
+    return { token: workflowRunToken.value, projectId: activePptId.value };
+  }
+
+  function isRunContextActive(ctx: RunContext): boolean {
+    return workflowRunToken.value === ctx.token && activePptId.value === ctx.projectId;
+  }
+
+  function cancelActiveRunForProjectSwitch() {
+    if (!isRunning.value || !activePpt.value) return;
+    const previousProject = activePpt.value;
+    previousProject.state = {
+      ...snapshotProjectState(),
+      paused: true,
+      workflowActive: false,
+      resumeStage: activeStep.value,
+      lastActiveStep: activeStep.value,
+    };
+    previousProject.updatedAt = Date.now();
+    workflowRunToken.value += 1;
+    runningProjectId.value = null;
+    isRunning.value = false;
+    isPaused.value = true;
+    pauseRequested.value = false;
+    currentGeneratingSlide.value = null;
+  }
 
   function mergePptProjects(projects: PptProject[], preferredActiveId: string | null = activePptId.value): PptProject[] {
     const byId = new Map<string, PptProject>();
@@ -580,6 +617,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (activePpt.value && activePpt.value.id === id) return;
 
     if (activePpt.value) {
+      cancelActiveRunForProjectSwitch();
       syncToProject();
     }
 
