@@ -3,6 +3,7 @@ import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DesignSpec, SpecLock } from './spec.js';
+import { inlineRemoteImages } from './svg-to-pptx.js';
 
 export interface PptMasterPage {
   pageNumber?: number;
@@ -179,14 +180,13 @@ export async function exportWithPptMaster(
   await runPythonScript('svg_quality_checker.py', [projectPath], logs);
   await runPythonScript('total_md_split.py', [projectPath], logs);
   await runPythonScript('finalize_svg.py', [projectPath], logs);
-  await runPythonScript('svg_to_pptx.py', [projectPath, '--only', 'legacy'], logs);
+  await runPythonScript('svg_to_pptx.py', [projectPath, '--only', 'native'], logs);
 
   const exportsDir = path.join(projectPath, 'exports');
   const files = await readdir(exportsDir);
   const pptxFiles = files.filter((file) => file.endsWith('.pptx')).sort();
-  const svgSnapshotFiles = pptxFiles.filter((file) => file.endsWith('_svg.pptx'));
-  const preferredFiles = svgSnapshotFiles.length > 0 ? svgSnapshotFiles : pptxFiles;
-  const fileName = preferredFiles.at(-1);
+  const nativeFiles = pptxFiles.filter((file) => !file.endsWith('_svg.pptx'));
+  const fileName = (nativeFiles.length > 0 ? nativeFiles : pptxFiles).at(-1);
   if (!fileName) {
     throw new Error('ppt-master 未生成 PPTX 文件');
   }
@@ -215,7 +215,8 @@ async function prepareProjectDirectory(spec: DesignSpec, lock: SpecLock, pages: 
   for (let i = 0; i < pages.length; i += 1) {
     const pageNumber = pages[i].pageNumber || i + 1;
     const fileName = `${String(pageNumber).padStart(2, '0')}_${sanitizeName(spec.outline[i]?.title || `slide_${pageNumber}`)}.svg`;
-    const svg = normalizeSvgForPptMaster(pages[i].svg, spec, pageNumber);
+    const inlinedSvg = await inlineRemoteImages(pages[i].svg);
+    const svg = normalizeSvgForPptMaster(inlinedSvg, spec, pageNumber);
     await writeFile(path.join(projectPath, 'svg_output', fileName), svg, 'utf-8');
   }
 
@@ -251,6 +252,7 @@ function repairCommonSvgBreakage(rawSvg: string, spec: DesignSpec): string {
   const safeBodyFamily = escapeAttrValue(spec.typography.bodyFamily);
   let svg = rawSvg;
 
+  svg = flattenNestedSvgRoots(svg);
   svg = svg.replace(/\sfont-family=""[^"]+",\s*"[^"]+",\s*([^"]+)"/g, ` font-family="${safeBodyFamily}"`);
   svg = svg.replace(/\sfont-family="'([^"]*?)"/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/'/g, ''))}"`);
   svg = svg.replace(/\sfont-family='([^']*)'/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/"/g, ''))}"`);
@@ -273,6 +275,42 @@ function repairCommonSvgBreakage(rawSvg: string, spec: DesignSpec): string {
   }
 
   return svg;
+}
+
+function flattenNestedSvgRoots(rawSvg: string): string {
+  const svg = rawSvg.trim();
+  const rootOpen = svg.match(/<svg\b[^>]*>/i);
+  const rootCloseIndex = svg.toLowerCase().lastIndexOf('</svg>');
+  if (!rootOpen || rootCloseIndex < 0) return svg;
+
+  const before = svg.slice(0, rootOpen.index! + rootOpen[0].length);
+  let inner = svg.slice(rootOpen.index! + rootOpen[0].length, rootCloseIndex);
+  const after = svg.slice(rootCloseIndex);
+  let nestedIndex = 0;
+
+  inner = inner.replace(/<svg\b([^>]*)>/gi, (_full, attrs: string) => {
+    nestedIndex += 1;
+    const x = readNumericAttr(attrs, 'x');
+    const y = readNumericAttr(attrs, 'y');
+    const transform = x || y ? ` transform="translate(${x || 0} ${y || 0})"` : '';
+    const id = readStringAttr(attrs, 'id') || `nested-svg-${nestedIndex}`;
+    return `<g id="${escapeAttrValue(id)}"${transform}>`;
+  });
+  inner = inner.replace(/<\/svg>/gi, '</g>');
+
+  return `${before}${inner}${after}`;
+}
+
+function readNumericAttr(attrs: string, name: string): number {
+  const match = attrs.match(new RegExp(`\\b${name}\\s*=\\s*(['"])(.*?)\\1`, 'i'));
+  if (!match) return 0;
+  const value = Number.parseFloat(match[2]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function readStringAttr(attrs: string, name: string): string {
+  const match = attrs.match(new RegExp(`\\b${name}\\s*=\\s*(['"])(.*?)\\1`, 'i'));
+  return match?.[2] || '';
 }
 
 function removeDuplicateAttributes(svg: string): string {

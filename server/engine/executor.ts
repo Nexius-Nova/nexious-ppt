@@ -80,3 +80,35 @@ export function cleanSvgOutput(raw: string): string {
   }
   return svg.trim();
 }
+
+function escapeAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+export function ensureImageUsedInSvg(svg: string, slide: SpecSlide, spec: DesignSpec, imageUrl?: string): string {
+  if (!imageUrl || !svg || /<image\b/i.test(svg)) return svg;
+
+  const canvas = spec.canvas;
+  const layout = String(slide.layout || '').toLowerCase();
+  const isFull = layout.includes('full') || layout.includes('cover');
+  const isLeftImage = layout.includes('image-text');
+  const margin = Math.round(canvas.width * 0.055);
+  const top = Math.round(canvas.height * 0.19);
+  const imageWidth = isFull ? Math.round(canvas.width * 0.46) : Math.round(canvas.width * 0.34);
+  const imageHeight = isFull ? Math.round(canvas.height * 0.64) : Math.round(canvas.height * 0.52);
+  const x = isLeftImage ? margin : canvas.width - margin - imageWidth;
+  const y = isFull ? Math.round(canvas.height * 0.22) : top;
+  const imageGroup = `
+  <g id="generated-image">
+    <rect x="${x - 8}" y="${y - 8}" width="${imageWidth + 16}" height="${imageHeight + 16}" fill="${spec.visualTheme.colors.surface}" stroke="${spec.visualTheme.colors.border}" stroke-width="1"/>
+    <image href="${escapeAttribute(imageUrl)}" x="${x}" y="${y}" width="${imageWidth}" height="${imageHeight}" preserveAspectRatio="xMidYMid slice"/>
+  </g>`;
+
+  const closeIndex = svg.toLowerCase().lastIndexOf('</svg>');
+  if (closeIndex < 0) return svg;
+  return `${svg.slice(0, closeIndex)}${imageGroup}\n${svg.slice(closeIndex)}`;
+}

@@ -5,6 +5,7 @@ import type { WorkflowStep, WorkflowStepId } from '@/types/agent';
 const props = defineProps<{
   steps: WorkflowStep[];
   activeStep: WorkflowStepId;
+  disabledSteps?: WorkflowStepId[];
 }>();
 
 defineEmits<{
@@ -34,6 +35,10 @@ function statusText(status: WorkflowStep['status']) {
   if (status === 'running') return '进行中';
   return '等待';
 }
+
+function isStepDisabled(stepId: WorkflowStepId) {
+  return props.disabledSteps?.includes(stepId) || false;
+}
 </script>
 
 <template>
@@ -45,9 +50,12 @@ function statusText(status: WorkflowStep['status']) {
       :class="{
         'workflow-step--active': step.id === activeStep,
         'workflow-step--done': step.status === 'done',
-        'workflow-step--running': step.status === 'running'
+        'workflow-step--running': step.status === 'running',
+        'workflow-step--disabled': isStepDisabled(step.id)
       }"
-      @click="$emit('select', step.id)"
+      :disabled="isStepDisabled(step.id)"
+      :aria-disabled="isStepDisabled(step.id)"
+      @click="!isStepDisabled(step.id) && $emit('select', step.id)"
     >
       <span class="workflow-step__index">{{ index + 1 }}</span>
       <span class="workflow-step__icon">
@@ -92,6 +100,17 @@ function statusText(status: WorkflowStep['status']) {
 .workflow-step:hover {
   transform: translateY(-1px);
   border-color: var(--color-border-strong);
+}
+
+.workflow-step--disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
+}
+
+.workflow-step--disabled:hover {
+  transform: none;
+  border-color: var(--color-border);
+  box-shadow: none;
 }
 
 .workflow-step--active {

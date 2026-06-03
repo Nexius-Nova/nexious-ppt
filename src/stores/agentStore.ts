@@ -443,7 +443,6 @@ export const useAgentStore = defineStore('agent', () => {
       ...configOptions.value,
       [key]: [...configOptions.value[key], option]
     };
-    setConfigOptionValue(key, option.value);
     pushLog(`已添加配置：${trimmed}`);
     syncToProject();
   }
@@ -466,10 +465,6 @@ export const useAgentStore = defineStore('agent', () => {
       ...configOptions.value,
       [key]: configOptions.value[key].filter(option => option.value !== value)
     };
-    if (parameters.value[key] === value) {
-      const next = configOptions.value[key][0]?.value || '';
-      parameters.value = { ...parameters.value, [key]: next };
-    }
     pushLog(`已删除配置：${target?.label || value}`);
     syncToProject();
   }

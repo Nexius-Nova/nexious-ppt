@@ -1,13 +1,45 @@
 import { Router, Response, Request } from 'express';
 import { getDefaultApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
-import { buildStrategistPrompt, parseStrategistOutput, buildSpecLock, buildExecutorSystemPrompt, buildExecutorPagePrompt, cleanSvgOutput } from '../engine/index.js';
+import {
+  buildStrategistPrompt,
+  parseStrategistOutput,
+  buildSpecLock,
+  buildExecutorSystemPrompt,
+  buildExecutorPagePrompt,
+  cleanSvgOutput,
+  ensureImageUsedInSvg
+} from '../engine/index.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { StrategistInput, DesignSpec, SpecLock } from '../engine/index.js';
-import { convertSvgPagesToPptx, inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
+import { inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
+import { exportWithPptMaster } from '../engine/ppt-master-adapter.js';
 
 const router = Router();
 const DEFAULT_USER_ID = 1;
+
+function publicBaseUrl() {
+  return (process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/+$/, '');
+}
+
+function normalizeExecutorImageUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const imageUrl = value.trim();
+  if (!imageUrl || imageUrl.length > 4000) return undefined;
+  if (/^https?:\/\//i.test(imageUrl)) return imageUrl;
+  if (imageUrl.startsWith('/generated-images/')) return `${publicBaseUrl()}${imageUrl}`;
+  return undefined;
+}
+
+function buildAttachmentDisposition(fileName: string): string {
+  const safeName = fileName.trim() || `nexious-deck-${Date.now()}.pptx`;
+  const asciiName = safeName
+    .replace(/[^\x20-\x7E]+/g, '_')
+    .replace(/["\\]/g, '_')
+    .replace(/[;]+/g, '_')
+    || `nexious-deck-${Date.now()}.pptx`;
+  return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+}
 
 interface Message {
   role: 'system' | 'user' | 'assistant';
@@ -222,12 +254,7 @@ router.post('/executor-page', async (req: Request, res: Response) => {
     };
 
     let messages: Message[];
-    const safeImageUrl =
-      typeof imageUrl === 'string' &&
-      imageUrl.length <= 2000 &&
-      /^https?:\/\//i.test(imageUrl)
-        ? imageUrl
-        : undefined;
+    const safeImageUrl = normalizeExecutorImageUrl(imageUrl);
     const systemPrompt = buildExecutorSystemPrompt(spec, effectiveLock);
     const userPrompt = buildExecutorPagePrompt(slide, spec, effectiveLock, safeImageUrl);
 
@@ -237,7 +264,7 @@ router.post('/executor-page', async (req: Request, res: Response) => {
     if (estimatedTokens > 500000) {
       console.warn(`[Executor] Page ${slide.pageNumber}: prompt too large (~${estimatedTokens}tokens), using simplified prompt`);
       const simplifiedSystem = `你是PPT SVG执行器。画布: ${spec.canvas.width}x${spec.canvas.height}。颜色: primary=${lock.colors.primary}, accent=${lock.colors.accent}, bg=${lock.colors.background}, text=${lock.colors.text}, surface=${lock.colors.surface}, muted=${lock.colors.muted}。字体: ${spec.typography.titleFamily}。输出纯SVG代码，viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"。禁止<style>,class,<foreignObject>,rgba()。`;
-      const simplifiedUser = `生成第${slide.pageNumber}页SVG。标题: ${slide.title}。要点: ${slide.bullets.slice(0, 5).join(' | ')}。布局: ${slide.layout}。输出纯SVG：`;
+      const simplifiedUser = `生成第${slide.pageNumber}页SVG。标题: ${slide.title}。要点: ${slide.bullets.slice(0, 5).join(' | ')}。布局: ${slide.layout}。${safeImageUrl ? `必须使用图片：${safeImageUrl}，写入 <image href="${safeImageUrl}" x="..." y="..." width="..." height="..." preserveAspectRatio="xMidYMid slice"/>。` : ''}输出纯SVG：`;
       messages = [
         { role: 'system', content: simplifiedSystem },
         { role: 'user', content: simplifiedUser },
@@ -258,7 +285,7 @@ router.post('/executor-page', async (req: Request, res: Response) => {
 
     const fullContent = await streamText(provider, apiKey, baseUrl, model, messages, res);
 
-    const svg = cleanSvgOutput(fullContent);
+    const svg = ensureImageUsedInSvg(cleanSvgOutput(fullContent), slide, spec, safeImageUrl);
 
     res.write(`data: ${JSON.stringify({ status: 'complete', phase: 'executor', pageNumber: slide.pageNumber, data: { svg } })}\n\n`);
     res.end();
@@ -290,12 +317,20 @@ router.post('/export-pptx', async (req: Request, res: Response) => {
         }
       : buildSpecLock(spec);
 
-    const buffer = await convertSvgPagesToPptx(pages, spec, effectiveLock);
+    const result = await exportWithPptMaster(
+      pages.map((page: any, index: number) => ({
+        pageNumber: page.pageNumber || index + 1,
+        svg: page.svg,
+        speakerNotes: page.speakerNotes || ''
+      })),
+      spec,
+      effectiveLock
+    );
 
-    const fileName = `nexious-deck-${Date.now()}.pptx`;
+    const fileName = result.fileName || `nexious-deck-${Date.now()}.pptx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.send(buffer);
+    res.setHeader('Content-Disposition', buildAttachmentDisposition(fileName));
+    res.send(result.buffer);
   } catch (error) {
     console.error('Export PPTX error:', error);
     res.status(500).json({ success: false, message: error instanceof Error ? error.message : '导出失败' });

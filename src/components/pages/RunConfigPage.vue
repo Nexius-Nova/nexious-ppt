@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { ref } from 'vue';
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -36,18 +36,6 @@ const addingLabels = ref<Record<ConfigOptionKey, string>>({
 });
 const editingOption = ref<{ key: ConfigOptionKey; value: string } | null>(null);
 const editingLabel = ref('');
-
-const currentLabels = computed(() => {
-  return paramDefs.reduce<Record<ConfigOptionKey, string>>((result, def) => {
-    const option = store.configOptions[def.key].find(item => item.value === store.parameters[def.key]);
-    result[def.key] = option?.label || '未设置';
-    return result;
-  }, { summaryLength: '', tone: '', imageStyle: '' });
-});
-
-function selectOption(key: ConfigOptionKey, value: string) {
-  store.setConfigOptionValue(key, value);
-}
 
 function startEdit(key: ConfigOptionKey, value: string, label: string) {
   editingOption.value = { key, value };
@@ -94,14 +82,7 @@ function deleteOption(key: ConfigOptionKey, value: string) {
     <div class="page-header">
       <div class="page-header__info">
         <h2>运行配置</h2>
-        <p>维护输入页可用的摘要、语言和图像选项，修改后会自动保存。</p>
-      </div>
-    </div>
-
-    <div class="config-summary" aria-label="当前设置">
-      <div v-for="def in paramDefs" :key="def.key" class="config-summary__item">
-        <span>{{ def.label }}</span>
-        <strong>{{ currentLabels[def.key] }}</strong>
+        <p>维护输入页可用的摘要、语言和图像选项，不改变当前 PPT 的已选设置。</p>
       </div>
     </div>
 
@@ -124,17 +105,13 @@ function deleteOption(key: ConfigOptionKey, value: string) {
             v-for="option in store.configOptions[def.key]"
             :key="option.value"
             class="setting-option"
-            :class="{ 'setting-option--active': store.parameters[def.key] === option.value }"
           >
-            <button
+            <div
               v-if="!(editingOption?.key === def.key && editingOption.value === option.value)"
-              type="button"
-              class="setting-option__select"
-              @click="selectOption(def.key, option.value)"
+              class="setting-option__label"
             >
-              <Check v-if="store.parameters[def.key] === option.value" :size="14" />
               <span>{{ option.label }}</span>
-            </button>
+            </div>
 
             <div v-else class="setting-option__edit">
               <UiInput
@@ -216,35 +193,6 @@ function deleteOption(key: ConfigOptionKey, value: string) {
   line-height: 1.6;
 }
 
-.config-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.config-summary__item {
-  display: grid;
-  gap: 6px;
-  padding: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-card);
-}
-
-.config-summary__item span {
-  color: var(--color-subtle);
-  font-size: 12px;
-}
-
-.config-summary__item strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--color-text);
-  font-size: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .param-list {
   display: grid;
   gap: 12px;
@@ -308,28 +256,18 @@ function deleteOption(key: ConfigOptionKey, value: string) {
   border-color: var(--color-border-strong);
 }
 
-.setting-option--active {
-  border-color: var(--color-accent);
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-}
-
-.setting-option__select {
+.setting-option__label {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   min-width: 0;
   min-height: 28px;
   padding: 0 8px;
-  border: none;
-  background: transparent;
   color: inherit;
   font-size: 13px;
   font-weight: 600;
-  cursor: pointer;
 }
 
-.setting-option__select span {
+.setting-option__label span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -385,10 +323,6 @@ function deleteOption(key: ConfigOptionKey, value: string) {
 }
 
 @media (max-width: 760px) {
-  .config-summary {
-    grid-template-columns: 1fr;
-  }
-
   .add-option {
     grid-template-columns: 1fr;
   }
@@ -398,7 +332,7 @@ function deleteOption(key: ConfigOptionKey, value: string) {
     width: 100%;
   }
 
-  .setting-option__select {
+  .setting-option__label {
     flex: 1;
   }
 }

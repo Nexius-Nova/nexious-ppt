@@ -43,7 +43,7 @@ const flatResults = computed<FlatResult[]>(() => {
     items.push({ type: 'slide', label: slide.title, subtitle: `${slide.bullets.length} 个要点`, route: undefined, data: slide });
   }
   for (const project of results.value.projects) {
-    items.push({ type: 'project', label: project.title, subtitle: project.topic || project.description || '', route: `/project/${project.id}`, data: project });
+    items.push({ type: 'project', label: project.title, subtitle: project.topic || project.description || '', route: `/project/${project.id}/input`, data: project });
   }
   for (const prompt of results.value.prompts) {
     items.push({ type: 'prompt', label: prompt.title, subtitle: prompt.scene, route: undefined, data: prompt });
@@ -102,7 +102,7 @@ function navigateTo(item: FlatResult) {
     emit('close');
   } else if (item.type === 'project') {
     store.selectPptProject(item.data.id);
-    router.push(`/project/${item.data.id}`);
+    router.push(`/project/${item.data.id}/input`);
     emit('close');
   } else if (item.type === 'prompt') {
     store.activeStep = 'prompts' as any;

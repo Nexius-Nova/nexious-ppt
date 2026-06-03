@@ -130,7 +130,14 @@ useShortcuts([
 
 const activeStep = computed({
   get: () => store.activeStep,
-  set: (value) => { store.activeStep = value as WorkflowStepId; }
+  set: (value) => {
+    const step = value as WorkflowStepId;
+    if (isWorkflowTab(step)) {
+      goToWorkflowStep(step);
+    } else {
+      store.activeStep = step;
+    }
+  }
 });
 
 const stepTitles: Record<string, string> = {
@@ -177,8 +184,18 @@ const previewingImageSlide = computed(() => {
   return (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === previewingImage.value?.slideId) || null;
 });
 const activeProjectTitle = computed(() => activePpt.value?.title || input.value.topic || '尚未选择 PPT 项目');
+const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
+  steps.value.map((step) => {
+    if (step.id !== 'input' || !hasInputContent()) return step;
+    return {
+      ...step,
+      status: 'done',
+      progress: 100
+    };
+  })
+);
 const pipelineProgress = computed(() => {
-  const workflow = steps.value.filter(step => ['input', 'outline', 'images', 'layout', 'preview'].includes(step.id));
+  const workflow = workflowDisplaySteps.value.filter(step => ['input', 'outline', 'images', 'layout', 'preview'].includes(step.id));
   if (workflow.length === 0) return 0;
   const doneWeight = workflow.reduce((sum, step) => {
     if (step.status === 'done') return sum + 100;
@@ -196,14 +213,14 @@ const workflowStatusText = computed(() => {
 });
 
 const pipelineStages = computed(() => {
-  const byId = new Map(steps.value.map(step => [step.id, step]));
+  const byId = new Map(workflowDisplaySteps.value.map(step => [step.id, step]));
   const stageInput = byId.get('input');
   const stageOutline = byId.get('outline');
   const stageImages = byId.get('images');
   const stageLayout = byId.get('layout');
   const stagePreview = byId.get('preview');
 
-  return [
+  const stages = [
     {
       id: 'input' as WorkflowStepId,
       icon: FileText,
@@ -213,9 +230,9 @@ const pipelineStages = computed(() => {
         : input.value.content.trim()
           ? '文本已准备'
           : '等待输入',
-      status: stageInput?.status || (input.value.topic.trim() ? 'done' : 'idle'),
-      progress: input.value.topic.trim() ? 100 : stageInput?.progress || 0,
-      metric: input.value.topic.trim() ? '资料就绪' : '待输入',
+      status: stageInput?.status || 'idle',
+      progress: stageInput?.progress || 0,
+      metric: hasInputContent() ? '资料就绪' : '待输入',
       action: '编辑资料'
     },
     {
@@ -266,9 +283,95 @@ const pipelineStages = computed(() => {
       action: '预览导出'
     }
   ];
+
+  return stages.map((stage) => ({
+    ...stage,
+    disabled: !canOpenWorkflowStep(stage.id)
+  }));
 });
 
-function syncStepWithRoute() {
+const workflowTabs = ['input', 'outline', 'images', 'layout', 'preview'] as const;
+const workflowTabSet = new Set<string>(workflowTabs);
+
+function isWorkflowTab(step: string): step is WorkflowStepId {
+  return workflowTabSet.has(step);
+}
+
+function stepState(step: WorkflowStepId) {
+  return steps.value.find((item) => item.id === step);
+}
+
+function hasInputContent() {
+  return Boolean(input.value.topic.trim() || input.value.content.trim() || input.value.files.length > 0);
+}
+
+function hasOutlineContent() {
+  return Boolean((designSpec.value && specLock.value) || outline.value.length > 0);
+}
+
+function canOpenWorkflowStep(step: WorkflowStepId) {
+  if (step === 'input') return true;
+  if (step === 'outline') return hasInputContent();
+  if (step === 'images') return hasOutlineContent();
+  if (step === 'layout') {
+    const layoutStep = stepState('layout');
+    return Boolean(svgPages.value.length > 0 || layoutStep?.status === 'running' || layoutStep?.status === 'done');
+  }
+  if (step === 'preview') return svgPages.value.length > 0;
+  return false;
+}
+
+function nearestAvailableWorkflowStep(target: WorkflowStepId) {
+  if (canOpenWorkflowStep(target)) return target;
+  const targetIndex = workflowTabs.indexOf(target as typeof workflowTabs[number]);
+  for (let i = targetIndex - 1; i >= 0; i--) {
+    const candidate = workflowTabs[i];
+    if (canOpenWorkflowStep(candidate)) return candidate;
+  }
+  return 'input';
+}
+
+const disabledWorkflowSteps = computed(() =>
+  workflowTabs.filter((step) => !canOpenWorkflowStep(step)) as WorkflowStepId[]
+);
+
+function routeWorkflowTab(): WorkflowStepId {
+  const tab = String(route.params.tab || 'input');
+  return isWorkflowTab(tab) ? tab : 'input';
+}
+
+function projectStepPath(projectId: string, step: WorkflowStepId) {
+  return `/project/${projectId}/${step}`;
+}
+
+function goToWorkflowStep(step: WorkflowStepId) {
+  if (!isWorkflowTab(step)) {
+    store.activeStep = step;
+    return;
+  }
+
+  if (!canOpenWorkflowStep(step)) return;
+
+  const projectId = String(route.params.id || store.activePptId || '');
+  if (!projectId) {
+    store.activeStep = step;
+    return;
+  }
+
+  const target = projectStepPath(projectId, step);
+  if (route.path !== target) {
+    void router.push(target);
+    return;
+  }
+
+  store.activeStep = step;
+}
+
+let routeSyncToken = 0;
+let isSyncingRouteStep = false;
+
+async function syncStepWithRoute() {
+  const token = ++routeSyncToken;
   const path = route.path;
   const routeToStep: Record<string, string> = {
     '/': 'my-ppt',
@@ -281,17 +384,44 @@ function syncStepWithRoute() {
   };
 
   if (path.startsWith('/project/')) {
-    store.activeStep = 'input' as WorkflowStepId;
     const routeProjectId = String(route.params.id || '');
-    if (routeProjectId && store.activePptId !== routeProjectId) {
-      void store.selectPptProject(routeProjectId);
+    const rawTab = String(route.params.tab || '');
+    const requestedTab = routeWorkflowTab();
+    isSyncingRouteStep = true;
+    try {
+      store.activeStep = requestedTab;
+      if (routeProjectId && store.activePptId !== routeProjectId) {
+        await store.selectPptProject(routeProjectId);
+        if (token !== routeSyncToken) return;
+      }
+      const tab = nearestAvailableWorkflowStep(requestedTab);
+      store.activeStep = tab;
+      if ((!route.params.tab || (rawTab && !isWorkflowTab(rawTab)) || tab !== requestedTab) && routeProjectId) {
+        void router.replace(projectStepPath(routeProjectId, tab));
+      }
+    } finally {
+      if (token === routeSyncToken) {
+        isSyncingRouteStep = false;
+      }
     }
   } else {
+    isSyncingRouteStep = false;
     store.activeStep = (routeToStep[path] || 'my-ppt') as WorkflowStepId;
   }
 }
 
-watch(() => route.path, syncStepWithRoute, { immediate: true });
+watch(() => route.fullPath, () => { void syncStepWithRoute(); }, { immediate: true });
+
+watch(() => store.activeStep, (step) => {
+  if (isSyncingRouteStep) return;
+  if (!route.path.startsWith('/project/') || !isWorkflowTab(step)) return;
+  const projectId = String(route.params.id || store.activePptId || '');
+  if (!projectId) return;
+  const target = projectStepPath(projectId, step);
+  if (route.path !== target) {
+    void router.replace(target);
+  }
+});
 
 onMounted(async () => {
   await store.initializeData();
@@ -317,7 +447,7 @@ function handleNavigate(step: string) {
     const routePath = stepToRoute[step];
     if (routePath) router.push(routePath);
   } else {
-    store.activeStep = step as WorkflowStepId;
+    goToWorkflowStep(step as WorkflowStepId);
   }
 }
 
@@ -498,13 +628,17 @@ async function retryImage(slideId: string) {
                   v-for="stage in pipelineStages"
                   :key="stage.id"
                   class="pipeline-stage"
+                  type="button"
+                  :disabled="stage.disabled"
+                  :aria-disabled="stage.disabled"
                   :class="{
                     'pipeline-stage--active': activeStep === stage.id,
                     'pipeline-stage--running': stage.status === 'running',
                     'pipeline-stage--done': stage.status === 'done',
-                    'pipeline-stage--skipped': stage.skipped
+                    'pipeline-stage--skipped': stage.skipped,
+                    'pipeline-stage--disabled': stage.disabled
                   }"
-                  @click="activeStep = stage.id"
+                  @click="goToWorkflowStep(stage.id)"
                 >
                   <span class="pipeline-stage__icon">
                     <component :is="stage.status === 'running' ? Loader2 : stage.icon" :size="18" :class="{ 'pipeline-stage__spin': stage.status === 'running' }" />
@@ -556,7 +690,7 @@ async function retryImage(slideId: string) {
                       <div class="strategy-item">
                         <span>资料</span>
                         <strong>{{ input.content.trim() || input.files.length ? '已准备' : '待输入' }}</strong>
-                        <button @click="activeStep = 'input'">编辑</button>
+                        <button @click="goToWorkflowStep('input')">编辑</button>
                       </div>
                       <div class="strategy-item">
                         <span>大纲</span>
@@ -566,12 +700,12 @@ async function retryImage(slideId: string) {
                       <div class="strategy-item">
                         <span>图片</span>
                         <strong>{{ slidesNeedingImages.length ? `${slidesNeedingImages.length} 页需要` : '按需跳过' }}</strong>
-                        <button :disabled="!designSpec" @click="activeStep = 'images'">查看</button>
+                        <button :disabled="!canOpenWorkflowStep('images')" @click="goToWorkflowStep('images')">查看</button>
                       </div>
                       <div class="strategy-item">
                         <span>页面</span>
                         <strong>{{ svgPages.length ? `${svgPages.length} 页完成` : '待生成' }}</strong>
-                        <button :disabled="!designSpec" @click="activeStep = 'layout'">查看</button>
+                        <button :disabled="!canOpenWorkflowStep('layout')" @click="goToWorkflowStep('layout')">查看</button>
                       </div>
                     </div>
                     <div v-if="streamingText" class="strategy-stream">
@@ -736,7 +870,7 @@ async function retryImage(slideId: string) {
                           <button
                             class="executor-thumb executor-thumb--done"
                             :class="{ 'executor-thumb--retry': isFallbackPageSvg(svgPages[i - 1].svg) }"
-                            @click="previewPageIndex = i - 1; activeStep = 'preview'"
+                            @click="previewPageIndex = i - 1; goToWorkflowStep('preview')"
                           >
                             <span>{{ i }}</span>
                             <div v-html="svgPages[i - 1].svg" />
@@ -763,7 +897,7 @@ async function retryImage(slideId: string) {
                       <Play :size="14" />
                       生成页面
                     </UiButton>
-                    <UiButton variant="secondary" :disabled="svgPages.length === 0" @click="activeStep = 'preview'">
+                    <UiButton variant="secondary" :disabled="svgPages.length === 0" @click="goToWorkflowStep('preview')">
                       <Eye :size="14" />
                       查看预览
                     </UiButton>
@@ -819,7 +953,12 @@ async function retryImage(slideId: string) {
 
         <footer class="workspace-status-bar">
           <div class="workspace-status-bar__left">
-            <WorkflowRail :steps="steps" :active-step="activeStep" @select="(stepId) => { store.activeStep = stepId as WorkflowStepId; }" />
+            <WorkflowRail
+              :steps="workflowDisplaySteps"
+              :active-step="activeStep"
+              :disabled-steps="disabledWorkflowSteps"
+              @select="goToWorkflowStep"
+            />
           </div>
           <div class="workspace-status-bar__right">
             <span class="status-item">
@@ -1161,6 +1300,17 @@ async function retryImage(slideId: string) {
   transform: translateY(-1px);
   border-color: var(--color-border-strong);
   box-shadow: var(--shadow-sm);
+}
+
+.pipeline-stage--disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.pipeline-stage--disabled:hover {
+  transform: none;
+  border-color: var(--color-border);
+  box-shadow: none;
 }
 
 .pipeline-stage--active {

@@ -624,7 +624,11 @@ export const aiApi = {
     const a = document.createElement('a');
     a.href = url;
     const disposition = response.headers.get('Content-Disposition') || '';
-    const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || `nexious-deck-${Date.now()}.pptx`;
+    const encodedFileName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    const fallbackFileName = disposition.match(/filename="([^"]+)"/)?.[1];
+    const fileName = encodedFileName
+      ? decodeURIComponent(encodedFileName)
+      : fallbackFileName || `nexious-deck-${Date.now()}.pptx`;
     a.download = fileName;
     document.body.appendChild(a);
     a.click();

@@ -61,7 +61,7 @@ export const router = createRouter({
       }
     },
     {
-      path: '/project/:id',
+      path: '/project/:id/:tab?',
       name: 'project-edit',
       component: AgentWorkspace,
       meta: {

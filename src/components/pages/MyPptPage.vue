@@ -140,7 +140,7 @@ async function confirmDelete() {
 
 function openProject(project: Project) {
   agentStore.selectPptProject(String(project.id));
-  router.push(`/project/${project.id}`);
+  router.push(`/project/${project.id}/input`);
 }
 
 function getStatusBadge(tone: 'draft' | 'generating' | 'completed') {
