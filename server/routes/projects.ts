@@ -692,9 +692,18 @@ export default router;
 
 function compactProjectState(state: any) {
   if (!state || typeof state !== 'object') return state;
+  const compactInput = state.input
+    ? {
+        ...state.input,
+        files: Array.isArray(state.input.files)
+          ? state.input.files.filter((file: any) => typeof file === 'string')
+          : [],
+      }
+    : state.input;
+
   return {
     ...state,
-    input: state.input ? { ...state.input, files: [] } : state.input,
+    input: compactInput,
     images: Array.isArray(state.images)
       ? state.images.map((image: any) => ({
           ...image,

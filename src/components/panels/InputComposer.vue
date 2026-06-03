@@ -38,6 +38,12 @@ function getFileIcon(fileName: string) {
 function handleRun() {
   emit('run');
 }
+
+function handleFileChange(event: Event) {
+  const target = event.target as HTMLInputElement;
+  emit('attach', target.files);
+  target.value = '';
+}
 </script>
 
 <template>
@@ -94,8 +100,8 @@ function handleRun() {
         <input
           type="file"
           multiple
-          accept=".txt,.md,.pdf,.doc,.docx,image/*"
-          @change="$emit('attach', ($event.target as HTMLInputElement).files)"
+          accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,.doc,.docx,image/*"
+          @change="handleFileChange"
         />
       </label>
 

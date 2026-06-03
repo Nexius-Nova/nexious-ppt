@@ -193,6 +193,7 @@ export interface Project {
   content: string | null;
   status: 'draft' | 'generating' | 'completed';
   settings: any;
+  state?: any;
   created_at: string;
   updated_at: string;
   slides?: Slide[];

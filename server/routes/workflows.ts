@@ -42,11 +42,20 @@ router.post('/save', async (req: AuthRequest, res: Response) => {
 });
 
 function compactWorkflowSnapshot(snapshotData: any) {
+  const compactInput = (input: any) => input
+    ? {
+        ...input,
+        files: Array.isArray(input.files)
+          ? input.files.filter((file: any) => typeof file === 'string')
+          : [],
+      }
+    : input;
+
   const compactState = (state: any) => {
     if (!state || typeof state !== 'object') return state;
     return {
       ...state,
-      input: state.input ? { ...state.input, files: [] } : state.input,
+      input: compactInput(state.input),
       images: Array.isArray(state.images)
         ? state.images.map((image: any) => ({
             ...image,
@@ -65,7 +74,7 @@ function compactWorkflowSnapshot(snapshotData: any) {
 
   return {
     ...snapshotData,
-    input: snapshotData.input ? { ...snapshotData.input, files: [] } : snapshotData.input,
+    input: compactInput(snapshotData.input),
     images: Array.isArray(snapshotData.images)
       ? snapshotData.images.map((image: any) => ({
           ...image,

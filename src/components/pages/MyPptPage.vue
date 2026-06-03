@@ -9,6 +9,8 @@ import UiEmpty from '@/components/ui/UiEmpty.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
 import { projectApi, type Project } from '@/services/api';
+import { slideNeedsImage } from '@/utils/slideVisuals';
+import type { PptProjectState, WorkflowStep } from '@/types/agent';
 
 const router = useRouter();
 const agentStore = useAgentStore();
@@ -21,6 +23,18 @@ const showDeleteModal = ref(false);
 const projectToDelete = ref<Project | null>(null);
 const showCreateModal = ref(false);
 const newProjectTitle = ref('');
+
+type ProjectDisplayStatus = 'draft' | 'generating' | 'completed';
+type ProjectDisplay = Project & {
+  displayStatus: ProjectDisplayStatus;
+  displayProgress: number;
+  stageLabel: string;
+  detailLabel: string;
+  imageReady: number;
+  imageTotal: number;
+  pageReady: number;
+  pageTotal: number;
+};
 
 function normalizeProjectText(value: unknown) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -54,20 +68,117 @@ const uniqueProjects = computed(() => {
   return items;
 });
 
+function parseProjectState(project: Project): PptProjectState | null {
+  if (!project.state) return null;
+  if (typeof project.state === 'string') {
+    try {
+      return JSON.parse(project.state) as PptProjectState;
+    } catch {
+      return null;
+    }
+  }
+  return project.state as PptProjectState;
+}
+
+function getStepProgress(steps: WorkflowStep[] | undefined, id: string) {
+  const step = steps?.find((item) => item.id === id);
+  if (!step) return 0;
+  if (step.status === 'done') return 100;
+  return Math.max(0, Math.min(100, Math.round(step.progress || 0)));
+}
+
+function hasInputContent(state: PptProjectState | null, project: Project) {
+  return Boolean(
+    state?.input?.topic?.trim() ||
+    state?.input?.content?.trim() ||
+    state?.input?.files?.length ||
+    project.topic?.trim() ||
+    project.content?.trim()
+  );
+}
+
+function getSlidesForProgress(state: PptProjectState | null) {
+  return state?.designSpec?.outline?.length ? state.designSpec.outline : state?.outline || [];
+}
+
+function countReadyImages(state: PptProjectState | null) {
+  return (state?.images || []).filter((image) => image.selected && !image.error && Boolean(image.url)).length;
+}
+
+function deriveProjectDisplay(project: Project): ProjectDisplay {
+  const state = parseProjectState(project);
+  const slides = getSlidesForProgress(state);
+  const imageTotal = slides.filter((slide: any) => slideNeedsImage(slide)).length;
+  const imageReady = countReadyImages(state);
+  const pageTotal = state?.designSpec?.outline?.length || state?.outline?.length || state?.parameters?.slideCount || 0;
+  const pageReady = state?.svgPages?.filter((page) => page.svg?.trim()).length || 0;
+  const inputProgress = hasInputContent(state, project) ? 100 : getStepProgress(state?.steps, 'input');
+  const outlineProgress = state?.designSpec || (state?.outline?.length || 0) > 0
+    ? 100
+    : getStepProgress(state?.steps, 'outline');
+  const imageProgress = imageTotal === 0
+    ? (outlineProgress === 100 ? 100 : getStepProgress(state?.steps, 'images'))
+    : Math.max(getStepProgress(state?.steps, 'images'), Math.round((imageReady / imageTotal) * 100));
+  const layoutProgress = pageTotal > 0
+    ? Math.max(getStepProgress(state?.steps, 'layout'), Math.round((pageReady / pageTotal) * 100))
+    : getStepProgress(state?.steps, 'layout');
+  const previewProgress = (state?.exportArtifacts?.length || 0) > 0
+    ? 100
+    : getStepProgress(state?.steps, 'preview');
+  const progress = Math.round((inputProgress + outlineProgress + imageProgress + layoutProgress + previewProgress) / 5);
+  const hasRunningStep = Boolean(state?.workflowActive || state?.steps?.some((step) => step.status === 'running'));
+  const isComplete = previewProgress === 100 || (pageTotal > 0 && pageReady >= pageTotal && layoutProgress === 100);
+
+  let displayStatus: ProjectDisplayStatus = project.status;
+  if (hasRunningStep) {
+    displayStatus = 'generating';
+  } else if (isComplete) {
+    displayStatus = 'completed';
+  } else if (progress > 0 && project.status !== 'completed') {
+    displayStatus = progress >= 100 ? 'completed' : 'draft';
+  }
+
+  let stageLabel = '等待输入';
+  if (isComplete) stageLabel = '已可导出';
+  else if (pageReady > 0) stageLabel = `页面 ${pageReady}/${pageTotal || pageReady}`;
+  else if (imageTotal > 0) stageLabel = `图片 ${imageReady}/${imageTotal}`;
+  else if (state?.designSpec || (state?.outline?.length || 0) > 0) stageLabel = `大纲 ${state?.outline?.length || state?.designSpec?.outline?.length || 0} 页`;
+  else if (hasInputContent(state, project)) stageLabel = '资料已就绪';
+
+  const detailParts = [
+    pageTotal ? `${pageReady}/${pageTotal} 页` : '',
+    imageTotal ? `${imageReady}/${imageTotal} 图` : '',
+  ].filter(Boolean);
+
+  return {
+    ...project,
+    displayStatus,
+    displayProgress: Math.max(0, Math.min(100, progress)),
+    stageLabel,
+    detailLabel: detailParts.length ? detailParts.join(' · ') : '尚未生成页面',
+    imageReady,
+    imageTotal,
+    pageReady,
+    pageTotal,
+  };
+}
+
+const projectDisplays = computed<ProjectDisplay[]>(() => uniqueProjects.value.map(deriveProjectDisplay));
+
 const filteredProjects = computed(() => {
-  if (!searchQuery.value) return uniqueProjects.value;
+  if (!searchQuery.value) return projectDisplays.value;
   const query = searchQuery.value.toLowerCase();
-  return uniqueProjects.value.filter(p =>
+  return projectDisplays.value.filter(p =>
     p.title.toLowerCase().includes(query) ||
     p.topic?.toLowerCase().includes(query)
   );
 });
 
 const stats = computed(() => ({
-  total: uniqueProjects.value.length,
-  draft: uniqueProjects.value.filter(p => p.status === 'draft').length,
-  generating: uniqueProjects.value.filter(p => p.status === 'generating').length,
-  completed: uniqueProjects.value.filter(p => p.status === 'completed').length
+  total: projectDisplays.value.length,
+  draft: projectDisplays.value.filter(p => p.displayStatus === 'draft').length,
+  generating: projectDisplays.value.filter(p => p.displayStatus === 'generating').length,
+  completed: projectDisplays.value.filter(p => p.displayStatus === 'completed').length
 }));
 
 async function fetchProjects() {
@@ -143,7 +254,7 @@ function openProject(project: Project) {
   router.push(`/project/${project.id}/input`);
 }
 
-function getStatusBadge(tone: 'draft' | 'generating' | 'completed') {
+function getStatusBadge(tone: ProjectDisplayStatus) {
   const map = {
     draft: { label: '草稿', tone: 'neutral' as const },
     generating: { label: '生成中', tone: 'warning' as const },
@@ -265,14 +376,24 @@ onMounted(() => {
         <div class="project-card__body">
           <h3 class="project-card__title">{{ project.title }}</h3>
           <p v-if="project.topic" class="project-card__topic">{{ project.topic }}</p>
+          <div class="project-card__progress">
+            <div class="project-card__progress-head">
+              <span>{{ project.stageLabel }}</span>
+              <strong>{{ project.displayProgress }}%</strong>
+            </div>
+            <div class="project-card__progress-track">
+              <span :style="{ width: `${project.displayProgress}%` }" />
+            </div>
+            <p>{{ project.detailLabel }}</p>
+          </div>
         </div>
 
         <div class="project-card__footer">
           <UiBadge
-            :tone="getStatusBadge(project.status).tone"
+            :tone="getStatusBadge(project.displayStatus).tone"
             size="sm"
           >
-            {{ getStatusBadge(project.status).label }}
+            {{ getStatusBadge(project.displayStatus).label }}
           </UiBadge>
           <div class="project-card__date">
             <Calendar :size="12" />
@@ -562,6 +683,49 @@ onMounted(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.project-card__progress {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.project-card__progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.project-card__progress-head strong {
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.project-card__progress-track {
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-panel);
+}
+
+.project-card__progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent);
+  transition: width var(--transition-fast);
+}
+
+.project-card__progress p {
+  margin: 0;
+  color: var(--color-subtle);
+  font-size: 11px;
 }
 
 .project-card__footer {

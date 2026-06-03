@@ -60,6 +60,9 @@ const cloneConfigOptions = (): ConfigOptionGroups => ({
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 const MAX_ACTIVITY_LOGS = 5000;
+const TEXT_FILE_PATTERN = /\.(txt|md|markdown|csv|json|log)$/i;
+const DOCX_FILE_PATTERN = /\.docx$/i;
+const MAX_FILE_TEXT_CHARS = 120_000;
 const normalizeProjectText = (value: unknown) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const projectIdentityKey = (project: Pick<PptProject, 'title' | 'topic'>) =>
   `${normalizeProjectText(project.title)}::${normalizeProjectText(project.topic)}`;
@@ -244,6 +247,35 @@ export const useAgentStore = defineStore('agent', () => {
     };
   }
 
+  function getReadyImageSlideIds(sourceImages = images.value) {
+    return sourceImages
+      .filter((image) => image.selected && !image.error && Boolean(image.url))
+      .map((image) => image.slideId);
+  }
+
+  function syncGeneratedSlidesFromImages() {
+    generatedSlides.value = new Set(getReadyImageSlideIds());
+  }
+
+  async function readDocxText(file: File) {
+    const { default: JSZip } = await import('jszip');
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const documentFile = zip.file('word/document.xml');
+    if (!documentFile) return '';
+
+    const xml = await documentFile.async('string');
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    return Array.from(doc.getElementsByTagName('w:p'))
+      .map((paragraph) =>
+        Array.from(paragraph.getElementsByTagName('w:t'))
+          .map((node) => node.textContent || '')
+          .join('')
+          .trim()
+      )
+      .filter(Boolean)
+      .join('\n');
+  }
+
   function snapshotProjectState(options: { persistable?: boolean } = {}): PptProjectState {
     const persistable = options.persistable ?? false;
     return {
@@ -285,6 +317,7 @@ export const useAgentStore = defineStore('agent', () => {
     parameters.value = { ...state.parameters };
     outline.value = state.outline.map(s => ({ ...s }));
     images.value = state.images.map(img => ({ ...img }));
+    syncGeneratedSlidesFromImages();
     exportArtifacts.value = [...state.exportArtifacts];
 
     const savedSkillIds = new Set(state.enabledSkillIds || []);
@@ -1907,10 +1940,49 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
-  function attachFiles(files: FileList | null) {
-    if (!files) return;
-    input.value.files = Array.from(files).map((file) => file.name);
-    pushLog(`已接收 ${input.value.files.length} 个资料文件。`);
+  async function attachFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+
+    const fileList = Array.from(files);
+    input.value.files = fileList.map((file) => file.name);
+    const importedChunks: string[] = [];
+    const skippedFiles: string[] = [];
+
+    for (const file of fileList) {
+      const isTextFile = file.type.startsWith('text/') || TEXT_FILE_PATTERN.test(file.name);
+      const isDocxFile = DOCX_FILE_PATTERN.test(file.name);
+      if (!isTextFile && !isDocxFile) {
+        skippedFiles.push(file.name);
+        continue;
+      }
+
+      try {
+        const text = isDocxFile ? await readDocxText(file) : await file.text();
+        const clippedText = text.length > MAX_FILE_TEXT_CHARS
+          ? `${text.slice(0, MAX_FILE_TEXT_CHARS)}\n\n[文件内容较长，已截取前 ${MAX_FILE_TEXT_CHARS} 字符]`
+          : text;
+        if (clippedText.trim()) {
+          importedChunks.push(`【上传资料：${file.name}】\n${clippedText.trim()}`);
+        }
+      } catch {
+        skippedFiles.push(file.name);
+      }
+    }
+
+    if (importedChunks.length > 0) {
+      input.value.content = [input.value.content.trim(), importedChunks.join('\n\n')]
+        .filter(Boolean)
+        .join('\n\n');
+    }
+
+    pushLog(importedChunks.length > 0
+      ? `已读取 ${importedChunks.length} 个资料文件。`
+      : `已记录 ${input.value.files.length} 个资料文件。`);
+
+    if (skippedFiles.length > 0) {
+      pushLog(`以下文件暂未解析正文：${skippedFiles.join('、')}。`);
+    }
+
     syncToProject();
   }
 
@@ -2044,7 +2116,7 @@ export const useAgentStore = defineStore('agent', () => {
       }
 
       const snapshotData = {
-        input: { ...input.value, files: [] },
+        input: { ...input.value, files: [...input.value.files] },
         parameters: { ...parameters.value },
         outline: outline.value.map(s => ({ ...s })),
         images: images.value.map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url })),
@@ -2053,7 +2125,7 @@ export const useAgentStore = defineStore('agent', () => {
           ...p,
           state: {
             ...p.state,
-            input: { ...p.state.input, files: [] },
+            input: { ...p.state.input, files: [...(p.state.input?.files || [])] },
             images: (p.state.images || []).map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url })),
         svgPages: (p.state.svgPages || []).map(page => ({
           pageNumber: page.pageNumber,
@@ -2082,7 +2154,7 @@ export const useAgentStore = defineStore('agent', () => {
       const response = await workflowApi.restore();
       if (!response.success || !response.data?.snapshotData) return false;
       const snapshot = response.data.snapshotData;
-      input.value = { ...snapshot.input, files: [] };
+      input.value = { ...snapshot.input, files: [...(snapshot.input?.files || [])] };
       parameters.value = { ...snapshot.parameters };
       outline.value = snapshot.outline || [];
       images.value = snapshot.images || [];
@@ -2092,7 +2164,7 @@ export const useAgentStore = defineStore('agent', () => {
         id: String(p.id),
         state: p.state ? {
           ...p.state,
-          input: { ...p.state.input, files: [] }
+          input: { ...p.state.input, files: [...(p.state.input?.files || [])] }
         } : makeDefaultProjectState()
       }));
       pptProjects.value = mergePptProjects([...pptProjects.value, ...restoredProjects], snapshot.activePptId || activePptId.value);

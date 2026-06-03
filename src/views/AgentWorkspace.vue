@@ -58,7 +58,6 @@ const {
   activityLog,
   activePpt,
   exportArtifacts,
-  generatedSlides,
   images,
   isPaused,
   pauseRequested,
@@ -171,6 +170,9 @@ const imageStepSkipped = computed(() => {
   const step = steps.value.find(s => s.id === 'images');
   return Boolean(designSpec.value && slidesNeedingImages.value.length === 0 && step?.status === 'done');
 });
+const completedImageCount = computed(() =>
+  images.value.filter((image) => image.selected && !image.error && Boolean(image.url)).length
+);
 const imageBySlideId = computed(() => {
   const map = new Map<string, (typeof images.value)[number]>();
   for (const image of images.value) {
@@ -248,7 +250,7 @@ const pipelineStages = computed(() => {
           : '等待判断',
       status: stageImages?.status || 'idle',
       progress: imageStepSkipped.value ? 100 : stageImages?.progress || 0,
-      metric: imageStepSkipped.value ? '无需图片' : `${generatedSlides.value.size}/${Math.max(1, slidesNeedingImages.value.length)} 张`,
+      metric: imageStepSkipped.value ? '无需图片' : `${completedImageCount.value}/${Math.max(1, slidesNeedingImages.value.length)} 张`,
       action: '查看状态',
       skipped: imageStepSkipped.value
     },
@@ -687,10 +689,6 @@ async function retryImage(slideId: string) {
                         <RefreshCw v-else :size="13" />
                         {{ outline.length ? '重新生成' : '生成大纲' }}
                       </UiButton>
-                      <UiButton variant="secondary" size="sm" @click="goToWorkflowStep('input')">
-                        <FileText :size="13" />
-                        编辑资料
-                      </UiButton>
                       <UiButton variant="secondary" size="sm" :disabled="isRunning" @click="store.addSampleOutline">
                         <Sparkles :size="13" />
                         示例
@@ -705,16 +703,6 @@ async function retryImage(slideId: string) {
                       <p>{{ streamingText.slice(-180) }}</p>
                     </div>
 
-                    <div class="outline-control__next">
-                      <button :disabled="!canOpenWorkflowStep('images')" @click="goToWorkflowStep('images')">
-                        <Image :size="14" />
-                        图片
-                      </button>
-                      <button :disabled="!canOpenWorkflowStep('layout')" @click="goToWorkflowStep('layout')">
-                        <Paintbrush :size="14" />
-                        页面
-                      </button>
-                    </div>
                   </aside>
 
                   <OutlineEditor
@@ -751,7 +739,7 @@ async function retryImage(slideId: string) {
                     </div>
                     <div class="image-gate__stats">
                       <span>{{ slidesNeedingImages.length }} 页需要图片</span>
-                      <strong>{{ generatedSlides.size }} 张已完成</strong>
+                      <strong>{{ completedImageCount }} 张已完成</strong>
                     </div>
                   </div>
 
@@ -1324,7 +1312,7 @@ async function retryImage(slideId: string) {
 }
 
 .stage-panel--split {
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
   align-items: start;
 }
 
@@ -1350,8 +1338,8 @@ async function retryImage(slideId: string) {
 
 .outline-control {
   display: grid;
-  gap: 16px;
-  padding: 16px;
+  gap: 12px;
+  padding: 12px;
   position: sticky;
   top: 0;
 }
@@ -1372,8 +1360,8 @@ async function retryImage(slideId: string) {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-surface);
@@ -1402,14 +1390,14 @@ async function retryImage(slideId: string) {
 .outline-control__stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .outline-control__stats > div {
   display: grid;
-  gap: 6px;
-  min-height: 72px;
-  padding: 12px;
+  gap: 5px;
+  min-height: 56px;
+  padding: 10px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-panel);
@@ -1424,7 +1412,7 @@ async function retryImage(slideId: string) {
   min-width: 0;
   overflow: hidden;
   color: var(--color-text);
-  font-size: 20px;
+  font-size: 16px;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1461,37 +1449,6 @@ async function retryImage(slideId: string) {
   color: var(--color-muted);
   font-size: 12px;
   line-height: 1.55;
-}
-
-.outline-control__next {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.outline-control__next button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 36px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  color: var(--color-muted);
-  background: var(--color-surface);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.outline-control__next button:hover:not(:disabled) {
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
-
-.outline-control__next button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
 }
 
 .image-gate {
