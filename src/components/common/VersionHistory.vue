@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { History, RotateCcw, Trash2, Clock, X, AlertTriangle } from 'lucide-vue-next';
 import { storeToRefs } from 'pinia';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -22,9 +22,21 @@ onMounted(() => {
 });
 
 async function loadVersions() {
-  if (!activePpt.value) return;
+  if (!activePpt.value) {
+    versions.value = [];
+    confirmRestoreId.value = null;
+    return;
+  }
   versions.value = await store.getVersions(activePpt.value.id);
 }
+
+watch(
+  () => activePpt.value?.id,
+  () => {
+    confirmRestoreId.value = null;
+    void loadVersions();
+  }
+);
 
 function toggle() {
   isOpen.value = !isOpen.value;

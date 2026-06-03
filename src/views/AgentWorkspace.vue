@@ -4,7 +4,6 @@ import { storeToRefs } from 'pinia';
 import { useRoute, useRouter } from 'vue-router';
 import {
   Brain,
-  Check,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -80,6 +79,7 @@ const {
 } = storeToRefs(store);
 
 const showRightPanel = ref(true);
+const isSideNavCollapsed = ref(false);
 const previewPageIndex = ref(0);
 const showGlobalSearch = ref(false);
 const showShortcutsHelp = ref(false);
@@ -155,7 +155,6 @@ const stepTitles: Record<string, string> = {
 };
 
 const currentStepTitle = computed(() => stepTitles[activeStep.value] || '工作区');
-const currentProgress = computed(() => steps.value.find((step) => step.id === activeStep.value)?.progress || 0);
 const isPageView = computed(() => ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config'].includes(activeStep.value));
 const latestSvgPage = computed(() => svgPages.value[svgPages.value.length - 1] || null);
 const layoutTotalPages = computed(() => designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount || 0);
@@ -184,6 +183,14 @@ const previewingImageSlide = computed(() => {
   return (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === previewingImage.value?.slideId) || null;
 });
 const activeProjectTitle = computed(() => activePpt.value?.title || input.value.topic || '尚未选择 PPT 项目');
+const inputReadyLabel = computed(() => hasInputContent() ? '已完成' : '待输入');
+const outlineBulletCount = computed(() => outline.value.reduce((sum, slide) => sum + slide.bullets.length, 0));
+const outlineStepStatus = computed(() => workflowDisplaySteps.value.find((step) => step.id === 'outline')?.status || 'idle');
+const outlineStatusText = computed(() => {
+  if (outlineStepStatus.value === 'running') return '生成中';
+  if (outline.value.length > 0 || designSpec.value) return '已生成';
+  return '待生成';
+});
 const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
   steps.value.map((step) => {
     if (step.id !== 'input' || !hasInputContent()) return step;
@@ -194,24 +201,7 @@ const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
     };
   })
 );
-const pipelineProgress = computed(() => {
-  const workflow = workflowDisplaySteps.value.filter(step => ['input', 'outline', 'images', 'layout', 'preview'].includes(step.id));
-  if (workflow.length === 0) return 0;
-  const doneWeight = workflow.reduce((sum, step) => {
-    if (step.status === 'done') return sum + 100;
-    if (step.status === 'running') return sum + step.progress;
-    return sum;
-  }, 0);
-  return Math.round(doneWeight / workflow.length);
-});
-const workflowStatusText = computed(() => {
-  if (isPaused.value) return '已暂停，可继续生成';
-  if (pauseRequested.value) return '当前步骤完成后暂停';
-  if (isRunning.value) return '正在生成';
-  if (svgPages.value.length > 0) return '可预览导出';
-  return '准备开始';
-});
-
+const currentProgress = computed(() => workflowDisplaySteps.value.find((step) => step.id === activeStep.value)?.progress || 0);
 const pipelineStages = computed(() => {
   const byId = new Map(workflowDisplaySteps.value.map(step => [step.id, step]));
   const stageInput = byId.get('input');
@@ -227,8 +217,8 @@ const pipelineStages = computed(() => {
       title: '输入资料',
       description: input.value.files.length
         ? `${input.value.files.length} 个文件`
-        : input.value.content.trim()
-          ? '文本已准备'
+        : hasInputContent()
+          ? '资料已准备'
           : '等待输入',
       status: stageInput?.status || 'idle',
       progress: stageInput?.progress || 0,
@@ -549,9 +539,12 @@ async function retryImage(slideId: string) {
 </script>
 
 <template>
-  <AppShell>
+  <AppShell :class="{ 'app-shell--nav-collapsed': isSideNavCollapsed }">
     <WorkspaceHeader />
-    <SideNavigation />
+    <SideNavigation
+      :collapsed="isSideNavCollapsed"
+      @toggle-collapse="isSideNavCollapsed = !isSideNavCollapsed"
+    />
 
     <main class="workspace-main">
       <template v-if="isPageView">
@@ -603,26 +596,6 @@ async function retryImage(slideId: string) {
         <div class="workspace-content-wrapper" :class="{ 'workspace-content-wrapper--single': !showRightPanel }">
           <section class="workspace-content-main">
             <div class="pipeline-console">
-              <section class="pipeline-hero">
-                <div class="pipeline-hero__copy">
-                  <span class="pipeline-kicker">PPT 生成流程</span>
-                  <h1>{{ activeProjectTitle }}</h1>
-                  <p>按顺序完成资料、大纲、图片、页面和导出。每一步都会显示当前进度。</p>
-                </div>
-                <div class="pipeline-hero__status">
-                  <div class="pipeline-meter">
-                    <strong>{{ pipelineProgress }}%</strong>
-                    <span>
-                      <i :style="{ width: `${pipelineProgress}%` }" />
-                    </span>
-                  </div>
-                  <div>
-                    <strong>{{ workflowStatusText }}</strong>
-                    <span>{{ layoutCompletedPages }}/{{ layoutTotalPages || 0 }} 页面</span>
-                  </div>
-                </div>
-              </section>
-
               <section class="pipeline-stages" aria-label="PPT 生成流程">
                 <button
                   v-for="stage in pipelineStages"
@@ -678,46 +651,77 @@ async function retryImage(slideId: string) {
                 </div>
 
                 <div v-show="activeStep === 'outline'" class="stage-panel stage-panel--split">
-                  <div class="strategy-summary">
-                    <div class="strategy-summary__header">
-                      <Wand2 :size="18" />
+                  <aside class="outline-control">
+                    <div class="outline-control__header">
+                      <span class="outline-control__icon">
+                        <Wand2 :size="18" />
+                      </span>
                       <div>
-                        <h3>当前生成设置</h3>
-                        <p>只使用本次输入内容，不使用历史提示词、模板或 Skill。</p>
+                        <h3>大纲</h3>
+                        <p>{{ outlineStatusText }}</p>
                       </div>
                     </div>
-                    <div class="strategy-stack">
-                      <div class="strategy-item">
+
+                    <div class="outline-control__stats">
+                      <div>
                         <span>资料</span>
-                        <strong>{{ input.content.trim() || input.files.length ? '已准备' : '待输入' }}</strong>
-                        <button @click="goToWorkflowStep('input')">编辑</button>
+                        <strong>{{ inputReadyLabel }}</strong>
                       </div>
-                      <div class="strategy-item">
-                        <span>大纲</span>
-                        <strong>{{ outline.length ? `${outline.length} 页` : '待生成' }}</strong>
-                        <button :disabled="isRunning" @click="store.runOutline">生成</button>
+                      <div>
+                        <span>页数</span>
+                        <strong>{{ outline.length || '-' }}</strong>
                       </div>
-                      <div class="strategy-item">
-                        <span>图片</span>
-                        <strong>{{ slidesNeedingImages.length ? `${slidesNeedingImages.length} 页需要` : '按需跳过' }}</strong>
-                        <button :disabled="!canOpenWorkflowStep('images')" @click="goToWorkflowStep('images')">查看</button>
+                      <div>
+                        <span>要点</span>
+                        <strong>{{ outlineBulletCount || '-' }}</strong>
                       </div>
-                      <div class="strategy-item">
-                        <span>页面</span>
-                        <strong>{{ svgPages.length ? `${svgPages.length} 页完成` : '待生成' }}</strong>
-                        <button :disabled="!canOpenWorkflowStep('layout')" @click="goToWorkflowStep('layout')">查看</button>
+                      <div>
+                        <span>配图</span>
+                        <strong>{{ slidesNeedingImages.length || 0 }}</strong>
                       </div>
                     </div>
-                    <div v-if="streamingText" class="strategy-stream">
-                      <Loader2 :size="14" class="spin" />
-                      <span>{{ streamingText.slice(-140) }}</span>
+
+                    <div class="outline-control__actions">
+                      <UiButton variant="primary" size="sm" :disabled="isRunning || !canOpenWorkflowStep('outline')" @click="store.runOutline">
+                        <Loader2 v-if="outlineStepStatus === 'running'" :size="13" class="spin" />
+                        <RefreshCw v-else :size="13" />
+                        {{ outline.length ? '重新生成' : '生成大纲' }}
+                      </UiButton>
+                      <UiButton variant="secondary" size="sm" @click="goToWorkflowStep('input')">
+                        <FileText :size="13" />
+                        编辑资料
+                      </UiButton>
+                      <UiButton variant="secondary" size="sm" :disabled="isRunning" @click="store.addSampleOutline">
+                        <Sparkles :size="13" />
+                        示例
+                      </UiButton>
                     </div>
-                  </div>
+
+                    <div v-if="streamingText" class="outline-stream">
+                      <div>
+                        <Loader2 :size="14" class="spin" />
+                        <strong>正在生成</strong>
+                      </div>
+                      <p>{{ streamingText.slice(-180) }}</p>
+                    </div>
+
+                    <div class="outline-control__next">
+                      <button :disabled="!canOpenWorkflowStep('images')" @click="goToWorkflowStep('images')">
+                        <Image :size="14" />
+                        图片
+                      </button>
+                      <button :disabled="!canOpenWorkflowStep('layout')" @click="goToWorkflowStep('layout')">
+                        <Paintbrush :size="14" />
+                        页面
+                      </button>
+                    </div>
+                  </aside>
 
                   <OutlineEditor
                     :outline="outline"
                     :is-running="isRunning && activeStep === 'outline'"
                     :streaming-text="streamingText"
+                    :show-run-action="false"
                     @update-title="store.updateSlideTitle"
                     @update-bullet="store.updateSlideBullet"
                     @add-bullet="store.addSlideBullet"
@@ -838,8 +842,6 @@ async function retryImage(slideId: string) {
                         <span>{{ layoutProgressPercent }}%</span>
                       </div>
                     </div>
-                    <UiProgress :value="layoutProgressPercent" size="md" show-label />
-
                     <div class="executor-preview">
                       <div class="executor-preview__live">
                         <div v-if="latestSvgPage" class="executor-preview__canvas" v-html="latestSvgPage.svg" />
@@ -905,7 +907,7 @@ async function retryImage(slideId: string) {
                 </div>
 
                 <div v-show="activeStep === 'preview'" class="stage-panel">
-                  <div class="quality-strip">
+                  <div class="quality-strip preview-shell__header">
                     <div>
                       <h3>导出</h3>
                       <p>确认预览后导出 PPTX。</p>
@@ -917,19 +919,21 @@ async function retryImage(slideId: string) {
                   </div>
                   <UiProgress v-if="isExporting" :value="exportProgress" size="md" show-label />
 
-                  <SvgDeckPreview
-                    v-if="svgPages.length > 0"
-                    :pages="svgPages"
-                    v-model:active-index="previewPageIndex"
-                  />
-                  <DeckPreview
-                    v-else
-                    :artifacts="exportArtifacts"
-                    :outline="outline"
-                    :parameters="parameters"
-                    :selected-images="selectedImages"
-                    :show-export-actions="false"
-                  />
+                  <div class="preview-shell">
+                    <SvgDeckPreview
+                      v-if="svgPages.length > 0"
+                      :pages="svgPages"
+                      v-model:active-index="previewPageIndex"
+                    />
+                    <DeckPreview
+                      v-else
+                      :artifacts="exportArtifacts"
+                      :outline="outline"
+                      :parameters="parameters"
+                      :selected-images="selectedImages"
+                      :show-export-actions="false"
+                    />
+                  </div>
                 </div>
               </section>
             </div>
@@ -1184,96 +1188,6 @@ async function retryImage(slideId: string) {
   margin: 0 auto;
 }
 
-.pipeline-hero {
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 20px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-card);
-}
-
-.pipeline-kicker {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  color: var(--color-muted);
-  background: var(--color-panel);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.pipeline-hero h1 {
-  margin: 10px 0 8px;
-  color: var(--color-text);
-  font-size: 24px;
-  line-height: 1.2;
-  letter-spacing: 0;
-}
-
-.pipeline-hero p {
-  max-width: 720px;
-  margin: 0;
-  color: var(--color-muted);
-  font-size: 13px;
-  line-height: 1.7;
-}
-
-.pipeline-hero__status {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 210px;
-  padding-left: 18px;
-  border-left: 1px solid var(--color-border);
-}
-
-.pipeline-meter {
-  display: grid;
-  gap: 8px;
-  width: 96px;
-}
-
-.pipeline-meter strong {
-  color: var(--color-text);
-  font-size: 20px;
-  line-height: 1;
-}
-
-.pipeline-meter span {
-  display: block;
-  height: 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  background: var(--color-panel);
-  overflow: hidden;
-}
-
-.pipeline-meter i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--color-accent);
-  transition: width 0.3s ease;
-}
-
-.pipeline-hero__status strong {
-  display: block;
-  color: var(--color-text);
-  font-size: 22px;
-  line-height: 1;
-}
-
-.pipeline-hero__status span {
-  color: var(--color-subtle);
-  font-size: 12px;
-}
-
 .pipeline-stages {
   display: grid;
   grid-template-columns: repeat(5, minmax(150px, 1fr));
@@ -1410,12 +1324,12 @@ async function retryImage(slideId: string) {
 }
 
 .stage-panel--split {
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
   align-items: start;
 }
 
 .loading-placeholder,
-.strategy-summary,
+.outline-control,
 .image-gate,
 .executor-board,
 .quality-strip {
@@ -1434,27 +1348,38 @@ async function retryImage(slideId: string) {
   font-size: 13px;
 }
 
-.strategy-summary {
+.outline-control {
   display: grid;
-  gap: 14px;
+  gap: 16px;
   padding: 16px;
   position: sticky;
   top: 0;
 }
 
-.strategy-summary__header,
+.outline-control__header,
 .image-gate__main {
   display: flex;
   align-items: flex-start;
   gap: 10px;
 }
 
-.strategy-summary__header svg,
+.outline-control__icon,
 .image-gate__icon {
   color: var(--color-accent);
 }
 
-.strategy-summary h3,
+.outline-control__icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.outline-control h3,
 .image-gate h3,
 .executor-board h3,
 .quality-strip h3 {
@@ -1464,7 +1389,7 @@ async function retryImage(slideId: string) {
   font-weight: 700;
 }
 
-.strategy-summary p,
+.outline-control p,
 .image-gate p,
 .executor-board p,
 .quality-strip p {
@@ -1474,68 +1399,99 @@ async function retryImage(slideId: string) {
   line-height: 1.6;
 }
 
-.strategy-stack {
+.outline-control__stats {
   display: grid;
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
-.strategy-item {
+.outline-control__stats > div {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  min-height: 72px;
+  padding: 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-panel);
 }
 
-.strategy-item span {
+.outline-control__stats span {
   color: var(--color-subtle);
   font-size: 11px;
 }
 
-.strategy-item strong {
+.outline-control__stats strong {
   min-width: 0;
   overflow: hidden;
   color: var(--color-text);
-  font-size: 12px;
+  font-size: 20px;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.strategy-item button {
-  min-height: 26px;
-  padding: 0 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  color: var(--color-muted);
-  background: var(--color-surface);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.strategy-item button:hover:not(:disabled) {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-}
-
-.strategy-item button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.strategy-stream {
-  display: flex;
-  align-items: flex-start;
+.outline-control__actions {
+  display: grid;
   gap: 8px;
-  padding: 10px;
+}
+
+.outline-control__actions :deep(.ui-button) {
+  width: 100%;
+}
+
+.outline-stream {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.outline-stream > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-accent);
+  font-size: 12px;
+}
+
+.outline-stream p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.outline-control__next {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.outline-control__next button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   color: var(--color-muted);
   background: var(--color-surface);
   font-size: 12px;
-  line-height: 1.6;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.outline-control__next button:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.outline-control__next button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .image-gate {
@@ -1887,6 +1843,17 @@ async function retryImage(slideId: string) {
   padding: 16px;
 }
 
+.preview-shell {
+  width: min(100%, 1280px);
+  margin: 0 auto;
+  min-width: 0;
+}
+
+.preview-shell__header {
+  width: min(100%, 1280px);
+  margin: 0 auto;
+}
+
 .image-preview-modal {
   position: fixed;
   inset: 0;
@@ -1987,7 +1954,7 @@ async function retryImage(slideId: string) {
     grid-template-columns: 1fr;
   }
 
-  .strategy-summary {
+  .outline-control {
     position: static;
   }
 }
@@ -2003,7 +1970,6 @@ async function retryImage(slideId: string) {
 
   .workspace-step-header,
   .workspace-status-bar,
-  .pipeline-hero,
   .image-gate,
   .executor-board__header,
   .quality-strip {
@@ -2014,14 +1980,6 @@ async function retryImage(slideId: string) {
   .workspace-step-header__actions,
   .workspace-status-bar__right {
     flex-wrap: wrap;
-  }
-
-  .pipeline-hero__status {
-    min-width: 0;
-    padding-left: 0;
-    padding-top: 14px;
-    border-left: none;
-    border-top: 1px solid var(--color-border);
   }
 
   .executor-preview {
@@ -2038,11 +1996,6 @@ async function retryImage(slideId: string) {
     grid-template-columns: 1fr;
   }
 
-  .pipeline-hero h1 {
-    font-size: 20px;
-  }
-
-  .strategy-item,
   .image-page-item {
     grid-template-columns: 1fr;
   }

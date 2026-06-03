@@ -17,6 +17,7 @@ const props = defineProps<{
   outline: SlideOutline[];
   isRunning?: boolean;
   streamingText?: string;
+  showRunAction?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -224,7 +225,7 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 
 <template>
   <UiCard title="大纲" subtitle="调整页面顺序、要点、讲稿和图片需求。修改后会影响后续页面生成。">
-    <template #actions>
+    <template v-if="showRunAction !== false" #actions>
       <UiButton size="sm" variant="secondary" :disabled="isRunning" @click="$emit('run')">
         <RefreshCw :size="13" :class="{ 'animate-spin': isRunning }" />
         {{ isRunning ? '生成中...' : outline.length ? '重新生成大纲' : '生成大纲' }}

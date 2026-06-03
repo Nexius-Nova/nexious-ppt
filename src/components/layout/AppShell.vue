@@ -17,5 +17,10 @@
   height: 100vh;
   background: var(--color-bg);
   overflow: hidden;
+  transition: grid-template-columns var(--transition-fast);
+}
+
+.app-shell--nav-collapsed {
+  grid-template-columns: 68px 1fr;
 }
 </style>

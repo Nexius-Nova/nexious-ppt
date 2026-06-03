@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { FileText, MessageSquare, Zap, Cpu, LayoutGrid, Settings2 } from 'lucide-vue-next';
+import { ChevronLeft, ChevronRight, FileText, MessageSquare, Zap, Cpu, LayoutGrid, Settings2 } from 'lucide-vue-next';
 
 const route = useRoute();
 const router = useRouter();
+
+defineProps<{
+  collapsed?: boolean;
+}>();
+
+defineEmits<{
+  toggleCollapse: [];
+}>();
 
 const menuItems = [
   { label: '我的 PPT', icon: FileText, route: '/my-ppt', step: 'my-ppt', group: '功能模块' },
@@ -42,7 +50,7 @@ function navigateTo(route: string) {
 </script>
 
 <template>
-  <nav class="side-nav" aria-label="主导航">
+  <nav class="side-nav" :class="{ 'side-nav--collapsed': collapsed }" aria-label="主导航">
     <div class="side-nav__brand">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
         <rect width="24" height="24" rx="6" fill="#ef2d2d" />
@@ -50,6 +58,9 @@ function navigateTo(route: string) {
         <path d="M7 15L9.5 12.5L12 15L14.5 12.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.6" />
       </svg>
       <span>NEXIOUS PPT</span>
+      <button class="side-nav__collapse" :title="collapsed ? '展开左侧菜单' : '收缩左侧菜单'" @click="$emit('toggleCollapse')">
+        <component :is="collapsed ? ChevronRight : ChevronLeft" :size="14" />
+      </button>
     </div>
 
     <section v-for="(items, groupName) in groupedItems" :key="groupName" class="side-nav__group">
@@ -59,6 +70,7 @@ function navigateTo(route: string) {
         :key="item.step"
         class="side-nav__item"
         :class="{ 'side-nav__item--active': isActive(item.step) }"
+        :title="collapsed ? item.label : undefined"
         @click="navigateTo(item.route)"
       >
         <component :is="item.icon" :size="16" />
@@ -70,6 +82,7 @@ function navigateTo(route: string) {
 
 <style scoped>
 .side-nav {
+  position: relative;
   grid-area: sidebar;
   display: flex;
   flex-direction: column;
@@ -77,6 +90,7 @@ function navigateTo(route: string) {
   border-right: 1px solid var(--color-border);
   background: var(--color-surface);
   overflow-y: auto;
+  transition: width var(--transition-fast);
 }
 
 .side-nav__brand {
@@ -87,6 +101,25 @@ function navigateTo(route: string) {
   border-bottom: 1px solid var(--color-border);
   font-size: 14px;
   font-weight: 700;
+  color: var(--color-text);
+}
+
+.side-nav__collapse {
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.side-nav__collapse:hover {
+  border-color: var(--color-border-strong);
   color: var(--color-text);
 }
 
@@ -140,5 +173,36 @@ function navigateTo(route: string) {
   background: var(--color-accent-soft);
   color: var(--color-accent);
   font-weight: 600;
+}
+
+.side-nav--collapsed {
+  overflow-x: hidden;
+}
+
+.side-nav--collapsed .side-nav__brand {
+  justify-content: center;
+  padding: 14px 8px 48px;
+}
+
+.side-nav--collapsed .side-nav__brand span,
+.side-nav--collapsed .side-nav__group-label,
+.side-nav--collapsed .side-nav__item span {
+  display: none;
+}
+
+.side-nav--collapsed .side-nav__collapse {
+  position: absolute;
+  right: 8px;
+  bottom: 10px;
+  margin-left: 0;
+}
+
+.side-nav--collapsed .side-nav__group {
+  padding: 12px 8px;
+}
+
+.side-nav--collapsed .side-nav__item {
+  justify-content: center;
+  padding: 0;
 }
 </style>
