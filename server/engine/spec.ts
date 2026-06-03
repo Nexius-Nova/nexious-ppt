@@ -81,14 +81,14 @@ export const CANVAS_FORMATS = {
 
 export const INDUSTRY_COLORS: Record<string, DesignSpec['visualTheme']['colors']> = {
   auto: {
-    primary: '#1F4E5F',
-    secondary: '#6F8E7D',
-    accent: '#C9A227',
-    background: '#F7F8F5',
+    primary: '#2563EB',
+    secondary: '#0F766E',
+    accent: '#E11D48',
+    background: '#F8FAFC',
     surface: '#FFFFFF',
-    text: '#172026',
-    muted: '#66757F',
-    border: '#D8DED9',
+    text: '#111827',
+    muted: '#64748B',
+    border: '#D7DEE8',
   },
   business: {
     primary: '#1F4E5F',

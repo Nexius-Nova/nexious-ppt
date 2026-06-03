@@ -13,11 +13,13 @@ import {
   Image,
   Loader2,
   Paintbrush,
+  Pause,
   Play,
   RefreshCw,
   Save,
   ShieldCheck,
   Sparkles,
+  RotateCcw,
   Wand2
 } from 'lucide-vue-next';
 import AppShell from '@/components/layout/AppShell.vue';
@@ -57,6 +59,8 @@ const {
   exportArtifacts,
   generatedSlides,
   images,
+  isPaused,
+  pauseRequested,
   input,
   isRunning,
   outline,
@@ -156,6 +160,13 @@ const imageStepSkipped = computed(() => {
   const step = steps.value.find(s => s.id === 'images');
   return Boolean(designSpec.value && slidesNeedingImages.value.length === 0 && step?.status === 'done');
 });
+const imageBySlideId = computed(() => {
+  const map = new Map<string, (typeof images.value)[number]>();
+  for (const image of images.value) {
+    map.set(image.slideId, image);
+  }
+  return map;
+});
 const activeProjectTitle = computed(() => activePpt.value?.title || input.value.topic || '尚未选择 PPT 项目');
 const pipelineProgress = computed(() => {
   const workflow = steps.value.filter(step => ['input', 'outline', 'images', 'layout', 'preview'].includes(step.id));
@@ -166,6 +177,13 @@ const pipelineProgress = computed(() => {
     return sum;
   }, 0);
   return Math.round(doneWeight / workflow.length);
+});
+const workflowStatusText = computed(() => {
+  if (isPaused.value) return '已暂停，可继续生成';
+  if (pauseRequested.value) return '当前步骤完成后暂停';
+  if (isRunning.value) return '正在生成';
+  if (svgPages.value.length > 0) return '可预览导出';
+  return '准备开始';
 });
 
 const pipelineStages = computed(() => {
@@ -222,7 +240,7 @@ const pipelineStages = computed(() => {
       id: 'layout' as WorkflowStepId,
       icon: Paintbrush,
       title: '生成页面',
-      description: '逐页生成预览',
+      description: isPaused.value ? '已暂停，可继续' : '页面会实时出现',
       status: stageLayout?.status || 'idle',
       progress: stageLayout?.status === 'done' ? 100 : layoutProgressPercent.value,
       metric: `${layoutCompletedPages.value}/${layoutTotalPages.value || 0} 页`,
@@ -255,6 +273,10 @@ function syncStepWithRoute() {
 
   if (path.startsWith('/project/')) {
     store.activeStep = 'input' as WorkflowStepId;
+    const routeProjectId = String(route.params.id || '');
+    if (routeProjectId && store.activePptId !== routeProjectId) {
+      void store.selectPptProject(routeProjectId);
+    }
   } else {
     store.activeStep = (routeToStep[path] || 'my-ppt') as WorkflowStepId;
   }
@@ -263,8 +285,9 @@ function syncStepWithRoute() {
 watch(() => route.path, syncStepWithRoute, { immediate: true });
 
 onMounted(async () => {
-  syncStepWithRoute();
   await store.initializeData();
+  syncStepWithRoute();
+  void store.resumeRecoveredWorkflow();
 });
 
 onBeforeUnmount(() => {
@@ -291,6 +314,9 @@ function handleNavigate(step: string) {
 
 async function runFromCurrentStep() {
   switch (activeStep.value) {
+    case 'input':
+      await store.runInputStage();
+      break;
     case 'outline':
       await store.runOutline();
       break;
@@ -304,7 +330,7 @@ async function runFromCurrentStep() {
       await handleExport('pptx', { filename: 'presentation', pageRange: 'all' });
       break;
     default:
-      await store.runFullWorkflow();
+      await store.runInputStage();
   }
 }
 
@@ -349,6 +375,7 @@ function stageTone(status: WorkflowStep['status'], skipped?: boolean) {
 }
 
 function stageLabel(status: WorkflowStep['status'], skipped?: boolean) {
+  if (isPaused.value && status === 'running') return '已暂停';
   if (skipped) return '已完成';
   if (status === 'done') return '已完成';
   if (status === 'running') return '运行中';
@@ -394,11 +421,19 @@ function imagePageNumber(slide: unknown, index: number) {
               <Save :size="14" />
               保存
             </UiButton>
-            <UiButton variant="secondary" :disabled="isRunning" @click="runFromCurrentStep">
+            <UiButton v-if="isRunning" variant="secondary" :disabled="pauseRequested" @click="store.requestPauseWorkflow">
+              <Pause :size="14" />
+              {{ pauseRequested ? '暂停中' : '暂停' }}
+            </UiButton>
+            <UiButton v-else-if="isPaused" variant="primary" @click="store.continueWorkflow">
+              <Play :size="14" />
+              继续
+            </UiButton>
+            <UiButton variant="secondary" :disabled="isRunning || isPaused" @click="runFromCurrentStep">
               <Play :size="14" />
               运行当前阶段
             </UiButton>
-            <UiButton variant="primary" :disabled="isRunning" @click="store.runFullWorkflow">
+            <UiButton variant="primary" :disabled="isRunning || isPaused" @click="store.runFullWorkflow">
               <RefreshCw :size="14" />
               完整生成
             </UiButton>
@@ -425,8 +460,8 @@ function imagePageNumber(slide: unknown, index: number) {
                     </span>
                   </div>
                   <div>
-                    <strong>{{ layoutCompletedPages }}/{{ layoutTotalPages || 0 }}</strong>
-                    <span>页面</span>
+                    <strong>{{ workflowStatusText }}</strong>
+                    <span>{{ layoutCompletedPages }}/{{ layoutTotalPages || 0 }} 页面</span>
                   </div>
                 </div>
               </section>
@@ -476,7 +511,7 @@ function imagePageNumber(slide: unknown, index: number) {
                     :parameters="parameters"
                     @update:parameters="parameters = $event"
                     @attach="store.attachFiles"
-                    @run="store.runFullWorkflow"
+                    @run="store.runFullWorkflow()"
                   />
                 </div>
 
@@ -562,13 +597,34 @@ function imagePageNumber(slide: unknown, index: number) {
                       :class="{ 'image-page-item--running': currentGeneratingSlide === slide.id }"
                     >
                       <span>{{ imagePageNumber(slide, index) }}</span>
+                      <div class="image-page-item__preview">
+                        <img
+                          v-if="imageBySlideId.get(slide.id)?.url && !imageBySlideId.get(slide.id)?.error"
+                          :src="imageBySlideId.get(slide.id)?.url"
+                          :alt="slide.title"
+                          loading="lazy"
+                        />
+                        <Image v-else :size="18" />
+                      </div>
                       <div>
                         <strong>{{ slide.title }}</strong>
-                        <p>{{ slide.visualPrompt }}</p>
+                        <p>{{ imageBySlideId.get(slide.id)?.errorMessage || slide.visualPrompt }}</p>
                       </div>
-                      <UiBadge :tone="images.some(img => img.slideId === slide.id && !img.error) ? 'success' : currentGeneratingSlide === slide.id ? 'accent' : 'neutral'" size="sm">
-                        {{ images.some(img => img.slideId === slide.id && !img.error) ? '已生成' : currentGeneratingSlide === slide.id ? '生成中' : '等待' }}
-                      </UiBadge>
+                      <div class="image-page-item__actions">
+                        <UiBadge :tone="imageBySlideId.get(slide.id)?.error ? 'danger' : imageBySlideId.get(slide.id) && !imageBySlideId.get(slide.id)?.error ? 'success' : currentGeneratingSlide === slide.id ? 'accent' : 'neutral'" size="sm">
+                          {{ imageBySlideId.get(slide.id)?.error ? '未生成' : imageBySlideId.get(slide.id) && !imageBySlideId.get(slide.id)?.error ? '已生成' : currentGeneratingSlide === slide.id ? '生成中' : '等待' }}
+                        </UiBadge>
+                        <UiButton
+                          v-if="imageBySlideId.get(slide.id)?.error"
+                          variant="text"
+                          size="sm"
+                          :disabled="isRunning || currentGeneratingSlide === slide.id"
+                          @click="store.retrySlideImage(slide.id)"
+                        >
+                          <RotateCcw :size="13" />
+                          重试
+                        </UiButton>
+                      </div>
                     </div>
                   </div>
 
@@ -585,6 +641,23 @@ function imagePageNumber(slide: unknown, index: number) {
                 </div>
 
                 <div v-show="activeStep === 'layout'" class="stage-panel">
+                  <div v-if="isPaused" class="pause-notice">
+                    <div>
+                      <strong>已暂停</strong>
+                      <span>点击继续后，会从下一页接着生成。</span>
+                    </div>
+                    <UiButton variant="primary" @click="store.continueWorkflow">
+                      <Play :size="14" />
+                      继续
+                    </UiButton>
+                  </div>
+                  <div v-else-if="pauseRequested" class="pause-notice pause-notice--pending">
+                    <div>
+                      <strong>准备暂停</strong>
+                      <span>当前步骤完成后会停下。</span>
+                    </div>
+                  </div>
+
                   <div class="executor-board">
                     <div class="executor-board__header">
                       <div>
@@ -609,7 +682,7 @@ function imagePageNumber(slide: unknown, index: number) {
                       <div class="executor-preview__side">
                         <div class="executor-step-card">
                           <span>状态</span>
-                          <strong>{{ isRunning && activeStep === 'layout' ? '逐页生成中' : svgPages.length ? '生成完成' : '待启动' }}</strong>
+                          <strong>{{ isPaused ? '已暂停' : isRunning && activeStep === 'layout' ? '生成中' : svgPages.length ? '生成完成' : '待启动' }}</strong>
                         </div>
                         <div class="executor-step-card">
                           <span>大纲</span>
@@ -1262,7 +1335,7 @@ function imagePageNumber(slide: unknown, index: number) {
 
 .image-page-item {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
+  grid-template-columns: 36px 88px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 12px;
@@ -1287,6 +1360,25 @@ function imagePageNumber(slide: unknown, index: number) {
   font-weight: 800;
 }
 
+.image-page-item__preview {
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 50px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-panel);
+  color: var(--color-subtle);
+}
+
+.image-page-item__preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 .image-page-item strong {
   color: var(--color-text);
   font-size: 13px;
@@ -1299,10 +1391,47 @@ function imagePageNumber(slide: unknown, index: number) {
   line-height: 1.5;
 }
 
+.image-page-item__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 104px;
+}
+
 .stage-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.pause-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-accent);
+  border-radius: 8px;
+  background: var(--color-accent-soft);
+}
+
+.pause-notice--pending {
+  border-color: var(--color-border-strong);
+  background: var(--color-panel);
+}
+
+.pause-notice strong {
+  display: block;
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.pause-notice span {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-muted);
+  font-size: 12px;
 }
 
 .executor-board {

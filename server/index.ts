@@ -6,6 +6,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
 import { testConnection, closePool } from './db/connection.js';
 import authRoutes from './routes/auth.js';
 import apiKeyRoutes from './routes/apiKeys.js';
@@ -45,6 +46,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ extended: true, limit: '150mb' }));
+app.use('/generated-images', express.static(path.join(process.cwd(), '.generated', 'images')));
 
 app.get('/health', (req, res) => {
   res.json({

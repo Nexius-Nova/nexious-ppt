@@ -36,14 +36,14 @@ export function buildStrategistPrompt(input: StrategistInput): { system: string;
     strategistPrompt: s.instruction || undefined,
   }));
   const colorGuide = isAutoTemplate
-    ? `      "primary": "${colors.primary}",
-      "secondary": "${colors.secondary}",
-      "accent": "${colors.accent}",
-      "background": "${colors.background}",
-      "surface": "${colors.surface}",
-      "text": "${colors.text}",
-      "muted": "${colors.muted}",
-      "border": "${colors.border}"`
+    ? `      "primary": "根据主题选择，不要固定使用默认蓝灰或商务灰绿",
+      "secondary": "与 primary 明显区分的 HEX 色",
+      "accent": "用于强调的 HEX 色，必须与 primary/secondary 区分",
+      "background": "浅色或深色 HEX 背景，由主题决定",
+      "surface": "内容承载面 HEX 色",
+      "text": "正文 HEX 色",
+      "muted": "辅助文字 HEX 色",
+      "border": "边框 HEX 色"`
     : `      "primary": "${colors.primary}",
       "secondary": "${colors.secondary}",
       "accent": "${colors.accent}",
@@ -53,7 +53,7 @@ export function buildStrategistPrompt(input: StrategistInput): { system: string;
       "muted": "${colors.muted}",
       "border": "${colors.border}"`;
   const templateGuide = isAutoTemplate
-    ? '模板风格：AI 自动决定。不要套用固定 business 模板；每次都要根据主题重新选择页面节奏、版式组合、颜色和视觉气质。'
+    ? '模板风格：AI 自动决定。不要套用固定 business 模板；每次都要根据主题重新选择页面节奏、版式组合、颜色和视觉气质。不要输出统一灰底 bullet 版式，封面、目录、图文页、结论页必须有不同构图。'
     : `模板风格：${input.template}。这是当前用户明确选择的风格参考。`;
 
   const system = `你是 PPT Master 管线中的 Strategist。你要把用户输入转成可执行的设计规格 JSON，后续 Executor 会逐页手写 SVG，并由 ppt-master/scripts/finalize_svg.py 与 svg_to_pptx.py 导出为 PowerPoint。
@@ -107,13 +107,14 @@ ${colorGuide}
 2. 第一页必须是 cover，最后一页建议是 ending。内容足够时可加入 toc 或 chapter。
 3. 页面数量根据内容决定，通常 6-12 页；若材料很少可 4-6 页。
 4. rhythm 必须服务叙事：cover、toc、chapter、ending 用 anchor；信息密集页用 dense；单一观点或关键结论页用 breathing。
-5. 颜色只能用 HEX，必须避免渐变和一整套单色系；至少包含 3 个有区分度的色相，整体与主题一致。
+5. 颜色只能用 HEX，必须避免渐变和一整套单色系；至少包含 3 个有区分度的色相，整体与主题一致。auto 模式下不得照抄示例或 fallback 色板。
 6. visualTheme.colors 中必须保留上方字段，不要增加 rgba、透明色或渐变描述。
 7. layout 与内容一致：图表页用 content-chart；内容明确要求配图、插图、场景图、示意图、封面图，或图片能明显提升表达时，用 content-image 并填写 visualPrompt。
 8. speakerNotes 使用中文，能帮助演讲者自然讲述。
 9. ${lengthGuide}
 10. 默认视觉模式为 ${mode}。
-11. ${templateGuide}`;
+11. ${templateGuide}
+12. pageLayouts 必须体现变化：不要连续 3 页使用相同构图；每页 layout、rhythm、visualPrompt 要和内容强相关。`;
 
   const user = `主题：${input.topic}
 内容资料：

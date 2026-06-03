@@ -17,8 +17,9 @@ export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock): str
 4. 禁止使用渐变、<style>、class、<foreignObject>、<mask>、rgba()、@font-face、<animate>、<script>、<textPath>、<g opacity>、<image opacity>。
 5. 文本使用 <text> 和 <tspan>，XML 保留字符必须转义。
 6. 顶层内容使用 <g id="..."> 分组，id 使用英文 kebab-case。
-7. 不要引用不存在的图片；除非用户提供短 http/https 图片 URL，否则不要写 <image>。
+7. 不要引用不存在的图片；除非用户提供短 http/https 图片 URL，否则不要写 <image>。如果提供了图片 URL，当前页必须至少使用一次 <image href="图片URL">，并用 x/y/width/height 明确放置。
 8. 模板、提示词和 Skill 已经在 Strategist 阶段折算进规格；本阶段不要追加 Skill 规则。
+9. 不要输出通用灰底 bullet 页。必须根据 layout/rhythm 设计当前页构图：cover 强视觉中心，toc 有目录结构，content-chart 有图表结构，content-image 有图片区，ending 有收束感。即使没有图片，也要用 SVG 形状、分栏、编号、轴线或信息框表达差异。
 
 spec_lock:
 ${specLockMarkdown}`;
@@ -41,7 +42,7 @@ export function buildExecutorPagePrompt(
     IMAGE_INTENT_PATTERN.test([slide.title, ...slide.bullets, slide.speakerNotes, slide.chartHint].filter(Boolean).join(' '))
   );
   const imageInstruction = imageUrl
-    ? `可使用图片 URL：${imageUrl}`
+    ? `必须使用这张生成图片：${imageUrl}。请写入 <image href="${imageUrl}" x="..." y="..." width="..." height="..." preserveAspectRatio="xMidYMid slice"/>，并与文字排版协调。`
     : needsVisual
       ? `需要视觉表达：${slide.visualPrompt || slide.title}。当前没有可用图片 URL，请用 SVG 图形、示意框、图示或抽象插画表达，不要写 <image>。`
       : '不使用图片。';
@@ -59,6 +60,7 @@ ${chart ? `- chart: ${chart}` : ''}
 - image: ${imageInstruction}
 
 设计方向：${spec.visualTheme.style}
+请让本页构图明显匹配 layout=${layout} 与 rhythm=${rhythm}，不要复用上一页版式。
 
 输出纯 SVG。`;
 }

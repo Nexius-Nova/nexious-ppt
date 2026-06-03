@@ -369,6 +369,7 @@ export interface GeneratedImage {
   url: string;
   selected: boolean;
   error?: boolean;
+  errorMessage?: string;
 }
 
 export interface StreamCallbacks {
@@ -485,7 +486,8 @@ export const aiApi = {
                 style: parsed.data.style,
                 url: '',
                 selected: true,
-                error: true
+                error: true,
+                errorMessage: parsed.message
               });
             } else {
               reject(new Error(parsed.message));
@@ -499,6 +501,9 @@ export const aiApi = {
       );
     });
   },
+
+  persistGeneratedImage: (data: { slideId: string; imageUrl: string }) =>
+    api.post<{ url: string }>('/api/ai/persist-generated-image', data),
 
   testTextModel: () => api.post<{ success: boolean; message: string }>('/api/ai/test-text-model'),
 

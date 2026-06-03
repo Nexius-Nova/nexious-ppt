@@ -3,8 +3,10 @@ import { computed, ref } from 'vue';
 import { Save, RotateCcw } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
+import UiSelect from '@/components/ui/UiSelect.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { useAgentStore } from '@/stores/agentStore';
+import type { AgentParameters } from '@/types/agent';
 
 const toastStore = useToastStore();
 const store = useAgentStore();
@@ -13,37 +15,57 @@ const loading = ref(false);
 
 const paramDefs = [
   {
-    key: 'template' as const,
-    label: '模板风格',
-    description: '选择 PPT 模板的整体风格',
+    key: 'summaryLength' as const,
+    label: '摘要长度',
+    description: '控制大纲提炼的详略程度。',
     type: 'select' as const,
     options: [
-      { value: 'business', label: '商务' },
-      { value: 'creative', label: '创意' },
-      { value: 'education', label: '教育' }
+      { value: 'brief', label: '简洁' },
+      { value: 'balanced', label: '均衡' },
+      { value: 'detailed', label: '详细' }
     ]
   },
   {
-    key: 'skillIntensity' as const,
-    label: 'Skill 强度',
-    description: '控制 AI 技能对内容的影响程度',
-    type: 'number' as const,
-    min: 0,
-    max: 100
+    key: 'tone' as const,
+    label: '语言风格',
+    description: '控制正文、标题和讲稿的表达口吻。',
+    type: 'select' as const,
+    options: [
+      { value: 'professional', label: '专业汇报' },
+      { value: 'storytelling', label: '叙事表达' },
+      { value: 'teaching', label: '教学讲解' }
+    ]
+  },
+  {
+    key: 'imageStyle' as const,
+    label: '图像风格',
+    description: '控制需要配图时的生成风格。',
+    type: 'select' as const,
+    options: [
+      { value: 'realistic', label: '写实' },
+      { value: 'illustration', label: '插画' },
+      { value: 'comic', label: '漫画' },
+      { value: 'flat', label: '扁平化' },
+      { value: '3d', label: '3D' },
+      { value: 'photo', label: '摄影' }
+    ]
   }
 ] as const;
 
-const originalValues = computed(() => {
-  return paramDefs.map(def => store.parameters[def.key]);
+type ConfigKey = typeof paramDefs[number]['key'];
+const savedValues = ref<Pick<AgentParameters, ConfigKey>>({
+  summaryLength: store.parameters.summaryLength,
+  tone: store.parameters.tone,
+  imageStyle: store.parameters.imageStyle
 });
 
 const hasChanges = computed(() => {
-  return paramDefs.some((def, i) => store.parameters[def.key] !== originalValues.value[i]);
+  return paramDefs.some(def => store.parameters[def.key] !== savedValues.value[def.key]);
 });
 
 function resetConfig() {
-  paramDefs.forEach((def, i) => {
-    (store.parameters as any)[def.key] = originalValues.value[i];
+  paramDefs.forEach((def) => {
+    (store.parameters as any)[def.key] = savedValues.value[def.key];
   });
   toastStore.info('已重置', '配置已恢复到上次保存的状态');
 }
@@ -52,6 +74,11 @@ async function saveConfig() {
   loading.value = true;
   try {
     store.syncToProject();
+    savedValues.value = {
+      summaryLength: store.parameters.summaryLength,
+      tone: store.parameters.tone,
+      imageStyle: store.parameters.imageStyle
+    };
     toastStore.success('保存成功', '运行配置已更新');
   } catch (error) {
     toastStore.error('保存失败', error instanceof Error ? error.message : '未知错误');
@@ -60,11 +87,11 @@ async function saveConfig() {
   }
 }
 
-function getParamValue(key: string): string | number {
+function getParamValue(key: ConfigKey): string {
   return (store.parameters as any)[key];
 }
 
-function setParamValue(key: string, value: string | number) {
+function setParamValue(key: ConfigKey, value: string) {
   (store.parameters as any)[key] = value;
 }
 </script>
@@ -74,7 +101,7 @@ function setParamValue(key: string, value: string | number) {
     <div class="page-header">
       <div class="page-header__info">
         <h2>运行配置</h2>
-        <p>自定义 PPT 生成的各项参数</p>
+        <p>设置 PPT 输入时使用的语言、摘要和图像偏好。</p>
       </div>
       <div class="page-header__actions">
         <UiButton v-if="hasChanges" variant="secondary" @click="resetConfig">
@@ -98,8 +125,7 @@ function setParamValue(key: string, value: string | number) {
           <div class="param-card__info">
             <h4>{{ def.label }}</h4>
             <div class="param-card__meta">
-              <UiBadge tone="neutral" size="sm">{{ def.key }}</UiBadge>
-              <UiBadge tone="info" size="sm">{{ def.type === 'select' ? '选项' : '数字' }}</UiBadge>
+              <UiBadge tone="neutral" size="sm">输入参数</UiBadge>
             </div>
           </div>
         </div>
@@ -107,38 +133,11 @@ function setParamValue(key: string, value: string | number) {
         <div class="param-card__body">
           <p class="param-card__description">{{ def.description }}</p>
 
-          <div class="param-card__value">
-            <template v-if="def.type === 'number'">
-              <div class="number-input">
-                <input
-                  :value="getParamValue(def.key)"
-                  type="range"
-                  :min="def.min"
-                  :max="def.max"
-                  class="slider"
-                  @input="setParamValue(def.key, Number(($event.target as HTMLInputElement).value))"
-                />
-                <div class="number-value">
-                  <span class="value">{{ getParamValue(def.key) }}</span>
-                  <span class="range">({{ def.min }} - {{ def.max }})</span>
-                </div>
-              </div>
-            </template>
-
-            <template v-else-if="def.type === 'select'">
-              <div class="select-grid">
-                <button
-                  v-for="opt in def.options"
-                  :key="opt.value"
-                  class="select-option"
-                  :class="{ 'select-option--active': getParamValue(def.key) === opt.value }"
-                  @click="setParamValue(def.key, opt.value)"
-                >
-                  {{ opt.label }}
-                </button>
-              </div>
-            </template>
-          </div>
+          <UiSelect
+            :model-value="getParamValue(def.key)"
+            :options="[...def.options]"
+            @update:model-value="setParamValue(def.key, String($event))"
+          />
         </div>
       </div>
     </div>
@@ -239,82 +238,6 @@ function setParamValue(key: string, value: string | number) {
 
 .param-card__value {
   margin-top: 8px;
-}
-
-.number-input {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.slider {
-  flex: 1;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--color-border);
-  appearance: none;
-  cursor: pointer;
-}
-
-.slider::-webkit-slider-thumb {
-  appearance: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--color-accent);
-  cursor: pointer;
-  transition: transform var(--transition-fast);
-}
-
-.slider::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
-}
-
-.number-value {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 80px;
-}
-
-.number-value .value {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--color-text);
-  font-family: var(--font-mono);
-}
-
-.number-value .range {
-  font-size: 12px;
-  color: var(--color-muted);
-}
-
-.select-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.select-option {
-  padding: 8px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface);
-  color: var(--color-muted);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.select-option:hover {
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
-
-.select-option--active {
-  border-color: var(--color-accent);
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
 }
 
 .config-footer {

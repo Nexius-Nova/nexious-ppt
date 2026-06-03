@@ -8,10 +8,8 @@ defineProps<{
 
 <template>
   <div class="activity-log">
-    <div class="activity-log__header">
-      <h3>运行日志</h3>
-      <p>每一步的状态输出都会追加到这里</p>
-    </div>
+    <!-- <div class="activity-log__header">
+    </div> -->
     <div class="activity-log__content">
       <div v-for="(log, index) in logs" :key="index" class="activity-log__item">
         <Terminal :size="11" class="activity-log__icon" />
@@ -53,6 +51,20 @@ defineProps<{
 .activity-log__content {
   display: grid;
   gap: 6px;
+  max-height: min(64vh, 680px);
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+.activity-log__content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.activity-log__content::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--color-border-strong);
 }
 
 .activity-log__item {

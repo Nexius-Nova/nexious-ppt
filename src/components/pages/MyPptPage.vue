@@ -22,20 +22,52 @@ const projectToDelete = ref<Project | null>(null);
 const showCreateModal = ref(false);
 const newProjectTitle = ref('');
 
+function normalizeProjectText(value: unknown) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function isSameProjectIdentity(left: Project, right: Project) {
+  const leftTitle = normalizeProjectText(left.title);
+  const rightTitle = normalizeProjectText(right.title);
+  if (!leftTitle || leftTitle !== rightTitle) return false;
+
+  const leftTopic = normalizeProjectText(left.topic);
+  const rightTopic = normalizeProjectText(right.topic);
+  return leftTopic === rightTopic || !leftTopic || !rightTopic;
+}
+
+const uniqueProjects = computed(() => {
+  const items: Project[] = [];
+
+  for (const project of projects.value) {
+    const existingIndex = items.findIndex((item) => isSameProjectIdentity(item, project));
+    const existing = existingIndex >= 0 ? items[existingIndex] : null;
+    if (!existing || new Date(project.updated_at).getTime() > new Date(existing.updated_at).getTime()) {
+      if (existingIndex >= 0) {
+        items[existingIndex] = project;
+      } else {
+        items.push(project);
+      }
+    }
+  }
+
+  return items;
+});
+
 const filteredProjects = computed(() => {
-  if (!searchQuery.value) return projects.value;
+  if (!searchQuery.value) return uniqueProjects.value;
   const query = searchQuery.value.toLowerCase();
-  return projects.value.filter(p =>
+  return uniqueProjects.value.filter(p =>
     p.title.toLowerCase().includes(query) ||
     p.topic?.toLowerCase().includes(query)
   );
 });
 
 const stats = computed(() => ({
-  total: projects.value.length,
-  draft: projects.value.filter(p => p.status === 'draft').length,
-  generating: projects.value.filter(p => p.status === 'generating').length,
-  completed: projects.value.filter(p => p.status === 'completed').length
+  total: uniqueProjects.value.length,
+  draft: uniqueProjects.value.filter(p => p.status === 'draft').length,
+  generating: uniqueProjects.value.filter(p => p.status === 'generating').length,
+  completed: uniqueProjects.value.filter(p => p.status === 'completed').length
 }));
 
 async function fetchProjects() {

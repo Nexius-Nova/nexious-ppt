@@ -102,6 +102,8 @@ export async function generateSlideImages(
 
       if (!image.error && image.url) {
         toastStore.success('图片生成完成', slide.title);
+      } else if (image.error) {
+        callbacks?.onComplete?.(slide.id, image);
       }
 
       return image;
@@ -119,8 +121,10 @@ export async function generateSlideImages(
         style,
         url: '',
         selected: true,
-        error: true
+        error: true,
+        errorMessage: error instanceof Error ? error.message : '未知错误'
       };
+      callbacks?.onComplete?.(slide.id, errorImage);
       callbacks?.onError?.(slide.id, error instanceof Error ? error.message : '未知错误');
       return errorImage;
     }

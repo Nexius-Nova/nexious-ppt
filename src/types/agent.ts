@@ -57,6 +57,7 @@ export interface GeneratedImage {
   url: string;
   selected: boolean;
   error?: boolean;
+  errorMessage?: string;
 }
 
 export interface SkillDefinition {
@@ -90,6 +91,11 @@ export interface PptProjectState {
   designSpec: DesignSpec | null;
   specLock: SpecLock | null;
   svgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>;
+  paused?: boolean;
+  resumeStage?: WorkflowStepId | null;
+  executorCursor?: number;
+  workflowActive?: boolean;
+  lastActiveStep?: WorkflowStepId | null;
 }
 
 export interface PptProject {

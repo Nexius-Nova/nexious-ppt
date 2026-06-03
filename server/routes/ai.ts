@@ -1,10 +1,14 @@
 import { Router, Response, Request } from 'express';
+import path from 'path';
+import { mkdir, writeFile } from 'fs/promises';
 import { getDefaultApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
 
 const router = Router();
 
 const DEFAULT_USER_ID = 1;
+const GENERATED_IMAGE_DIR = path.join(process.cwd(), '.generated', 'images');
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'http://localhost:3001';
 
 interface Message {
   role: 'system' | 'user' | 'assistant';
@@ -214,6 +218,26 @@ function extractImageUrl(data: any): string {
   if (typeof url !== 'string') return '';
   if (url.startsWith('data:') || url.startsWith('http')) return url;
   return `data:image/png;base64,${url}`;
+}
+
+function imageExtension(mime: string): string {
+  if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg';
+  if (mime.includes('webp')) return 'webp';
+  if (mime.includes('gif')) return 'gif';
+  return 'png';
+}
+
+async function persistDataImage(imageUrl: string, slideId: string): Promise<string> {
+  if (!imageUrl.startsWith('data:image/')) return imageUrl;
+  const match = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!match) return imageUrl;
+
+  await mkdir(GENERATED_IMAGE_DIR, { recursive: true });
+  const ext = imageExtension(match[1]);
+  const safeSlideId = String(slideId || 'slide').replace(/[^\w-]+/g, '_');
+  const fileName = `${safeSlideId}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}.${ext}`;
+  await writeFile(path.join(GENERATED_IMAGE_DIR, fileName), Buffer.from(match[2], 'base64'));
+  return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/generated-images/${fileName}`;
 }
 
 async function generateWithOpenAIProtocol(
@@ -719,7 +743,8 @@ router.post('/generate-image-stream', async (req: Request, res: Response) => {
     );
 
     try {
-      const imageUrl = await generateImage(provider, apiKey, model, prompt, style, baseUrl);
+      const rawImageUrl = await generateImage(provider, apiKey, model, prompt, style, baseUrl);
+      const imageUrl = await persistDataImage(rawImageUrl, slideId);
 
       res.write(
         `data: ${JSON.stringify({
@@ -772,6 +797,23 @@ router.post('/generate-image-stream', async (req: Request, res: Response) => {
       `data: ${JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : '生成图片失败' })}\n\n`
     );
     res.end();
+  }
+});
+
+router.post('/persist-generated-image', async (req: Request, res: Response) => {
+  try {
+    const { slideId, imageUrl } = req.body;
+    if (typeof imageUrl !== 'string' || !imageUrl) {
+      return res.status(400).json({ success: false, message: '缺少图片数据' });
+    }
+
+    const url = await persistDataImage(imageUrl, slideId || 'slide');
+    res.json({ success: true, data: { url } });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : '保存图片失败',
+    });
   }
 });
 

@@ -37,6 +37,19 @@ const clonePrompts = (): PromptDefinition[] => defaultPrompts.map((prompt) => ({
 const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => ({ ...template }));
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+const MAX_ACTIVITY_LOGS = 500;
+const normalizeProjectText = (value: unknown) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const projectIdentityKey = (project: Pick<PptProject, 'title' | 'topic'>) =>
+  `${normalizeProjectText(project.title)}::${normalizeProjectText(project.topic)}`;
+const isSameProjectIdentity = (left: Pick<PptProject, 'title' | 'topic'>, right: Pick<PptProject, 'title' | 'topic'>) => {
+  const leftTitle = normalizeProjectText(left.title);
+  const rightTitle = normalizeProjectText(right.title);
+  if (!leftTitle || leftTitle !== rightTitle) return false;
+
+  const leftTopic = normalizeProjectText(left.topic);
+  const rightTopic = normalizeProjectText(right.topic);
+  return leftTopic === rightTopic || !leftTopic || !rightTopic;
+};
 
 export const useAgentStore = defineStore('agent', () => {
   const activeStep = ref<WorkflowStepId>('input');
@@ -64,6 +77,10 @@ export const useAgentStore = defineStore('agent', () => {
   const exportArtifacts = ref<ExportArtifact[]>([]);
   const activityLog = ref<string[]>(['系统就绪，等待添加 PPT 项目。']);
   const isRunning = ref(false);
+  const isPaused = ref(false);
+  const pauseRequested = ref(false);
+  const resumeStage = ref<WorkflowStepId | null>(null);
+  const executorCursor = ref(0);
   const streamingText = ref('');
   const designSpec = ref<DesignSpec | null>(null);
   const specLock = ref<SpecLock | null>(null);
@@ -72,11 +89,68 @@ export const useAgentStore = defineStore('agent', () => {
   const currentGeneratingSlide = ref<string | null>(null);
   const generatedSlides = ref<Set<string>>(new Set());
   const isDataLoaded = ref(false);
+  const recoveredActiveWorkflow = ref(false);
 
   const enabledSkills = computed(() => skills.value.filter((skill) => skill.enabled).sort((a, b) => a.order - b.order));
   const selectedImages = computed(() => images.value.filter((image) => image.selected));
   const activeStepMeta = computed(() => steps.value.find((step) => step.id === activeStep.value));
   const activePpt = computed(() => pptProjects.value.find((project) => project.id === activePptId.value) || null);
+
+  function mergePptProjects(projects: PptProject[], preferredActiveId: string | null = activePptId.value): PptProject[] {
+    const byId = new Map<string, PptProject>();
+    const byIdentity = new Map<string, string>();
+    const merged: PptProject[] = [];
+
+    for (const rawProject of projects) {
+      const project = {
+        ...rawProject,
+        id: String(rawProject.id),
+        state: rawProject.state || makeDefaultProjectState()
+      };
+      const existingById = byId.get(project.id);
+      if (existingById) {
+        Object.assign(existingById, project, {
+          state: project.state || existingById.state,
+          updatedAt: Math.max(existingById.updatedAt || 0, project.updatedAt || 0)
+        });
+        continue;
+      }
+
+      const identity = projectIdentityKey(project);
+      const existingIdentityId = byIdentity.get(identity);
+      const existingByLooseIdentity = merged.find((item) => isSameProjectIdentity(item, project));
+      const existingByIdentity = existingIdentityId ? byId.get(existingIdentityId) : existingByLooseIdentity;
+      const projectIsNumeric = Number.isInteger(Number(project.id)) && Number(project.id) > 0;
+      const existingIsNumeric = existingByIdentity
+        ? Number.isInteger(Number(existingByIdentity.id)) && Number(existingByIdentity.id) > 0
+        : false;
+
+      if (existingByIdentity && normalizeProjectText(project.title)) {
+        const shouldReplace =
+          project.id === preferredActiveId ||
+          (!existingIsNumeric && projectIsNumeric) ||
+          ((project.updatedAt || 0) > (existingByIdentity.updatedAt || 0) && existingByIdentity.id !== preferredActiveId);
+
+        if (shouldReplace) {
+          const index = merged.findIndex((item) => item.id === existingByIdentity.id);
+          if (index >= 0) merged[index] = { ...existingByIdentity, ...project, state: project.state || existingByIdentity.state };
+          byId.delete(existingByIdentity.id);
+          byId.set(project.id, merged[index]);
+          byIdentity.set(identity, project.id);
+        } else {
+          if (!existingByIdentity.state && project.state) existingByIdentity.state = project.state;
+          existingByIdentity.updatedAt = Math.max(existingByIdentity.updatedAt || 0, project.updatedAt || 0);
+        }
+        continue;
+      }
+
+      byId.set(project.id, project);
+      if (identity !== '::') byIdentity.set(identity, project.id);
+      merged.push(project);
+    }
+
+    return merged.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
 
   function makeDefaultProjectState(): PptProjectState {
     return {
@@ -98,7 +172,12 @@ export const useAgentStore = defineStore('agent', () => {
       steps: workflowSteps.map(s => ({ ...s })),
       designSpec: null,
       specLock: null,
-      svgPages: []
+      svgPages: [],
+      paused: false,
+      resumeStage: null,
+      executorCursor: 0,
+      workflowActive: false,
+      lastActiveStep: null,
     };
   }
 
@@ -124,7 +203,12 @@ export const useAgentStore = defineStore('agent', () => {
             svg: page.svg,
             speakerNotes: page.speakerNotes
           }))
-        : svgPages.value
+        : svgPages.value,
+      paused: isPaused.value,
+      resumeStage: resumeStage.value,
+      executorCursor: executorCursor.value,
+      workflowActive: isRunning.value || steps.value.some(step => step.status === 'running'),
+      lastActiveStep: activeStep.value,
     };
   }
 
@@ -146,6 +230,15 @@ export const useAgentStore = defineStore('agent', () => {
     designSpec.value = state.designSpec || null;
     specLock.value = state.specLock || null;
     svgPages.value = state.svgPages || [];
+    const hadActiveWorkflow = Boolean(state.workflowActive || state.steps?.some(step => step.status === 'running'));
+    recoveredActiveWorkflow.value = hadActiveWorkflow && !state.paused;
+    isPaused.value = Boolean(state.paused || hadActiveWorkflow);
+    pauseRequested.value = false;
+    resumeStage.value = state.resumeStage || state.lastActiveStep || null;
+    executorCursor.value = state.executorCursor || svgPages.value.length || 0;
+    if (state.lastActiveStep && workflowSteps.some(step => step.id === state.lastActiveStep)) {
+      activeStep.value = state.lastActiveStep;
+    }
 
     if (state.activityLog && state.activityLog.length > 0) {
       activityLog.value = [...state.activityLog];
@@ -156,8 +249,8 @@ export const useAgentStore = defineStore('agent', () => {
     if (state.steps && state.steps.length > 0) {
       const restoredSteps = state.steps.map(s => ({
         ...s,
-        status: s.status === 'running' ? 'idle' : s.status,
-        progress: s.status === 'running' ? 0 : s.progress,
+        status: (s.status === 'running' ? (hadActiveWorkflow ? 'running' : 'idle') : s.status) as WorkflowStep['status'],
+        progress: s.status === 'running' && !hadActiveWorkflow ? 0 : s.progress,
       }));
       const currentStepIds = new Set(workflowSteps.map(s => s.id));
       const restoredStepIds = new Set(restoredSteps.map(s => s.id));
@@ -218,6 +311,15 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }, { deep: true });
 
+  let logSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleLogSync() {
+    if (!activePpt.value) return;
+    if (logSyncTimer) clearTimeout(logSyncTimer);
+    logSyncTimer = setTimeout(() => {
+      syncToProject();
+    }, 500);
+  }
+
   function mapTemplateToStyle(templateId: string): TemplateStyle {
     const template = templates.value.find(t => t.id === templateId);
     if (!template) return 'auto';
@@ -230,7 +332,8 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function pushLog(message: string) {
-    activityLog.value = [`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${message}`, ...activityLog.value].slice(0, 8);
+    activityLog.value = [`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${message}`, ...activityLog.value].slice(0, MAX_ACTIVITY_LOGS);
+    scheduleLogSync();
   }
 
   function setStepStatus(id: WorkflowStepId, status: WorkflowStep['status'], progress: number) {
@@ -238,6 +341,51 @@ export const useAgentStore = defineStore('agent', () => {
     if (!step) return;
     step.status = status;
     step.progress = progress;
+  }
+
+  function requestPauseWorkflow() {
+    if (!isRunning.value) return;
+    recoveredActiveWorkflow.value = false;
+    pauseRequested.value = true;
+    pushLog('已请求暂停，当前步骤完成后会停下。');
+  }
+
+  function markPaused(stage: WorkflowStepId) {
+    isPaused.value = true;
+    recoveredActiveWorkflow.value = false;
+    pauseRequested.value = false;
+    resumeStage.value = stage;
+    isRunning.value = false;
+    currentGeneratingSlide.value = null;
+    pushLog('工作流已暂停。');
+    syncToProject();
+  }
+
+  function clearPauseState() {
+    isPaused.value = false;
+    pauseRequested.value = false;
+    resumeStage.value = null;
+    recoveredActiveWorkflow.value = false;
+  }
+
+  async function continueWorkflow() {
+    if (isRunning.value) return;
+    pushLog('继续生成。');
+    clearPauseState();
+    await runFullWorkflow({ resume: true });
+  }
+
+  async function resumeRecoveredWorkflow() {
+    if (!recoveredActiveWorkflow.value || isRunning.value) return;
+    pushLog('页面已恢复，继续生成。');
+    clearPauseState();
+    await runFullWorkflow({ resume: true });
+  }
+
+  function shouldPauseAt(stage: WorkflowStepId): boolean {
+    if (!pauseRequested.value) return false;
+    markPaused(stage);
+    return true;
   }
 
   function resetDownstreamSteps(afterStepId: WorkflowStepId) {
@@ -277,6 +425,39 @@ export const useAgentStore = defineStore('agent', () => {
     return true;
   }
 
+  async function ensureInputProject(): Promise<boolean> {
+    const toastStore = useToastStore();
+    const topic = input.value.topic.trim();
+
+    if (!topic) {
+      activeStep.value = 'input';
+      toastStore.warning('请填写主题', '请先填写 PPT 主题，再开始生成');
+      return false;
+    }
+
+    if (!activePpt.value) {
+      await addPptProjectPersisted({
+        title: topic,
+        topic,
+        description: input.value.content.trim() || '自动创建的 PPT 项目',
+        templateId: parameters.value.template || 'auto'
+      });
+      toastStore.info('已创建 PPT 项目', `已自动创建项目：${topic}`);
+    }
+
+    setStepStatus('input', 'done', 100);
+    pushLog('资料已准备好。');
+    syncToProject();
+    return true;
+  }
+
+  async function runInputStage() {
+    const ready = await ensureInputProject();
+    if (ready) {
+      activeStep.value = 'outline';
+    }
+  }
+
   function addPptProject(data: { title: string; topic: string; description: string; templateId: string }) {
     const now = Date.now();
     if (activePpt.value) {
@@ -300,21 +481,34 @@ export const useAgentStore = defineStore('agent', () => {
     };
 
     pptProjects.value = [project, ...pptProjects.value];
+    pptProjects.value = mergePptProjects(pptProjects.value, project.id);
     activePptId.value = project.id;
     restoreProjectState(freshState);
     pushLog(`已添加 PPT：${project.title}`);
   }
 
   async function addPptProjectPersisted(data: { title: string; topic: string; description: string; templateId: string }) {
+    const title = data.title.trim() || data.topic.trim() || '未命名 PPT';
+    const topic = data.topic.trim();
+    const existingProject = mergePptProjects(pptProjects.value).find((project) => isSameProjectIdentity(project, { title, topic }));
+
+    if (existingProject && Number.isInteger(Number(existingProject.id)) && Number(existingProject.id) > 0) {
+      pptProjects.value = mergePptProjects(pptProjects.value, existingProject.id);
+      activePptId.value = existingProject.id;
+      restoreProjectState(existingProject.state);
+      pushLog(`已打开 PPT：${existingProject.title}`);
+      return existingProject;
+    }
+
     const freshState = makeDefaultProjectState();
-    freshState.input.topic = data.topic.trim();
+    freshState.input.topic = topic;
     freshState.input.content = data.description.trim();
     freshState.parameters.template = mapTemplateToStyle(data.templateId);
 
     try {
       const response = await projectApi.create({
-        title: data.title.trim() || data.topic.trim() || '未命名 PPT',
-        topic: data.topic.trim(),
+        title,
+        topic,
         content: data.description.trim(),
         status: 'draft',
         state: freshState,
@@ -324,15 +518,15 @@ export const useAgentStore = defineStore('agent', () => {
         const now = Date.now();
         const project: PptProject = {
           id: String(response.data.id),
-          title: data.title.trim() || data.topic.trim() || '未命名 PPT',
-          topic: data.topic.trim(),
+          title,
+          topic,
           description: data.description.trim(),
           templateId: data.templateId,
           createdAt: now,
           updatedAt: now,
           state: freshState,
         };
-        pptProjects.value = [project, ...pptProjects.value.filter(p => p.id !== project.id)];
+        pptProjects.value = mergePptProjects([project, ...pptProjects.value.filter(p => p.id !== project.id)], project.id);
         activePptId.value = project.id;
         restoreProjectState(freshState);
         pushLog(`已添加 PPT：${project.title}`);
@@ -411,7 +605,7 @@ export const useAgentStore = defineStore('agent', () => {
               updatedAt: new Date(serverProject.updated_at).getTime(),
               state: projectState || makeDefaultProjectState()
             };
-            pptProjects.value = [project, ...pptProjects.value];
+            pptProjects.value = mergePptProjects([project, ...pptProjects.value], id);
           } else {
             if (projectState) {
               project.state = projectState;
@@ -437,7 +631,7 @@ export const useAgentStore = defineStore('agent', () => {
         updatedAt: Date.now(),
         state: makeDefaultProjectState()
       };
-      pptProjects.value = [freshProject, ...pptProjects.value];
+      pptProjects.value = mergePptProjects([freshProject, ...pptProjects.value], id);
       activePptId.value = id;
       restoreProjectState(freshProject.state);
       return;
@@ -904,8 +1098,24 @@ export const useAgentStore = defineStore('agent', () => {
         return;
       }
 
+      const existingReadySlideIds = new Set(
+        images.value
+          .filter((image) => image.selected && !image.error && image.url)
+          .map((image) => image.slideId)
+      );
+      generatedSlides.value = new Set(existingReadySlideIds);
+      const pendingSlides = slidesRequiringImages.filter((slide) => !existingReadySlideIds.has(slide.id));
+
+      if (pendingSlides.length === 0) {
+        generatedSlides.value = new Set(existingReadySlideIds);
+        pushLog('图片已完成。');
+        setStepStatus('images', 'done', 100);
+        syncToProject();
+        return;
+      }
+
       await generateSlideImages(
-        slidesRequiringImages.map(s => ({
+        pendingSlides.map(s => ({
           id: s.id,
           title: s.title,
           bullets: [...s.bullets],
@@ -920,14 +1130,16 @@ export const useAgentStore = defineStore('agent', () => {
           },
           onComplete: (slideId, image) => {
             if (slideId === '__progress__') {
-              const progress = (image as any)._progress || 0;
+              const pendingProgress = (image as any)._progress || 0;
+              const completedPending = Math.round((pendingProgress / 100) * pendingSlides.length);
+              const progress = Math.round(((existingReadySlideIds.size + completedPending) / slidesRequiringImages.length) * 100);
               setStepStatus('images', 'running', progress);
               return;
             }
             generatedSlides.value.add(slideId);
             currentGeneratingSlide.value = null;
 
-            if (image.url && !image.error) {
+            if (image.url || image.error) {
               const existingIdx = images.value.findIndex(img => img.slideId === slideId);
               if (existingIdx >= 0) {
                 images.value[existingIdx] = image;
@@ -936,19 +1148,26 @@ export const useAgentStore = defineStore('agent', () => {
               }
             }
 
-            const progress = Math.round((generatedSlides.value.size / slidesRequiringImages.length) * 100);
+            const readyCount = images.value.filter((img) => img.selected && !img.error && img.url).length;
+            const progress = Math.round((readyCount / slidesRequiringImages.length) * 100);
             setStepStatus('images', 'running', progress);
             pushLog(image.error
               ? `图片未生成：${image.title}，继续生成页面。`
-              : `图片完成：${image.title}，${generatedSlides.value.size}/${slidesRequiringImages.length}`);
+              : `图片完成：${image.title}，${Math.min(readyCount, slidesRequiringImages.length)}/${slidesRequiringImages.length}`);
           },
           onError: (_slideId, message) => {
             currentGeneratingSlide.value = null;
             pushLog(`图片未生成：${message}`);
           },
           onAllComplete: () => {
-            pushLog(generatedSlides.value.size > 0
-              ? `图片生成完成，共 ${generatedSlides.value.size} 张。`
+            const readyCount = images.value.filter((img) => img.selected && !img.error && img.url).length;
+            generatedSlides.value = new Set(
+              images.value
+                .filter((image) => image.selected && !image.error && image.url)
+                .map((image) => image.slideId)
+            );
+            pushLog(readyCount > 0
+              ? `图片生成完成，共 ${readyCount} 张。`
               : '没有生成可用图片，页面会使用 SVG 图示。');
             setStepStatus('images', 'done', 100);
             syncToProject();
@@ -957,12 +1176,97 @@ export const useAgentStore = defineStore('agent', () => {
       );
     } catch (error) {
       setStepStatus('images', 'idle', 0);
-      pushLog('图片生成失败，请检查 API Key 配置。');
+      const errMsg = error instanceof Error ? error.message : '未知错误';
+      pushLog(`图片生成失败：${errMsg}`);
+      syncToProject();
       throw error;
     }
   }
 
-  async function runExecutor() {
+  async function retrySlideImage(slideId: string) {
+    if (!checkActivePpt() || !checkApiKeys()) return;
+
+    const sourceSlide = (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === slideId) as any;
+    if (!sourceSlide) return;
+
+    activeStep.value = 'images';
+    currentGeneratingSlide.value = slideId;
+    pushLog(`重新生成图片：${sourceSlide.title}`);
+
+    try {
+      const result = await generateSlideImages(
+        [{
+          id: sourceSlide.id,
+          title: sourceSlide.title,
+          bullets: [...(sourceSlide.bullets || [])],
+          speakerNotes: sourceSlide.speakerNotes || '',
+          visualPrompt: sourceSlide.visualPrompt || [sourceSlide.title, ...(sourceSlide.bullets || [])].filter(Boolean).join('，'),
+        }],
+        parameters.value.imageStyle,
+        {
+          onStart: (_id, message) => {
+            pushLog(message);
+          },
+          onComplete: (id, image) => {
+            if (id === '__progress__') return;
+            const existingIdx = images.value.findIndex(img => img.slideId === id);
+            if (existingIdx >= 0) {
+              images.value[existingIdx] = image;
+            } else {
+              images.value = [...images.value, image];
+            }
+            if (!image.error && image.url) {
+              generatedSlides.value.add(id);
+            }
+            pushLog(image.error
+              ? `图片未生成：${image.title}`
+              : `图片完成：${image.title}`);
+            syncToProject();
+          },
+          onError: (_id, message) => {
+            pushLog(`图片未生成：${message}`);
+          },
+          onAllComplete: () => {},
+        },
+        1
+      );
+
+      const image = result[0];
+      if (image?.error || !image?.url) {
+        pushLog(`图片仍未生成：${sourceSlide.title}`);
+      } else {
+        pushLog(`图片重试成功：${sourceSlide.title}`);
+      }
+      syncToProject();
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : '未知错误';
+      pushLog(`图片重试失败：${errMsg}`);
+      syncToProject();
+      throw error;
+    } finally {
+      currentGeneratingSlide.value = null;
+    }
+  }
+
+  async function ensureExecutorImageUrl(image: GeneratedImage | undefined): Promise<string | undefined> {
+    if (!image?.url || image.error) return undefined;
+    if (/^https?:\/\//i.test(image.url)) return image.url;
+    if (!image.url.startsWith('data:image/')) return undefined;
+
+    const response = await aiApi.persistGeneratedImage({
+      slideId: image.slideId,
+      imageUrl: image.url,
+    });
+    if (response.success && response.data?.url) {
+      image.url = response.data.url;
+      syncToProject();
+      return response.data.url;
+    }
+    pushLog(`图片保存失败：${image.title}`);
+    return undefined;
+  }
+
+  async function runExecutor(options: { resume?: boolean; embedded?: boolean } = {}) {
     if (!checkActivePpt()) return;
 
     if (!designSpec.value || !specLock.value) {
@@ -971,15 +1275,23 @@ export const useAgentStore = defineStore('agent', () => {
     if (!designSpec.value || !specLock.value) return;
 
     activeStep.value = 'layout';
-    isRunning.value = true;
+    if (!options.embedded) {
+      isRunning.value = true;
+    }
     setStepStatus('layout', 'running', 5);
     pushLog('开始生成页面。');
-    svgPages.value = [];
+    if (!options.resume) {
+      svgPages.value = [];
+      executorCursor.value = 0;
+    }
 
     try {
       const totalPages = designSpec.value.outline.length;
+      const startIndex = options.resume
+        ? Math.min(Math.max(executorCursor.value || svgPages.value.length, 0), totalPages)
+        : 0;
 
-      for (let i = 0; i < totalPages; i++) {
+      for (let i = startIndex; i < totalPages; i++) {
         const slide = designSpec.value.outline[i];
         const progress = Math.round(((i) / totalPages) * 100);
         setStepStatus('layout', 'running', progress);
@@ -988,10 +1300,9 @@ export const useAgentStore = defineStore('agent', () => {
         const imageForSlide = images.value.find(img =>
           img.slideId === slide.id &&
           img.selected &&
-          img.url &&
-          !img.url.startsWith('data:')
+          img.url
         );
-        const imageUrl = imageForSlide?.url || undefined;
+        const imageUrl = await ensureExecutorImageUrl(imageForSlide);
 
         const spec = designSpec.value!;
         const lock = specLock.value!;
@@ -1030,40 +1341,73 @@ export const useAgentStore = defineStore('agent', () => {
         };
 
         try {
-          const svg = await aiApi.executorPageStream(
-            { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl },
-            {
-              onStart: () => {},
-              onContent: () => {},
-              onComplete: () => {},
-              onError: (message) => {
-                pushLog(`第 ${slide.pageNumber} 页 API 错误：${message}`);
-              },
-            }
-          );
+          let svg = '';
+          let lastError: unknown = null;
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+              svg = await aiApi.executorPageStream(
+                { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl },
+                {
+                  onStart: () => {},
+                  onContent: () => {},
+                  onComplete: () => {},
+                  onError: (message) => {
+                    pushLog(`第 ${slide.pageNumber} 页 API 错误：${message}`);
+                  },
+                }
+              );
 
-          if (!svg || !svg.includes('<svg')) {
-            throw new Error('AI 返回的 SVG 内容无效');
+              if (!svg || !svg.includes('<svg')) {
+                throw new Error('AI 返回的 SVG 内容无效');
+              }
+              break;
+            } catch (error) {
+              lastError = error;
+              if (attempt === 1) {
+                pushLog(`第 ${slide.pageNumber} 页生成不完整，正在重试。`);
+              }
+            }
           }
 
-          svgPages.value.push({
+          if (!svg || !svg.includes('<svg')) {
+            throw lastError instanceof Error ? lastError : new Error('AI 返回的 SVG 内容无效');
+          }
+
+          const page = {
             pageNumber: slide.pageNumber,
             svg,
             speakerNotes: slide.speakerNotes,
-          });
+          };
+          const existingPageIndex = svgPages.value.findIndex(item => item.pageNumber === page.pageNumber);
+          if (existingPageIndex >= 0) {
+            svgPages.value[existingPageIndex] = page;
+          } else {
+            svgPages.value.push(page);
+          }
 
           pushLog(`第 ${slide.pageNumber} 页生成完成。`);
         } catch (pageError) {
           const errMsg = pageError instanceof Error ? pageError.message : '未知错误';
-          pushLog(`第 ${slide.pageNumber} 页生成失败（${errMsg}），已使用备用页面。`);
-          svgPages.value.push({
+          pushLog(`第 ${slide.pageNumber} 页生成失败（${errMsg}），已标记待重试。`);
+          const page = {
             pageNumber: slide.pageNumber,
             svg: buildFallbackSvg(slide),
             speakerNotes: slide.speakerNotes,
-          });
+          };
+          const existingPageIndex = svgPages.value.findIndex(item => item.pageNumber === page.pageNumber);
+          if (existingPageIndex >= 0) {
+            svgPages.value[existingPageIndex] = page;
+          } else {
+            svgPages.value.push(page);
+          }
         }
+
+        executorCursor.value = i + 1;
+        syncToProject();
+        if (shouldPauseAt('layout')) return;
       }
 
+      executorCursor.value = totalPages;
       setStepStatus('layout', 'done', 100);
       pushLog('页面生成完成。');
       syncToProject();
@@ -1075,7 +1419,9 @@ export const useAgentStore = defineStore('agent', () => {
       toastStore.error('页面生成失败', errMsg);
       throw error;
     } finally {
-      isRunning.value = false;
+      if (!options.embedded && !isPaused.value) {
+        isRunning.value = false;
+      }
     }
   }
 
@@ -1084,37 +1430,15 @@ export const useAgentStore = defineStore('agent', () => {
     if (!spec) return '';
     const { canvas, visualTheme, typography } = spec;
     const { colors } = visualTheme;
-    const isCover = slide.layout === 'cover';
-    const isEnding = slide.layout === 'ending';
-
-    if (isCover) {
-      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}">
-  <rect width="${canvas.width}" height="${canvas.height}" fill="${colors.background}"/>
-  <rect x="0" y="${canvas.height * 0.35}" width="${canvas.width}" height="4" fill="${colors.accent}"/>
-  <text x="${canvas.width / 2}" y="${canvas.height * 0.45}" font-size="${typography.titleSize + 8}" fill="${colors.text}" text-anchor="middle" font-family="${typography.titleFamily}" font-weight="bold">${slide.title}</text>
-  <text x="${canvas.width / 2}" y="${canvas.height * 0.55}" font-size="${typography.bodySize}" fill="${colors.muted}" text-anchor="middle" font-family="${typography.bodyFamily}">${spec.projectInfo.occasion || ''}</text>
-</svg>`;
-    }
-
-    if (isEnding) {
-      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}">
-  <rect width="${canvas.width}" height="${canvas.height}" fill="${colors.background}"/>
-  <text x="${canvas.width / 2}" y="${canvas.height * 0.42}" font-size="${typography.titleSize + 12}" fill="${colors.text}" text-anchor="middle" font-family="${typography.titleFamily}" font-weight="bold">璋㈣阿</text>
-  <rect x="${canvas.width * 0.4}" y="${canvas.height * 0.5}" width="${canvas.width * 0.2}" height="3" fill="${colors.accent}"/>
-  <text x="${canvas.width / 2}" y="${canvas.height * 0.58}" font-size="${typography.bodySize}" fill="${colors.muted}" text-anchor="middle" font-family="${typography.bodyFamily}">${slide.title}</text>
-</svg>`;
-    }
-
-    const bulletLines = slide.bullets.map((b, i) =>
-      `<circle cx="100" cy="${canvas.height * 0.35 + i * 40}" r="4" fill="${colors.accent}"/><text x="116" y="${canvas.height * 0.35 + i * 40 + 5}" font-size="${typography.bodySize}" fill="${colors.text}" font-family="${typography.bodyFamily}">${b}</text>`
-    ).join('\n  ');
-
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}">
   <rect width="${canvas.width}" height="${canvas.height}" fill="${colors.background}"/>
-  <rect x="0" y="0" width="6" height="${canvas.height}" fill="${colors.accent}"/>
-  <text x="60" y="80" font-size="${typography.titleSize}" fill="${colors.text}" font-family="${typography.titleFamily}" font-weight="bold">${slide.title}</text>
-  <rect x="60" y="96" width="80" height="3" fill="${colors.accent}" fill-opacity="0.5"/>
-  ${bulletLines}
+  <rect x="72" y="72" width="${canvas.width - 144}" height="${canvas.height - 144}" rx="18" fill="${colors.surface}" stroke="${colors.border}" stroke-width="2"/>
+  <circle cx="132" cy="132" r="18" fill="${colors.accent}"/>
+  <text x="132" y="139" font-size="22" fill="${colors.surface}" text-anchor="middle" font-family="${typography.titleFamily}" font-weight="bold">!</text>
+  <text x="172" y="126" font-size="${typography.subtitleSize}" fill="${colors.text}" font-family="${typography.titleFamily}" font-weight="bold">本页待重试</text>
+  <text x="172" y="160" font-size="${typography.annotationSize}" fill="${colors.muted}" font-family="${typography.bodyFamily}">第 ${slide.pageNumber} 页生成失败，不作为最终页面风格参考</text>
+  <text x="96" y="${canvas.height - 118}" font-size="${typography.bodySize}" fill="${colors.text}" font-family="${typography.bodyFamily}" font-weight="bold">${slide.title}</text>
+  <rect x="96" y="${canvas.height - 96}" width="160" height="4" fill="${colors.accent}"/>
 </svg>`;
   }
 
@@ -1215,23 +1539,15 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
-  async function runFullWorkflow() {
+  async function runFullWorkflow(options: { resume?: boolean } = {}) {
     const toastStore = useToastStore();
 
-    if (!activePpt.value) {
-      if (!input.value.topic.trim()) {
-        toastStore.warning('请填写主题', '请先填写 PPT 主题，再开始生成');
-        return;
-      }
-      
-      await addPptProjectPersisted({
-        title: input.value.topic.trim(),
-        topic: input.value.topic.trim(),
-        description: input.value.content.trim() || '自动创建的 PPT 项目',
-        templateId: parameters.value.template || 'auto'
-      });
-      
-      toastStore.info('已创建 PPT 项目', `已自动创建项目：${input.value.topic.trim()}`);
+    if (!options.resume) {
+      const ready = await ensureInputProject();
+      if (!ready) return;
+    } else if (!activePpt.value) {
+      const ready = await ensureInputProject();
+      if (!ready) return;
     }
 
     if (!checkApiKeys()) return;
@@ -1242,12 +1558,21 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     isRunning.value = true;
+    if (!options.resume) {
+      clearPauseState();
+      executorCursor.value = 0;
+    }
 
     try {
       toastStore.info('开始生成 PPT', '正在处理，请稍候。');
 
       const imagesStep = steps.value.find(s => s.id === 'images');
-      await runStrategist();
+      const shouldRunOutline = !options.resume || !designSpec.value || !specLock.value || outline.value.length === 0;
+      if (shouldRunOutline) {
+        activeStep.value = 'outline';
+        await runStrategist();
+        if (shouldPauseAt('images')) return;
+      }
 
       activeStep.value = 'images';
 
@@ -1259,6 +1584,7 @@ export const useAgentStore = defineStore('agent', () => {
         if (apiKeyStore.isImageModelConfigured) {
           try {
             await runImages();
+            if (shouldPauseAt('layout')) return;
           } catch (imgError) {
             pushLog(`图片生成失败（${imgError instanceof Error ? imgError.message : '未知错误'}），跳过图片继续生成页面。`);
           }
@@ -1271,15 +1597,22 @@ export const useAgentStore = defineStore('agent', () => {
       }
 
       activeStep.value = 'layout';
-      await runExecutor();
+      await runExecutor({ resume: options.resume || resumeStage.value === 'layout', embedded: true });
+      if (isPaused.value) return;
 
       activeStep.value = 'preview';
+      clearPauseState();
 
       toastStore.success('PPT 生成完成', '可以在预览区查看结果');
     } catch (error) {
-      toastStore.error('PPT 生成失败', error instanceof Error ? error.message : '未知错误');
+      const errMsg = error instanceof Error ? error.message : '未知错误';
+      pushLog(`PPT 生成失败：${errMsg}`);
+      syncToProject();
+      toastStore.error('PPT 生成失败', errMsg);
     } finally {
-      isRunning.value = false;
+      if (!isPaused.value) {
+        isRunning.value = false;
+      }
       streamingText.value = '';
       currentGeneratingSlide.value = null;
     }
@@ -1330,7 +1663,10 @@ export const useAgentStore = defineStore('agent', () => {
       toastStore.success('导出成功', `${artifact.name} 已准备好`);
     } catch (error) {
       setStepStatus('preview', 'idle', 0);
-      toastStore.error('导出失败', error instanceof Error ? error.message : '未知错误');
+      const errMsg = error instanceof Error ? error.message : '未知错误';
+      pushLog(`导出失败：${errMsg}`);
+      syncToProject();
+      toastStore.error('导出失败', errMsg);
       throw error;
     }
   }
@@ -1427,6 +1763,33 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
+  async function fetchPptProjects() {
+    try {
+      const response = await projectApi.getAll();
+      if (response.success && response.data) {
+        const remoteProjects: PptProject[] = response.data.map((project: any) => {
+          const projectState = project.state
+            ? (typeof project.state === 'string' ? JSON.parse(project.state) : project.state)
+            : null;
+
+          return {
+            id: String(project.id),
+            title: project.title || '未命名 PPT',
+            topic: project.topic || '',
+            description: project.content || '',
+            templateId: 'auto',
+            createdAt: new Date(project.created_at).getTime(),
+            updatedAt: new Date(project.updated_at).getTime(),
+            state: projectState || makeDefaultProjectState(),
+          };
+        });
+        pptProjects.value = mergePptProjects([...remoteProjects, ...pptProjects.value], activePptId.value);
+      }
+    } catch (error) {
+      console.error('加载 PPT 项目失败:', error);
+    }
+  }
+
   function applyGalleryTemplate(template: { id: number | string; name: string; category?: string | null }) {
     const templateId = String(template.id);
     const style = mapTemplateToStyle(templateId);
@@ -1507,13 +1870,15 @@ export const useAgentStore = defineStore('agent', () => {
       outline.value = snapshot.outline || [];
       images.value = snapshot.images || [];
       skills.value = snapshot.skills || cloneSkills();
-      pptProjects.value = (snapshot.pptProjects || []).map((p: any) => ({
+      const restoredProjects = (snapshot.pptProjects || []).map((p: any) => ({
         ...p,
+        id: String(p.id),
         state: p.state ? {
           ...p.state,
           input: { ...p.state.input, files: [] }
         } : makeDefaultProjectState()
       }));
+      pptProjects.value = mergePptProjects([...pptProjects.value, ...restoredProjects], snapshot.activePptId || activePptId.value);
       activePptId.value = snapshot.activePptId || null;
       const restoredSteps = (snapshot.steps || cloneSteps()).map((s: WorkflowStep) => ({
         ...s,
@@ -1562,8 +1927,10 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function initializeData() {
+    await fetchPptProjects();
     const restored = await restoreWorkflow();
     await Promise.all([fetchPrompts(), fetchSkills(), fetchTemplates()]);
+    await fetchPptProjects();
     isDataLoaded.value = true;
     if (restored) {
       pushLog('已恢复上次保存的工作流数据。');
@@ -1589,6 +1956,10 @@ export const useAgentStore = defineStore('agent', () => {
     exportArtifacts,
     activityLog,
     isRunning,
+    isPaused,
+    pauseRequested,
+    resumeStage,
+    executorCursor,
     streamingText,
     designSpec,
     specLock,
@@ -1613,7 +1984,12 @@ export const useAgentStore = defineStore('agent', () => {
     addSampleOutline,
     exportCurrentDeck,
     runFullWorkflow,
+    runInputStage,
+    requestPauseWorkflow,
+    continueWorkflow,
+    resumeRecoveredWorkflow,
     runImages,
+    retrySlideImage,
     runLayout,
     runOutline,
     runSkills,

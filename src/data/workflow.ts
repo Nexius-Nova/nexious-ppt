@@ -43,7 +43,7 @@ export const defaultSkills: SkillDefinition[] = [
     id: 'speaker-notes',
     name: '讲稿生成',
     description: '辅助生成每页演讲备注与自然转场。',
-    enabled: true,
+    enabled: false,
     order: 1,
     params: {
       style: 'professional',

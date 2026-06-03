@@ -26,6 +26,32 @@ import {
 
 const router = Router();
 
+function normalizeProjectText(value: unknown): string {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function isSameProjectIdentity(
+  left: { title: unknown; topic: unknown },
+  right: { title: unknown; topic: unknown }
+): boolean {
+  const leftTitle = normalizeProjectText(left.title);
+  const rightTitle = normalizeProjectText(right.title);
+  if (!leftTitle || leftTitle !== rightTitle) return false;
+
+  const leftTopic = normalizeProjectText(left.topic);
+  const rightTopic = normalizeProjectText(right.topic);
+  return leftTopic === rightTopic || !leftTopic || !rightTopic;
+}
+
+async function findReusableProjectId(userId: number, title: unknown, topic: unknown): Promise<number | null> {
+  if (!normalizeProjectText(title)) return null;
+
+  const projects = await getProjectsByUserId(userId);
+  const match = projects.find((project) => isSameProjectIdentity(project, { title, topic }));
+
+  return match?.id || null;
+}
+
 router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     if (!req.userId) {
@@ -162,6 +188,15 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       });
     }
 
+    const reusableProjectId = await findReusableProjectId(req.userId, title, topic);
+    if (reusableProjectId) {
+      return res.json({
+        success: true,
+        data: { id: reusableProjectId, reused: true },
+        message: '已复用已有项目'
+      });
+    }
+
     const projectId = await createProject({
       user_id: req.userId,
       title,
@@ -202,10 +237,21 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     if (!existingProject || existingProject.user_id !== req.userId) {
       const { title, topic, content, status, settings, state } = req.body;
       const fallbackTitle = title || state?.input?.topic || topic || '未命名 PPT';
+      const fallbackTopic = topic || state?.input?.topic || '';
+      const reusableProjectId = await findReusableProjectId(req.userId, fallbackTitle, fallbackTopic);
+
+      if (reusableProjectId) {
+        return res.json({
+          success: true,
+          data: { id: reusableProjectId, replacedMissingId: projectId, reused: true },
+          message: '原项目不存在，已复用已有项目'
+        });
+      }
+
       const newProjectId = await createProject({
         user_id: req.userId,
         title: fallbackTitle,
-        topic: topic || state?.input?.topic || '',
+        topic: fallbackTopic,
         content: content || state?.input?.content || '',
         status: status || 'draft',
         settings,
