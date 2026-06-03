@@ -1,16 +1,35 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-import { Check, AlertTriangle, Trash2, Plus, Edit3, X, CheckCircle2, Zap, Loader2, Cpu, Image, Key, Eye, EyeOff } from 'lucide-vue-next';
-import { ref, onMounted } from 'vue';
-import UiCard from '@/components/ui/UiCard.vue';
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  Cpu,
+  Edit3,
+  Eye,
+  EyeOff,
+  Image,
+  Key,
+  Loader2,
+  Plus,
+  ShieldCheck,
+  Trash2,
+  X,
+  Zap
+} from 'lucide-vue-next';
+import { computed, ref, onMounted } from 'vue';
+import UiAlert from '@/components/ui/UiAlert.vue';
+import UiBadge from '@/components/ui/UiBadge.vue';
+import UiButton from '@/components/ui/UiButton.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
-import UiButton from '@/components/ui/UiButton.vue';
-import UiBadge from '@/components/ui/UiBadge.vue';
-import UiAlert from '@/components/ui/UiAlert.vue';
 import { useApiKeyStore } from '@/stores/apiKeyStore';
 import { useToastStore } from '@/stores/toastStore';
 import { aiApi } from '@/services/api';
+import type { ImageModelConfig, TextModelConfig } from '@/types/agent';
+
+type ModelType = 'text' | 'image';
+type ManagedModel = TextModelConfig | ImageModelConfig;
 
 const apiKeyStore = useApiKeyStore();
 const toastStore = useToastStore();
@@ -19,32 +38,32 @@ const {
   imageModels,
   activeTextModel,
   activeImageModel,
-  isTextModelConfigured,
-  isImageModelConfigured,
   isFullyConfigured,
   loading,
   initialized
 } = storeToRefs(apiKeyStore);
 
-const activeTab = ref<'text' | 'image'>('text');
-
+const activeTab = ref<ModelType>('text');
 const showModal = ref(false);
-const editingModel = ref<any>(null);
+const editingModel = ref<(ManagedModel & { type: ModelType }) | null>(null);
 const formData = ref({
   name: '',
   model: '',
   apiKey: '',
   baseUrl: '',
-  type: 'text' as 'text' | 'image'
+  type: 'text' as ModelType
 });
-
 const showApiKey = ref(false);
+const testingModel = ref<string | null>(null);
+
+const currentModels = computed<ManagedModel[]>(() => activeTab.value === 'text' ? textModels.value : imageModels.value);
+const currentActiveModel = computed<ManagedModel | undefined>(() => activeTab.value === 'text' ? activeTextModel.value : activeImageModel.value);
 
 onMounted(() => {
   apiKeyStore.fetchApiKeys();
 });
 
-function openCreateModal(type: 'text' | 'image') {
+function openCreateModal(type: ModelType) {
   editingModel.value = null;
   formData.value = {
     name: '',
@@ -56,7 +75,7 @@ function openCreateModal(type: 'text' | 'image') {
   showModal.value = true;
 }
 
-function openEditModal(model: any, type: 'text' | 'image') {
+function openEditModal(model: ManagedModel, type: ModelType) {
   editingModel.value = { ...model, type };
   formData.value = {
     name: model.name,
@@ -79,12 +98,12 @@ async function saveModel() {
     toastStore.warning('请填写名称', '名称不能为空');
     return;
   }
-  
+
   if (!formData.value.model.trim()) {
     toastStore.warning('请填写模型名称', '模型名称不能为空');
     return;
   }
-  
+
   if (!editingModel.value && !formData.value.apiKey) {
     toastStore.warning('请填写 API Key', 'API Key 不能为空');
     return;
@@ -117,51 +136,41 @@ async function saveModel() {
   closeModal();
 }
 
-async function deleteTextModel(id: string) {
-  await apiKeyStore.deleteTextModel(id);
+async function deleteModel(model: ManagedModel) {
+  if (activeTab.value === 'text') {
+    await apiKeyStore.deleteTextModel(model.id);
+  } else {
+    await apiKeyStore.deleteImageModel(model.id);
+  }
 }
 
-async function deleteImageModel(id: string) {
-  await apiKeyStore.deleteImageModel(id);
+async function setActiveModel(model: ManagedModel) {
+  if (activeTab.value === 'text') {
+    await apiKeyStore.setActiveTextModel(model.id);
+  } else {
+    await apiKeyStore.setActiveImageModel(model.id);
+  }
 }
 
-async function setActiveTextModel(id: string) {
-  await apiKeyStore.setActiveTextModel(id);
-}
-
-async function setActiveImageModel(id: string) {
-  await apiKeyStore.setActiveImageModel(id);
-}
-
-const testingModel = ref<string | null>(null);
-
-async function testModel(model: any, type: 'text' | 'image') {
+async function testModel(model: ManagedModel, type: ModelType) {
   testingModel.value = model.id;
   try {
     if (type === 'text') {
       const originalActive = activeTextModel.value?.id;
       await apiKeyStore.setActiveTextModel(model.id);
       const response = await aiApi.testTextModel();
-      if (originalActive) {
-        await apiKeyStore.setActiveTextModel(originalActive);
-      }
-      if (response.success) {
-        toastStore.success('测试成功', response.message || '连接成功');
-      } else {
-        toastStore.error('测试失败', response.message || '未知错误');
-      }
+      if (originalActive) await apiKeyStore.setActiveTextModel(originalActive);
+      response.success
+        ? toastStore.success('测试成功', response.message || '连接成功')
+        : toastStore.error('测试失败', response.message || '未知错误');
     } else {
       const originalActive = activeImageModel.value?.id;
       await apiKeyStore.setActiveImageModel(model.id);
       const response = await aiApi.testImageModel();
-      if (originalActive) {
-        await apiKeyStore.setActiveImageModel(originalActive);
-      }
-      if (response.success) {
-        toastStore.success('测试成功', response.message || '连接成功');
-      } else {
-        toastStore.error('测试失败', response.message || '未知错误');
-      }
+      if (originalActive) await apiKeyStore.setActiveImageModel(originalActive);
+      response.success
+        ? toastStore.success('测试成功', response.message || '连接成功')
+        : toastStore.error('测试失败', response.message || '未知错误');
     }
   } catch (error) {
     toastStore.error('测试失败', error instanceof Error ? error.message : '未知错误');
@@ -169,198 +178,178 @@ async function testModel(model: any, type: 'text' | 'image') {
     testingModel.value = null;
   }
 }
+
+function formatDate(timestamp: number) {
+  if (!timestamp) return '暂无记录';
+  return new Date(timestamp).toLocaleDateString('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function getProviderLabel(model: ManagedModel) {
+  return model.provider === 'custom' ? '自定义' : String(model.provider || '未知');
+}
 </script>
 
 <template>
   <div class="model-page">
-    <div class="page-header">
-      <div class="page-header__info">
-        <h2>模型管理</h2>
-        <p>配置和管理 AI 文本模型与图像模型</p>
+    <section class="model-hero">
+      <div class="model-hero__copy">
+        <span class="model-hero__eyebrow">模型管理</span>
+        <h2>管理 PPT 生成所需的模型连接</h2>
+        <p>文本模型负责理解和生成内容，图像模型负责页面配图。这里只管理连接，不参与工作流风格选择。</p>
       </div>
-      <div class="page-header__status">
-        <component
-          :is="isFullyConfigured ? Check : AlertTriangle"
-          :size="16"
-          :class="isFullyConfigured ? 'status-icon--success' : 'status-icon--warning'"
-        />
-        <span>{{ isFullyConfigured ? '已配置完成' : '需要配置' }}</span>
+      <div class="model-hero__status" :class="{ 'model-hero__status--ready': isFullyConfigured }">
+        <component :is="isFullyConfigured ? ShieldCheck : AlertTriangle" :size="20" />
+        <div>
+          <strong>{{ isFullyConfigured ? '可正常生成' : '需要补齐配置' }}</strong>
+          <span>{{ isFullyConfigured ? '文本和图像模型均已配置' : '至少配置一个文本模型和一个图像模型' }}</span>
+        </div>
       </div>
-    </div>
+    </section>
 
-    <UiAlert v-if="!isFullyConfigured && initialized" tone="warning" title="需要配置模型">
-      请配置文本模型和图像模型，以便正常使用 AI PPT 生成功能。
+    <UiAlert v-if="!isFullyConfigured && initialized" tone="warning" title="模型配置未完成">
+      请至少配置一个文本模型和一个图像模型，避免生成 PPT 时中断。
     </UiAlert>
 
-    <div class="tabs">
-      <button 
-        class="tab" 
-        :class="{ 'tab--active': activeTab === 'text' }"
-        @click="activeTab = 'text'"
-      >
-        <Cpu :size="16" />
-        文本模型
-        <UiBadge v-if="textModels.length > 0" tone="info" size="sm">{{ textModels.length }}</UiBadge>
-      </button>
-      <button 
-        class="tab" 
-        :class="{ 'tab--active': activeTab === 'image' }"
-        @click="activeTab = 'image'"
-      >
-        <Image :size="16" />
-        图像模型
-        <UiBadge v-if="imageModels.length > 0" tone="info" size="sm">{{ imageModels.length }}</UiBadge>
-      </button>
-    </div>
+    <section class="model-workbench">
+      <main class="model-list-panel">
+        <div class="model-list-panel__header">
+          <div>
+            <h3>{{ activeTab === 'text' ? '文本模型列表' : '图像模型列表' }}</h3>
+            <p>选择默认连接，或测试、编辑已有模型。</p>
+          </div>
+          <div class="model-list-panel__tools">
+            <div class="model-tabs" aria-label="模型类型">
+              <button
+                type="button"
+                :class="{ 'model-tabs__item--active': activeTab === 'text' }"
+                @click="activeTab = 'text'"
+              >
+                <Cpu :size="14" />
+                文本
+                <span>{{ textModels.length }}</span>
+              </button>
+              <button
+                type="button"
+                :class="{ 'model-tabs__item--active': activeTab === 'image' }"
+                @click="activeTab = 'image'"
+              >
+                <Image :size="14" />
+                图像
+                <span>{{ imageModels.length }}</span>
+              </button>
+            </div>
+            <UiButton variant="secondary" size="sm" @click="openCreateModal(activeTab)">
+              <Plus :size="13" />
+              添加
+            </UiButton>
+          </div>
+        </div>
 
-    <template v-if="activeTab === 'text'">
-      <div v-if="loading" class="loading-state">
-        加载中...
-      </div>
-      
-      <div v-else class="model-list">
-        <div 
-          v-for="model in textModels" 
-          :key="model.id" 
-          class="model-card"
-          :class="{ 'model-card--active': model.id === activeTextModel?.id }"
-        >
-          <div class="model-card-header">
-            <div class="model-card-info">
-              <h4>{{ model.name }}</h4>
-              <div class="model-card-meta">
-                <span class="model-name">{{ model.model }}</span>
+        <div v-if="loading" class="loading-state">
+          <Loader2 :size="16" class="animate-spin" />
+          正在加载模型配置
+        </div>
+
+        <div v-else-if="currentModels.length === 0" class="empty-models">
+          <component :is="activeTab === 'text' ? Cpu : Image" :size="28" />
+          <strong>还没有{{ activeTab === 'text' ? '文本' : '图像' }}模型</strong>
+          <span>添加一个模型后即可用于 PPT 生成。</span>
+          <UiButton variant="primary" size="sm" @click="openCreateModal(activeTab)">
+            <Plus :size="13" />
+            添加模型
+          </UiButton>
+        </div>
+
+        <div v-else class="model-list">
+          <article
+            v-for="model in currentModels"
+            :key="model.id"
+            class="model-card"
+          >
+            <div class="model-card__main">
+              <div class="model-card__mark">
+                <component :is="activeTab === 'text' ? Cpu : Image" :size="18" />
+              </div>
+              <div class="model-card__content">
+                <div class="model-card__title-row">
+                  <h4>{{ model.name }}</h4>
+                  <UiBadge v-if="model.id === currentActiveModel?.id" tone="accent" size="sm">当前使用</UiBadge>
+                </div>
+                <div class="model-card__meta">
+                  <code>{{ model.model }}</code>
+                  <span>{{ getProviderLabel(model) }}</span>
+                  <span>{{ model.baseUrl || '默认地址' }}</span>
+                </div>
               </div>
             </div>
-            <div class="model-card-actions">
-              <button 
-                v-if="model.id !== activeTextModel?.id" 
-                class="btn-icon" 
+
+            <div class="model-card__state">
+              <UiBadge :tone="model.hasKey ? 'success' : 'warning'" size="sm">
+                {{ model.hasKey ? '密钥已保存' : '缺少密钥' }}
+              </UiBadge>
+              <span>更新于 {{ formatDate(model.updatedAt) }}</span>
+            </div>
+
+            <div class="model-card__actions">
+              <button
+                v-if="model.id !== currentActiveModel?.id"
+                class="icon-button"
                 title="设为当前使用"
-                @click="setActiveTextModel(model.id)"
+                @click="setActiveModel(model)"
               >
                 <CheckCircle2 :size="14" />
               </button>
-              <button 
-                class="btn-icon btn-icon--test" 
+              <button
+                class="icon-button icon-button--test"
                 title="测试连接"
                 :disabled="testingModel === model.id"
-                @click="testModel(model, 'text')"
+                @click="testModel(model, activeTab)"
               >
                 <Loader2 v-if="testingModel === model.id" :size="14" class="animate-spin" />
                 <Zap v-else :size="14" />
               </button>
-              <button class="btn-icon" title="编辑" @click="openEditModal(model, 'text')">
+              <button class="icon-button" title="编辑" @click="openEditModal(model, activeTab)">
                 <Edit3 :size="14" />
               </button>
-              <button 
-                v-if="textModels.length > 1" 
-                class="btn-icon btn-icon--danger" 
+              <button
+                v-if="currentModels.length > 1"
+                class="icon-button icon-button--danger"
                 title="删除"
-                @click="deleteTextModel(model.id)"
+                @click="deleteModel(model)"
               >
                 <Trash2 :size="14" />
               </button>
             </div>
-          </div>
-          <div class="model-card-status">
-            <UiBadge :tone="model.hasKey ? 'success' : 'warning'" size="sm">
-              {{ model.hasKey ? '已配置' : '未配置' }}
-            </UiBadge>
-          </div>
+          </article>
         </div>
-      </div>
-
-      <UiButton class="add-btn" @click="openCreateModal('text')">
-        <Plus :size="14" />
-        添加文本模型
-      </UiButton>
-    </template>
-
-    <template v-if="activeTab === 'image'">
-      <div v-if="loading" class="loading-state">
-        加载中...
-      </div>
-      
-      <div v-else class="model-list">
-        <div 
-          v-for="model in imageModels" 
-          :key="model.id" 
-          class="model-card"
-          :class="{ 'model-card--active': model.id === activeImageModel?.id }"
-        >
-          <div class="model-card-header">
-            <div class="model-card-info">
-              <h4>{{ model.name }}</h4>
-              <div class="model-card-meta">
-                <span class="model-name">{{ model.model }}</span>
-              </div>
-            </div>
-            <div class="model-card-actions">
-              <button 
-                v-if="model.id !== activeImageModel?.id" 
-                class="btn-icon" 
-                title="设为当前使用"
-                @click="setActiveImageModel(model.id)"
-              >
-                <CheckCircle2 :size="14" />
-              </button>
-              <button 
-                class="btn-icon btn-icon--test" 
-                title="测试连接"
-                :disabled="testingModel === model.id"
-                @click="testModel(model, 'image')"
-              >
-                <Loader2 v-if="testingModel === model.id" :size="14" class="animate-spin" />
-                <Zap v-else :size="14" />
-              </button>
-              <button class="btn-icon" title="编辑" @click="openEditModal(model, 'image')">
-                <Edit3 :size="14" />
-              </button>
-              <button 
-                v-if="imageModels.length > 1" 
-                class="btn-icon btn-icon--danger" 
-                title="删除"
-                @click="deleteImageModel(model.id)"
-              >
-                <Trash2 :size="14" />
-              </button>
-            </div>
-          </div>
-          <div class="model-card-status">
-            <UiBadge :tone="model.hasKey ? 'success' : 'warning'" size="sm">
-              {{ model.hasKey ? '已配置' : '未配置' }}
-            </UiBadge>
-          </div>
-        </div>
-      </div>
-
-      <UiButton class="add-btn" @click="openCreateModal('image')">
-        <Plus :size="14" />
-        添加图像模型
-      </UiButton>
-    </template>
+      </main>
+    </section>
 
     <Teleport to="body">
       <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
         <div class="modal">
           <div class="modal__header">
-            <h3>{{ editingModel ? '编辑模型' : `添加${formData.type === 'text' ? '文本' : '图像'}模型` }}</h3>
-            <button class="modal__close" @click="closeModal">×</button>
+            <div>
+              <h3>{{ editingModel ? '编辑模型' : `添加${formData.type === 'text' ? '文本' : '图像'}模型` }}</h3>
+              <p>{{ formData.type === 'text' ? '用于大纲、页面和文案生成' : '用于生成页面配图' }}</p>
+            </div>
+            <button class="modal__close" @click="closeModal">
+              <X :size="16" />
+            </button>
           </div>
+
           <div class="modal__body">
             <UiField label="名称" required>
-              <UiInput
-                v-model="formData.name"
-                placeholder="例如：GPT-4o 主力"
-              />
+              <UiInput v-model="formData.name" placeholder="例如：GPT-4o 主力" />
             </UiField>
 
             <UiField label="模型名称" required>
-              <UiInput
-                v-model="formData.model"
-                placeholder="例如：gpt-4o、dall-e-3"
-              />
+              <UiInput v-model="formData.model" placeholder="例如：gpt-4o、dall-e-3" />
             </UiField>
 
             <UiField :label="editingModel ? 'API Key（留空保持不变）' : 'API Key'" :required="!editingModel">
@@ -372,10 +361,7 @@ async function testModel(model: any, type: 'text' | 'image') {
                   :placeholder="editingModel ? '留空保持不变' : 'sk-...'"
                   class="api-key-input__field"
                 />
-                <button 
-                  class="api-key-input__toggle"
-                  @click="showApiKey = !showApiKey"
-                >
+                <button type="button" class="api-key-input__toggle" @click="showApiKey = !showApiKey">
                   <Eye v-if="!showApiKey" :size="14" />
                   <EyeOff v-else :size="14" />
                 </button>
@@ -383,15 +369,14 @@ async function testModel(model: any, type: 'text' | 'image') {
             </UiField>
 
             <UiField label="Base URL">
-              <UiInput
-                v-model="formData.baseUrl"
-                placeholder="https://api.example.com/v1"
-              />
+              <UiInput v-model="formData.baseUrl" placeholder="https://api.example.com/v1" />
             </UiField>
           </div>
+
           <div class="modal__footer">
             <UiButton variant="secondary" @click="closeModal">取消</UiButton>
             <UiButton @click="saveModel">
+              <Check :size="14" />
               {{ editingModel ? '保存' : '添加' }}
             </UiButton>
           </div>
@@ -405,191 +390,334 @@ async function testModel(model: any, type: 'text' | 'image') {
 .model-page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 20px;
+  gap: 18px;
   width: 100%;
+  padding: 20px;
   margin: 0 auto;
 }
 
-.page-header {
+.model-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  gap: 16px;
+  align-items: stretch;
+  padding: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.model-hero__copy {
+  min-width: 0;
+}
+
+.model-hero__eyebrow {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.model-hero h2 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 24px;
+  line-height: 1.25;
+}
+
+.model-hero p {
+  max-width: 660px;
+  margin: 8px 0 0;
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.model-hero__status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.model-hero__status--ready {
+  color: var(--color-success);
+  background: var(--color-success-soft);
+}
+
+.model-hero__status strong,
+.model-hero__status span {
+  display: block;
+}
+
+.model-hero__status strong {
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.model-hero__status span {
+  margin-top: 3px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.model-workbench {
+  display: block;
+}
+
+.model-list-panel {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--color-surface);
+}
+
+.model-list-panel__header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
-.page-header__info h2 {
+.model-list-panel h3 {
   margin: 0;
-  font-size: 24px;
-  font-weight: 700;
   color: var(--color-text);
+  font-size: 15px;
 }
 
-.page-header__info p {
-  margin: 4px 0 0;
-  font-size: 14px;
-  color: var(--color-subtle);
+.model-list-panel p {
+  margin: 5px 0 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
-.page-header__status {
+.model-list-panel__tools {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--color-panel);
-  font-size: 13px;
-  color: var(--color-muted);
+  gap: 10px;
 }
 
-.status-icon--success {
-  color: var(--color-success);
-}
-
-.status-icon--warning {
-  color: var(--color-warning);
-}
-
-.tabs {
-  display: flex;
-  gap: 4px;
-  padding: 4px;
+.model-tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--color-panel);
 }
 
-.tab {
-  flex: 1;
-  display: flex;
+.model-tabs button {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 10px 16px;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
   border: none;
-  border-radius: 8px;
-  background: transparent;
+  border-radius: 6px;
   color: var(--color-muted);
-  font-size: 14px;
-  font-weight: 500;
+  background: transparent;
+  font-size: 12px;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 
-.tab:hover {
+.model-tabs button:hover {
   color: var(--color-text);
   background: var(--color-surface);
 }
 
-.tab--active {
-  background: var(--color-surface);
-  color: var(--color-text);
+.model-tabs__item--active {
+  color: var(--color-text) !important;
+  background: var(--color-surface) !important;
   box-shadow: var(--shadow-sm);
 }
 
-.loading-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 40px;
+.model-tabs span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--color-subtle);
+  background: var(--color-card);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.loading-state,
+.empty-models {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 220px;
   color: var(--color-muted);
-  font-size: 14px;
+  font-size: 13px;
+}
+
+.empty-models {
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-panel);
+  text-align: center;
+}
+
+.empty-models strong {
+  color: var(--color-text);
+  font-size: 15px;
+}
+
+.empty-models span {
+  color: var(--color-muted);
+  font-size: 12px;
 }
 
 .model-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  gap: 10px;
 }
 
 .model-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  padding: 14px;
   border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-surface);
-  padding: 16px;
-  transition: all var(--transition-fast);
+  border-radius: 8px;
+  background: var(--color-card);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
 .model-card:hover {
   border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
-.model-card--active {
-  border-color: var(--color-accent);
-  background: var(--color-accent-soft);
-}
-
-.model-card-header {
+.model-card__main {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
   gap: 12px;
+  min-width: 0;
+  align-items: flex-start;
 }
 
-.model-card-info h4 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
+.model-card__mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-accent);
+  background: var(--color-panel);
 }
 
-.model-card-meta {
+.model-card__content,
+.model-card__title-row,
+.model-card__meta {
+  min-width: 0;
+}
+
+.model-card__title-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 4px;
-  font-size: 12px;
+}
+
+.model-card h4 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
   color: var(--color-muted);
+  font-size: 12px;
 }
 
-.model-name {
+.model-card__meta code,
+.model-card__meta span {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-card__meta code {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text);
+  background: var(--color-panel);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.model-card__state {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  min-width: 110px;
   color: var(--color-subtle);
+  font-size: 11px;
 }
 
-.model-card-actions {
+.model-card__actions {
   display: flex;
   gap: 4px;
 }
 
-.model-card-status {
-  margin-top: 12px;
-}
-
-.btn-icon {
+.icon-button {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
+  border-radius: 8px;
   color: var(--color-muted);
+  background: var(--color-surface);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
 }
 
-.btn-icon:hover:not(:disabled) {
+.icon-button:hover:not(:disabled) {
   border-color: var(--color-border-strong);
   color: var(--color-text);
+  background: var(--color-panel);
 }
 
-.btn-icon--danger:hover:not(:disabled) {
-  border-color: var(--color-danger);
-  color: var(--color-danger);
-}
-
-.btn-icon--test:hover:not(:disabled) {
+.icon-button--test:hover:not(:disabled) {
   border-color: var(--color-accent);
   color: var(--color-accent);
 }
 
-.btn-icon:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.icon-button--danger:hover:not(:disabled) {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
-.add-btn {
-  align-self: flex-start;
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .animate-spin {
@@ -597,9 +725,6 @@ async function testModel(model: any, type: 'text' | 'image') {
 }
 
 @keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
   to {
     transform: rotate(360deg);
   }
@@ -612,64 +737,68 @@ async function testModel(model: any, type: 'text' | 'image') {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 16px;
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(4px);
 }
 
 .modal {
-  width: 100%;
-  max-width: 480px;
+  width: min(100%, 500px);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--color-surface);
   box-shadow: var(--shadow-panel);
 }
 
 .modal__header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  gap: 12px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--color-border);
 }
 
 .modal__header h3 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
   color: var(--color-text);
+  font-size: 16px;
+}
+
+.modal__header p {
+  margin: 4px 0 0;
+  color: var(--color-muted);
+  font-size: 12px;
 }
 
 .modal__close {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   color: var(--color-muted);
-  font-size: 20px;
+  background: transparent;
   cursor: pointer;
-  transition: all var(--transition-fast);
 }
 
 .modal__close:hover {
-  background: var(--color-panel);
+  border-color: var(--color-border);
   color: var(--color-text);
+  background: var(--color-panel);
 }
 
 .modal__body {
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: 16px;
+  padding: 20px;
 }
 
 .modal__footer {
   display: flex;
-  gap: 8px;
   justify-content: flex-end;
+  gap: 8px;
   padding: 16px 20px;
   border-top: 1px solid var(--color-border);
 }
@@ -688,18 +817,19 @@ async function testModel(model: any, type: 'text' | 'image') {
 
 .api-key-input__field {
   width: 100%;
-  padding: 8px 72px 8px 36px;
+  padding: 9px 44px 9px 36px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: var(--color-panel);
   color: var(--color-text);
+  background: var(--color-panel);
   font-size: 13px;
-  transition: all var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
 }
 
 .api-key-input__field:focus {
   outline: none;
   border-color: var(--color-accent);
+  background: var(--color-surface);
 }
 
 .api-key-input__toggle {
@@ -711,13 +841,59 @@ async function testModel(model: any, type: 'text' | 'image') {
   height: 28px;
   border: none;
   border-radius: 6px;
-  background: transparent;
   color: var(--color-muted);
+  background: transparent;
   cursor: pointer;
-  transition: all var(--transition-fast);
 }
 
 .api-key-input__toggle:hover {
   color: var(--color-text);
+  background: var(--color-surface);
+}
+
+@media (max-width: 980px) {
+  .model-hero {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .model-page {
+    padding: 14px;
+  }
+
+  .model-list-panel__header,
+  .model-list-panel__tools,
+  .model-card,
+  .model-card__state {
+    align-items: stretch;
+  }
+
+  .model-list-panel__header,
+  .model-list-panel__tools {
+    flex-direction: column;
+  }
+
+  .model-tabs,
+  .model-list-panel__tools :deep(.ui-button) {
+    width: 100%;
+  }
+
+  .model-tabs button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .model-card {
+    grid-template-columns: 1fr;
+  }
+
+  .model-card__state {
+    justify-items: start;
+  }
+
+  .model-card__actions {
+    justify-content: flex-start;
+  }
 }
 </style>
