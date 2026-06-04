@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ChevronLeft, ChevronRight, FileText, MessageSquare, Zap, Cpu, LayoutGrid, Settings2 } from 'lucide-vue-next';
+import {
+  ChevronLeft,
+  ChevronRight,
+  Cpu,
+  FileText,
+  LayoutGrid,
+  MessageSquare,
+  Settings2,
+  UserCircle,
+  Zap
+} from 'lucide-vue-next';
 
 const route = useRoute();
 const router = useRouter();
@@ -19,8 +29,9 @@ const menuItems = [
   { label: '提示词管理', icon: MessageSquare, route: '/prompts', step: 'prompts', group: '功能模块' },
   { label: 'Skill 管理', icon: Zap, route: '/skills', step: 'skills', group: '功能模块' },
   { label: '模型管理', icon: Cpu, route: '/models', step: 'models', group: '功能模块' },
-  { label: '模版广场', icon: LayoutGrid, route: '/templates', step: 'templates', group: '功能模块' },
-  { label: '运行配置', icon: Settings2, route: '/config', step: 'config', group: '功能模块' }
+  { label: '模板广场', icon: LayoutGrid, route: '/templates', step: 'templates', group: '功能模块' },
+  { label: '运行配置', icon: Settings2, route: '/config', step: 'config', group: '功能模块' },
+  { label: '个人中心', icon: UserCircle, route: '/profile', step: 'profile', group: '账号' }
 ];
 
 const groupedItems = computed(() => {
@@ -44,8 +55,8 @@ function isActive(itemStep: string): boolean {
   return false;
 }
 
-function navigateTo(route: string) {
-  router.push(route);
+function navigateTo(routePath: string) {
+  void router.push(routePath);
 }
 </script>
 
@@ -58,7 +69,7 @@ function navigateTo(route: string) {
         <path d="M7 15L9.5 12.5L12 15L14.5 12.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.6" />
       </svg>
       <span>NEXIOUS PPT</span>
-      <button class="side-nav__collapse" :title="collapsed ? '展开左侧菜单' : '收缩左侧菜单'" @click="$emit('toggleCollapse')">
+      <button class="side-nav__collapse" :title="collapsed ? '展开左侧菜单' : '收起左侧菜单'" @click="$emit('toggleCollapse')">
         <component :is="collapsed ? ChevronRight : ChevronLeft" :size="14" />
       </button>
     </div>

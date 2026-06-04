@@ -90,6 +90,36 @@ async function migrate(): Promise<void> {
       console.log('⏭️ version_snapshots 表已存在，跳过');
     }
 
+    const [generationJobTables] = await connection.query(
+      "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'generation_jobs'"
+    );
+
+    if ((generationJobTables as any[]).length === 0) {
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS \`generation_jobs\` (
+          \`id\` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          \`user_id\` BIGINT UNSIGNED NOT NULL,
+          \`project_id\` VARCHAR(100) NOT NULL,
+          \`title\` VARCHAR(255) DEFAULT NULL,
+          \`status\` ENUM('queued', 'running', 'completed', 'failed', 'cancelled') NOT NULL DEFAULT 'queued',
+          \`phase\` VARCHAR(50) NOT NULL DEFAULT 'queued',
+          \`progress\` INT UNSIGNED NOT NULL DEFAULT 0,
+          \`error_message\` TEXT DEFAULT NULL,
+          \`metadata\` JSON DEFAULT NULL,
+          \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          \`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          \`completed_at\` TIMESTAMP NULL DEFAULT NULL,
+          PRIMARY KEY (\`id\`),
+          KEY \`idx_generation_jobs_user_project\` (\`user_id\`, \`project_id\`),
+          KEY \`idx_generation_jobs_user_status\` (\`user_id\`, \`status\`),
+          KEY \`idx_generation_jobs_updated_at\` (\`updated_at\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+      console.log('generation_jobs table created');
+    } else {
+      console.log('generation_jobs table exists, skipped');
+    }
+
     console.log('🎉 数据库迁移完成！');
   } catch (error) {
     console.error('❌ 数据库迁移失败:', error);

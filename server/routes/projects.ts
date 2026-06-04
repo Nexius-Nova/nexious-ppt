@@ -30,6 +30,23 @@ function normalizeProjectText(value: unknown): string {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function isDuplicateEntryError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    (error as { code?: string }).code === 'ER_DUP_ENTRY'
+  );
+}
+
+function duplicateProjectNameResponse(res: Response, title: unknown) {
+  const projectTitle = String(title || '').trim() || '当前名称';
+  return res.status(409).json({
+    success: false,
+    code: 'PROJECT_NAME_DUPLICATED',
+    message: `项目名称「${projectTitle}」已存在，请换一个名称`
+  });
+}
+
 function isSameProjectIdentity(
   left: { title: unknown; topic: unknown },
   right: { title: unknown; topic: unknown }
@@ -193,7 +210,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const { title, topic, content, status, settings, state } = req.body;
 
-    if (!title) {
+    if (!String(title || '').trim()) {
       return res.status(400).json({
         success: false,
         message: '项目标题不能为空'
@@ -202,10 +219,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const duplicateProjectId = await findDuplicateProjectId(req.userId, title);
     if (duplicateProjectId) {
-      return res.status(409).json({
-        success: false,
-        message: `项目名称「${String(title).trim()}」已存在，请换一个名称`
-      });
+      return duplicateProjectNameResponse(res, title);
     }
 
     const projectId = await createProject({
@@ -225,6 +239,9 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('创建项目错误:', error);
+    if (isDuplicateEntryError(error)) {
+      return duplicateProjectNameResponse(res, req.body?.title);
+    }
     res.status(500).json({
       success: false,
       message: '创建项目失败'
@@ -302,10 +319,7 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       }
       const duplicateProjectId = await findDuplicateProjectId(req.userId, updateData.title, projectId);
       if (duplicateProjectId) {
-        return res.status(409).json({
-          success: false,
-          message: `项目名称「${String(updateData.title).trim()}」已存在，请换一个名称`
-        });
+        return duplicateProjectNameResponse(res, updateData.title);
       }
     }
 
@@ -323,6 +337,9 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('更新项目错误:', error);
+    if (isDuplicateEntryError(error)) {
+      return duplicateProjectNameResponse(res, req.body?.title);
+    }
     res.status(500).json({
       success: false,
       message: '更新项目失败'

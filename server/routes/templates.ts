@@ -10,6 +10,23 @@ function normalizeName(value: unknown): string {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function isDuplicateEntryError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    (error as { code?: string }).code === 'ER_DUP_ENTRY'
+  );
+}
+
+function duplicateTemplateNameResponse(res: Response, name: unknown) {
+  const templateName = String(name || '').trim() || '当前名称';
+  return res.status(409).json({
+    success: false,
+    code: 'TEMPLATE_NAME_DUPLICATED',
+    message: `模板名称「${templateName}」已存在，请换一个名称`
+  });
+}
+
 async function findDuplicateTemplate(
   userId: number,
   name: unknown,
@@ -85,7 +102,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     }
     const duplicate = await findDuplicateTemplate(req.userId!, templateName);
     if (duplicate) {
-      return res.status(409).json({ success: false, message: `模版名称「${templateName}」已存在，请换一个名称` });
+      return duplicateTemplateNameResponse(res, templateName);
     }
     const result = await query(
       'INSERT INTO templates (user_id, name, category, description, slide_count, accent, preview_url, settings, is_public) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -98,6 +115,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     res.status(201).json({ success: true, data: newTemplate[0], message: '模版创建成功' });
   } catch (error) {
     console.error('创建模版失败:', error);
+    if (isDuplicateEntryError(error)) {
+      return duplicateTemplateNameResponse(res, req.body?.name);
+    }
     res.status(500).json({ success: false, message: '创建模版失败' });
   }
 });
@@ -118,7 +138,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     }
     const duplicate = await findDuplicateTemplate(req.userId!, templateName, req.params.id);
     if (duplicate) {
-      return res.status(409).json({ success: false, message: `模版名称「${templateName}」已存在，请换一个名称` });
+      return duplicateTemplateNameResponse(res, templateName);
     }
     await query(
       'UPDATE templates SET name = ?, category = ?, description = ?, slide_count = ?, accent = ?, preview_url = ?, settings = ?, is_public = ? WHERE id = ?',
@@ -131,6 +151,9 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     res.json({ success: true, data: updated[0], message: '模版更新成功' });
   } catch (error) {
     console.error('更新模版失败:', error);
+    if (isDuplicateEntryError(error)) {
+      return duplicateTemplateNameResponse(res, req.body?.name);
+    }
     res.status(500).json({ success: false, message: '更新模版失败' });
   }
 });

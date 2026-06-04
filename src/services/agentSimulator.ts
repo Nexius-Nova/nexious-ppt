@@ -69,6 +69,7 @@ export async function generateSlideImages(
   const toastStore = useToastStore();
   const images: GeneratedImage[] = [];
   const total = outline.length;
+  const safeConcurrency = Math.max(1, Math.min(3, Math.floor(concurrency) || 1));
   let completed = 0;
 
   async function processSlide(slide: SlideOutline): Promise<GeneratedImage> {
@@ -135,8 +136,8 @@ export async function generateSlideImages(
   }
 
   const batches: SlideOutline[][] = [];
-  for (let i = 0; i < outline.length; i += concurrency) {
-    batches.push(outline.slice(i, i + concurrency));
+  for (let i = 0; i < outline.length; i += safeConcurrency) {
+    batches.push(outline.slice(i, i + safeConcurrency));
   }
 
   for (const batch of batches) {

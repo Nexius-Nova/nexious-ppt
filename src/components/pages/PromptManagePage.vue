@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Plus, Search, Edit3, Trash2, Copy, FileText, Tag, Eye } from 'lucide-vue-next';
-import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
-import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
 import UiField from '@/components/ui/UiField.vue';
 import { useToastStore } from '@/stores/toastStore';
@@ -294,7 +292,7 @@ onMounted(() => {
 .prompt-page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
   padding: 20px;
   width: 100%;
   margin: 0 auto;
@@ -312,16 +310,18 @@ onMounted(() => {
   font-size: 24px;
   font-weight: 700;
   color: var(--color-text);
+  letter-spacing: 0;
 }
 
 .page-header__info p {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   font-size: 14px;
   color: var(--color-subtle);
+  line-height: 1.6;
 }
 
 .search-bar {
-  max-width: 400px;
+  max-width: 420px;
 }
 
 .loading-state {
@@ -341,23 +341,24 @@ onMounted(() => {
 
 .prompt-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
 }
 
 .prompt-card {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--color-surface);
-  padding: 16px;
-  transition: all var(--transition-fast);
+  padding: 14px;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
 .prompt-card:hover {
   border-color: var(--color-border-strong);
   box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
 .prompt-card__header {
@@ -370,22 +371,18 @@ onMounted(() => {
 .prompt-card__icon {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
-  background: var(--color-info-soft);
-  color: var(--color-info);
+  background: var(--color-panel);
+  color: var(--color-accent);
 }
 
 .prompt-card__actions {
   display: flex;
   gap: 4px;
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-}
-
-.prompt-card:hover .prompt-card__actions {
   opacity: 1;
+  transition: opacity var(--transition-fast);
 }
 
 .action-btn {
@@ -421,8 +418,9 @@ onMounted(() => {
 .prompt-card__title {
   margin: 0;
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--color-text);
+  letter-spacing: 0;
 }
 
 .prompt-card__scene {
@@ -462,27 +460,32 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.42);
 }
 
 .modal {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   max-width: 500px;
+  max-height: calc(100vh - 40px);
+  overflow: hidden;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--color-surface);
   box-shadow: var(--shadow-panel);
 }
 
 .modal--lg {
-  max-width: 600px;
+  max-width: min(680px, calc(100vw - 40px));
 }
 
 .modal__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex: 0 0 auto;
   padding: 16px 20px;
   border-bottom: 1px solid var(--color-border);
 }
@@ -499,7 +502,7 @@ onMounted(() => {
   place-items: center;
   width: 28px;
   height: 28px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: var(--color-muted);
@@ -509,11 +512,15 @@ onMounted(() => {
 }
 
 .modal__close:hover {
+  border-color: var(--color-border);
   background: var(--color-panel);
   color: var(--color-text);
 }
 
 .modal__body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -528,6 +535,8 @@ onMounted(() => {
 
 .content-textarea {
   width: 100%;
+  min-height: 220px;
+  max-height: min(46vh, 420px);
   padding: 10px 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -536,8 +545,9 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.6;
   resize: vertical;
+  overflow: auto;
   font-family: inherit;
-  transition: all var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
 }
 
 .content-textarea:focus {
@@ -549,6 +559,7 @@ onMounted(() => {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+  flex: 0 0 auto;
   padding: 16px 20px;
   border-top: 1px solid var(--color-border);
 }
@@ -581,6 +592,8 @@ onMounted(() => {
 }
 
 .preview-content {
+  max-height: min(52vh, 520px);
+  overflow: auto;
   padding: 16px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -590,5 +603,46 @@ onMounted(() => {
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .prompt-page {
+    padding: 16px;
+  }
+
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-bar {
+    max-width: none;
+  }
+
+  .prompt-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-overlay {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .modal,
+  .modal--lg {
+    max-width: none;
+    max-height: calc(100vh - 24px);
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modal__header,
+  .modal__body,
+  .modal__footer {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 </style>

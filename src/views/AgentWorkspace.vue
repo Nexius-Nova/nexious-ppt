@@ -40,6 +40,7 @@ import SkillManagePage from '@/components/pages/SkillManagePage.vue';
 import ModelManagePage from '@/components/pages/ModelManagePage.vue';
 import TemplateGalleryPage from '@/components/pages/TemplateGalleryPage.vue';
 import RunConfigPage from '@/components/pages/RunConfigPage.vue';
+import ProfilePage from '@/components/pages/ProfilePage.vue';
 import GlobalSearch from '@/components/common/GlobalSearch.vue';
 import ShortcutsHelp from '@/components/common/ShortcutsHelp.vue';
 import AiChatPanel from '@/components/panels/AiChatPanel.vue';
@@ -70,6 +71,10 @@ const {
   currentGeneratingSlide,
   isDataLoaded,
   configOptions,
+  prompts,
+  selectedPromptId,
+  templates,
+  selectedTemplate,
   designSpec,
   specLock,
   retryingPageNumbers
@@ -126,6 +131,13 @@ useShortcuts([
   }
 ]);
 
+function selectInputTemplate(templateId: string) {
+  const template = templates.value.find((item) => item.id === templateId);
+  if (template) {
+    store.applyGalleryTemplate(template);
+  }
+}
+
 const activeStep = computed({
   get: () => store.activeStep,
   set: (value) => {
@@ -145,16 +157,29 @@ const stepTitles: Record<string, string> = {
   models: '模型管理',
   templates: '模板广场',
   config: '运行配置',
-  input: '输入资料',
+  input: '输入内容',
   outline: '生成大纲',
-  images: '图片',
+  images: '生成图片',
   layout: '生成页面',
-  preview: '导出'
+  preview: '预览导出'
 };
 
 const currentStepTitle = computed(() => stepTitles[activeStep.value] || '工作区');
-const isPageView = computed(() => ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config'].includes(activeStep.value));
+const isPageView = computed(() => ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config', 'profile'].includes(activeStep.value));
 const isProjectRoute = computed(() => route.path.startsWith('/project/'));
+const routeProjectId = computed(() => {
+  const id = route.params.id;
+  return Array.isArray(id) ? id[0] || '' : String(id || '');
+});
+const showProjectAssistant = computed(() =>
+  Boolean(
+    isProjectRoute.value &&
+    activePpt.value &&
+    routeProjectId.value &&
+    String(activePpt.value.id) === routeProjectId.value
+  )
+);
+const assistantProject = computed(() => showProjectAssistant.value ? activePpt.value : null);
 const latestSvgPage = computed(() => svgPages.value[svgPages.value.length - 1] || null);
 const layoutTotalPages = computed(() => designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount || 0);
 const layoutCompletedPages = computed(() => svgPages.value.length);
@@ -216,16 +241,16 @@ const pipelineStages = computed(() => {
     {
       id: 'input' as WorkflowStepId,
       icon: FileText,
-      title: '输入资料',
+      title: '输入内容',
       description: input.value.files.length
         ? `${input.value.files.length} 个文件`
         : hasInputContent()
-          ? '资料已准备'
+          ? '内容已准备'
           : '等待输入',
       status: stageInput?.status || 'idle',
       progress: stageInput?.progress || 0,
-      metric: hasInputContent() ? '资料就绪' : '待输入',
-      action: '编辑资料'
+      metric: hasInputContent() ? '内容就绪' : '待输入',
+      action: '编辑内容'
     },
     {
       id: 'outline' as WorkflowStepId,
@@ -242,7 +267,7 @@ const pipelineStages = computed(() => {
     {
       id: 'images' as WorkflowStepId,
       icon: Image,
-      title: '图片',
+      title: '生成图片',
       description: imageStepSkipped.value
         ? '无需图片'
         : slidesNeedingImages.value.length > 0
@@ -267,7 +292,7 @@ const pipelineStages = computed(() => {
     {
       id: 'preview' as WorkflowStepId,
       icon: ShieldCheck,
-      title: '导出',
+      title: '预览导出',
       description: '生成 PPTX',
       status: stagePreview?.status || 'idle',
       progress: stagePreview?.progress || 0,
@@ -369,7 +394,8 @@ async function syncStepWithRoute() {
     '/skills': 'skills',
     '/models': 'models',
     '/templates': 'templates',
-    '/config': 'config'
+    '/config': 'config',
+    '/profile': 'profile'
   };
 
   if (path.startsWith('/project/')) {
@@ -427,7 +453,7 @@ onBeforeUnmount(() => {
 });
 
 function handleNavigate(step: string) {
-  const pageSteps = ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config'];
+  const pageSteps = ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config', 'profile'];
   if (pageSteps.includes(step)) {
     const stepToRoute: Record<string, string> = {
       'my-ppt': '/my-ppt',
@@ -435,7 +461,8 @@ function handleNavigate(step: string) {
       skills: '/skills',
       models: '/models',
       templates: '/templates',
-      config: '/config'
+      config: '/config',
+      profile: '/profile'
     };
     const routePath = stepToRoute[step];
     if (routePath) router.push(routePath);
@@ -567,6 +594,7 @@ async function retryImage(slideId: string) {
         <ModelManagePage v-else-if="activeStep === 'models'" />
         <TemplateGalleryPage v-else-if="activeStep === 'templates'" />
         <RunConfigPage v-else-if="activeStep === 'config'" />
+        <ProfilePage v-else-if="activeStep === 'profile'" />
       </template>
 
       <template v-else>
@@ -656,7 +684,14 @@ async function retryImage(slideId: string) {
                     v-model="input"
                     :parameters="parameters"
                     :config-options="configOptions"
+                    :prompts="prompts"
+                    :selected-prompt-id="selectedPromptId"
+                    :templates="templates"
+                    :selected-template="selectedTemplate"
                     @update:parameters="parameters = $event"
+                    @select-prompt="store.selectPrompt"
+                    @select-template="selectInputTemplate"
+                    @clear-template="store.clearGalleryTemplate()"
                     @attach="store.attachFiles"
                     @run="store.runFullWorkflow()"
                   />
@@ -676,7 +711,7 @@ async function retryImage(slideId: string) {
 
                     <div class="outline-control__stats">
                       <div>
-                        <span>资料</span>
+                        <span>内容</span>
                         <strong>{{ inputReadyLabel }}</strong>
                       </div>
                       <div>
@@ -699,10 +734,6 @@ async function retryImage(slideId: string) {
                         <RefreshCw v-else :size="13" />
                         {{ outline.length ? '重新生成' : '生成大纲' }}
                       </UiButton>
-                      <UiButton variant="secondary" size="sm" :disabled="isRunning" @click="store.addSampleOutline">
-                        <Sparkles :size="13" />
-                        示例
-                      </UiButton>
                     </div>
 
                   </section>
@@ -720,7 +751,6 @@ async function retryImage(slideId: string) {
                     @update-visual-prompt="store.updateSlideVisualPrompt"
                     @reorder="store.reorderOutline"
                     @batch-delete="(ids: string[]) => { store.saveHistory(); store.outline = store.outline.filter(s => !ids.includes(s.id)) }"
-                    @add-sample="store.addSampleOutline"
                     @run="store.runOutline"
                   />
                 </div>
@@ -979,10 +1009,10 @@ async function retryImage(slideId: string) {
       </div>
     </div>
     <AiChatPanel
-      v-if="isProjectRoute && activePpt"
-      :key="activePpt.id"
-      :project-id="activePpt.id"
-      :project-title="activePpt.title"
+      v-if="assistantProject"
+      :key="assistantProject.id"
+      :project-id="assistantProject.id"
+      :project-title="assistantProject.title"
     />
   </AppShell>
 </template>

@@ -1,9 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router';
 import AgentWorkspace from '@/views/AgentWorkspace.vue';
+import AuthPage from '@/components/pages/AuthPage.vue';
+import { useAuthStore } from '@/stores/authStore';
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    {
+      path: '/login',
+      name: 'login',
+      component: AuthPage,
+      meta: {
+        title: '登录 - AI PPT Agent',
+        public: true
+      }
+    },
     {
       path: '/',
       name: 'home',
@@ -49,7 +60,7 @@ export const router = createRouter({
       name: 'templates',
       component: AgentWorkspace,
       meta: {
-        title: '模版广场 - AI PPT Agent'
+        title: '模板广场 - AI PPT Agent'
       }
     },
     {
@@ -58,6 +69,14 @@ export const router = createRouter({
       component: AgentWorkspace,
       meta: {
         title: '运行配置 - AI PPT Agent'
+      }
+    },
+    {
+      path: '/profile',
+      name: 'profile',
+      component: AgentWorkspace,
+      meta: {
+        title: '个人中心 - AI PPT Agent'
       }
     },
     {
@@ -72,7 +91,20 @@ export const router = createRouter({
 });
 
 router.beforeEach((to) => {
+  const authStore = useAuthStore();
+
   if (to.meta.title) {
     document.title = to.meta.title as string;
+  }
+
+  if (!to.meta.public && !authStore.token) {
+    return {
+      path: '/login',
+      query: { redirect: to.fullPath }
+    };
+  }
+
+  if (to.meta.public && authStore.token) {
+    return '/my-ppt';
   }
 });

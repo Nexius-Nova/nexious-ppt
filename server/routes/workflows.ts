@@ -1,9 +1,8 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { query, insert, update, remove } from '../db/connection.js';
 
 const router = Router();
-const DEFAULT_USER_ID = 1;
 
 router.use(authMiddleware);
 
@@ -14,7 +13,7 @@ router.post('/save', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: '缺少快照数据' });
     }
 
-    const userId = req.userId || DEFAULT_USER_ID;
+    const userId = req.userId!;
     const compactSnapshot = compactWorkflowSnapshot(snapshotData);
 
     const existing = await query(
@@ -92,7 +91,7 @@ function compactWorkflowSnapshot(snapshotData: any) {
 
 router.get('/restore', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.userId || DEFAULT_USER_ID;
+    const userId = req.userId!;
 
     const rows = await query(
       'SELECT snapshot_data, updated_at FROM workflow_snapshots WHERE user_id = ?',
@@ -122,7 +121,7 @@ router.get('/restore', async (req: AuthRequest, res: Response) => {
 
 router.delete('/', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.userId || DEFAULT_USER_ID;
+    const userId = req.userId!;
 
     await remove(
       'DELETE FROM workflow_snapshots WHERE user_id = ?',

@@ -30,7 +30,6 @@ const emit = defineEmits<{
   reorder: [fromIndex: number, toIndex: number];
   run: [];
   batchDelete: [ids: string[]];
-  addSample: [];
 }>();
 
 // ---- Slide drag state ----
@@ -424,16 +423,12 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
     <UiEmpty
       v-else-if="!isRunning"
       title="还没有大纲"
-      description="运行文本分析生成大纲，或使用示例数据快速开始"
+      description="运行文本分析后，AI 会根据当前 PPT 输入生成可编辑大纲。"
     >
       <div class="empty-actions">
         <UiButton size="sm" :disabled="isRunning" @click="$emit('run')">
           <RefreshCw :size="13" />
           运行文本分析
-        </UiButton>
-        <UiButton size="sm" variant="secondary" @click="$emit('addSample')">
-          <FileText :size="13" />
-          使用示例数据
         </UiButton>
       </div>
     </UiEmpty>

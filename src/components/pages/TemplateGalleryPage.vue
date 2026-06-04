@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
-import { storeToRefs } from 'pinia';
+import { computed, onMounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import {
-  Check,
   Eye,
   FileText,
   Layers,
@@ -53,7 +52,7 @@ type EditorSectionId = 'basic' | 'style' | 'layout' | 'outline' | 'rules';
 
 const toastStore = useToastStore();
 const agentStore = useAgentStore();
-const { activePpt, selectedTemplate } = storeToRefs(agentStore);
+const route = useRoute();
 
 const templates = ref<Template[]>([]);
 const loading = ref(false);
@@ -66,6 +65,7 @@ const showPreviewModal = ref(false);
 const showEditor = ref(false);
 const zoomPreviewSlide = ref<NonNullable<TemplateAssetSettings['previewSlides']>[number] | null>(null);
 const activeEditorSection = ref<EditorSectionId>('basic');
+const focusedTemplateId = ref<string | null>(null);
 
 const editorForm = ref<EditorForm>(createEmptyForm());
 
@@ -302,22 +302,6 @@ function openZoomPreview(slide: NonNullable<TemplateAssetSettings['previewSlides
   zoomPreviewSlide.value = slide;
 }
 
-function templateToStorePayload(template: Template) {
-  return {
-    id: String(template.id),
-    name: template.name,
-    category: template.category || '',
-    description: template.description || '',
-    slideCount: template.slide_count || 10,
-    accent: template.accent || '#334155',
-    settings: normalizeSettings(template),
-  };
-}
-
-function isApplied(template: Template) {
-  return selectedTemplate.value?.id === String(template.id);
-}
-
 function metricCount(template: Template, key: 'layouts' | 'outline' | 'preview') {
   const settings = normalizeSettings(template);
   if (key === 'layouts') {
@@ -333,6 +317,7 @@ async function fetchTemplates() {
     const response = await templateApi.getAll();
     if (response.success && response.data) {
       templates.value = response.data;
+      focusTemplateFromRoute();
     }
   } catch (error) {
     console.error('加载模板失败:', error);
@@ -347,18 +332,26 @@ function openPreviewModal(template: Template) {
   showPreviewModal.value = true;
 }
 
-function applyTemplate(template: Template) {
-  if (!activePpt.value) {
-    toastStore.info('请先选择项目', '模板方案只会应用到已打开的项目。');
+function focusTemplateFromRoute() {
+  const queryValue = route.query.templateId;
+  const templateId = Array.isArray(queryValue) ? queryValue[0] : queryValue;
+  if (!templateId) {
+    focusedTemplateId.value = null;
     return;
   }
-  agentStore.applyGalleryTemplate(templateToStorePayload(template));
-  toastStore.success('已应用模板', template.name);
-}
+  if (focusedTemplateId.value === String(templateId)) return;
 
-function clearTemplate() {
-  agentStore.clearGalleryTemplate();
-  toastStore.success('已清除模板方案');
+  const template = templates.value.find((item) => String(item.id) === String(templateId));
+  focusedTemplateId.value = String(templateId);
+  if (!template) {
+    toastStore.warning('未找到模板', '模板可能已删除或当前账号无权访问');
+    return;
+  }
+
+  selectedCategory.value = '全部';
+  searchQuery.value = '';
+  openPreviewModal(template);
+  toastStore.info('已打开模板详情', template.name);
 }
 
 function openCreateModal() {
@@ -474,7 +467,6 @@ async function deleteTemplate(template: Template) {
   try {
     const response = await templateApi.delete(template.id);
     if (response.success) {
-      if (isApplied(template)) clearTemplate();
       toastStore.success('模板方案已删除');
       await fetchTemplates();
       await agentStore.fetchTemplates();
@@ -486,6 +478,13 @@ async function deleteTemplate(template: Template) {
   }
 }
 
+watch(() => route.query.templateId, () => {
+  if (templates.value.length > 0) {
+    focusedTemplateId.value = null;
+    focusTemplateFromRoute();
+  }
+});
+
 onMounted(fetchTemplates);
 </script>
 
@@ -495,7 +494,7 @@ onMounted(fetchTemplates);
       <div>
         <p class="page-kicker">PPT 方案资产库</p>
         <h2>模板广场</h2>
-        <p>管理可复用的主题风格、排版布局、大纲结构和示例预览。未应用模板时，AI 会根据输入内容自行设计。</p>
+        <p>管理可复用的主题风格、排版布局、大纲结构和示例预览。模板会在具体 PPT 的输入页中选择使用。</p>
       </div>
       <UiButton variant="primary" @click="openCreateModal">
         <Plus :size="15" />
@@ -531,7 +530,6 @@ onMounted(fetchTemplates);
         v-for="template in filteredTemplates"
         :key="template.id"
         class="template-card"
-        :class="{ 'template-card--active': isApplied(template) }"
       >
         <div class="template-preview" :style="{ '--accent': template.accent || '#334155' }">
           <div class="preview-deck">
@@ -556,10 +554,6 @@ onMounted(fetchTemplates);
               </template>
             </div>
           </div>
-          <UiBadge v-if="isApplied(template)" tone="success" size="sm">
-            <Check :size="11" />
-            当前使用
-          </UiBadge>
         </div>
 
         <div class="template-body">
@@ -594,9 +588,6 @@ onMounted(fetchTemplates);
           <UiButton variant="secondary" size="sm" @click="openPreviewModal(template)">
             <Eye :size="14" />
             查看方案
-          </UiButton>
-          <UiButton variant="primary" size="sm" :disabled="!activePpt || isApplied(template)" @click="applyTemplate(template)">
-            {{ isApplied(template) ? '已应用' : '应用模板' }}
           </UiButton>
           <button class="icon-action" title="编辑" @click="openEditModal(template)">
             <Pencil :size="14" />
@@ -700,10 +691,7 @@ onMounted(fetchTemplates);
           </div>
 
           <footer class="modal-footer">
-            <UiButton variant="secondary" @click="showPreviewModal = false">关闭</UiButton>
-            <UiButton variant="primary" :disabled="!activePpt || isApplied(previewTemplate)" @click="applyTemplate(previewTemplate)">
-              {{ isApplied(previewTemplate) ? '已应用' : '应用模板' }}
-            </UiButton>
+            <UiButton variant="primary" @click="showPreviewModal = false">关闭</UiButton>
           </footer>
         </div>
       </div>
@@ -1058,15 +1046,10 @@ onMounted(fetchTemplates);
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
-.template-card:hover,
-.template-card--active {
+.template-card:hover {
   border-color: var(--color-border-strong);
   box-shadow: var(--shadow-sm);
   transform: translateY(-1px);
-}
-
-.template-card--active {
-  border-color: var(--color-success);
 }
 
 .template-preview {

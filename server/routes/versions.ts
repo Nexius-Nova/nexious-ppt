@@ -1,16 +1,15 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { query, insert, remove } from '../db/connection.js';
 
 const router = Router();
-const DEFAULT_USER_ID = 1;
 const MAX_VERSIONS = 30;
 
 router.use(authMiddleware);
 
 router.get('/:projectId', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.userId || DEFAULT_USER_ID;
+    const userId = req.userId!;
     const { projectId } = req.params;
 
     const rows = await query(
@@ -37,7 +36,7 @@ router.get('/:projectId', async (req: AuthRequest, res: Response) => {
 
 router.post('/:projectId', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.userId || DEFAULT_USER_ID;
+    const userId = req.userId!;
     const { projectId } = req.params;
     const { label, outline, parameters, slideCount } = req.body;
 
@@ -69,7 +68,7 @@ router.post('/:projectId', async (req: AuthRequest, res: Response) => {
 
 router.delete('/:projectId/:versionId', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.userId || DEFAULT_USER_ID;
+    const userId = req.userId!;
     const { projectId, versionId } = req.params;
     const numericId = versionId.replace('v-', '');
 

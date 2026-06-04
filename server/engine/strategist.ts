@@ -6,6 +6,7 @@ export interface StrategistInput {
   content: string;
   tone: string;
   summaryLength: string;
+  slideCount?: number;
   imageStyle: string;
   template: string;
   templateAsset?: {
@@ -48,11 +49,17 @@ const MODE_BY_TONE: Record<string, DesignSpec['visualTheme']['mode']> = {
   teaching: 'versatile',
 };
 
+function getPreferredMode(tone: string): DesignSpec['visualTheme']['mode'] {
+  if (!tone || tone === 'auto') return 'versatile';
+  return MODE_BY_TONE[tone] || 'versatile';
+}
+
 export function buildStrategistPrompt(input: StrategistInput): { system: string; user: string } {
   const canvas = CANVAS_FORMATS.ppt169;
   const selectedTemplate = input.templateAsset || null;
-  const mode = MODE_BY_TONE[input.tone] || 'versatile';
+  const mode = getPreferredMode(input.tone);
   const lengthGuide = getLengthGuide(input.summaryLength);
+  const slideCountGuide = getSlideCountGuide(input.slideCount);
   const templateGuide = buildTemplateGuide(input);
   const colorGuide = buildColorGuide(selectedTemplate);
 
@@ -111,7 +118,7 @@ ${colorGuide}
 硬性规则：
 1. 不要等待确认，直接生成完整规格。
 2. 第一页必须是 cover，最后一页建议是 ending；内容足够时可以加入 toc 或 chapter。
-3. 页数根据内容决定，通常 6-12 页；材料很少时可以 4-6 页。
+3. ${slideCountGuide}
 4. rhythm 必须服务叙事：cover、toc、chapter、ending 用 anchor；信息密集页用 dense；单一观点或关键结论页用 breathing。
 5. 颜色只能使用 HEX；不能使用渐变、rgba 或透明色；整体至少包含 3 个有区分度的色相，避免一整套单色系。
 6. 未选择模板方案时，AI 必须根据主题自主决定主题风格、排版布局、大纲结构和颜色，不得固定套用 business、tech 或任何默认风格。
@@ -128,6 +135,7 @@ ${colorGuide}
 内容资料：${input.content || '用户未提供详细资料，请基于主题生成结构完整、信息可信但不过度编造的演示文稿。'}
 
 语言风格：${input.tone}
+目标页数：${getTargetSlideCount(input.slideCount) || '由内容决定'}
 图片风格：${input.imageStyle}
 
 ${templateGuide}
@@ -235,9 +243,22 @@ function buildTemplateGuide(input: StrategistInput) {
 }
 
 function getLengthGuide(summaryLength: string) {
+  if (!summaryLength || summaryLength === 'auto') return 'AI 自动：根据资料密度、汇报场景和页面节奏自主决定每页详略。';
   if (summaryLength === 'detailed') return '详细：每页 4-6 个要点，讲稿需要能支撑演讲。';
   if (summaryLength === 'brief') return '简洁：每页 2-3 个要点，避免堆砌信息。';
   return '均衡：每页 3-5 个要点，表达完整但保持可读。';
+}
+
+function getTargetSlideCount(slideCount?: number): number | null {
+  const parsed = Number(slideCount);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.max(1, Math.min(60, Math.round(parsed)));
+}
+
+function getSlideCountGuide(slideCount?: number) {
+  const target = getTargetSlideCount(slideCount);
+  if (!target) return '页数根据内容决定，通常 6-12 页；材料很少时可以 4-6 页。';
+  return `目标页数为 ${target} 页，outline 必须尽量输出 ${target} 个页面对象；除非资料严重不足，否则不要自行增减页数。`;
 }
 
 function normalizeCanvas(canvas: any): DesignSpec['canvas'] {
@@ -249,7 +270,7 @@ function normalizeCanvas(canvas: any): DesignSpec['canvas'] {
 
 function normalizeMode(value: string | undefined, tone: string): DesignSpec['visualTheme']['mode'] {
   if (value === 'versatile' || value === 'consulting' || value === 'top-consulting') return value;
-  return MODE_BY_TONE[tone] || 'versatile';
+  return getPreferredMode(tone);
 }
 
 function normalizeIconStyle(value: string | undefined): DesignSpec['iconStyle'] {
@@ -264,9 +285,11 @@ function normalizeImageUsage(value: string | undefined, imageStyle: string): Des
 
 function normalizeOutline(rawOutline: any[], input: StrategistInput): SpecSlide[] {
   const source = rawOutline.length > 0 ? rawOutline : buildFallbackSpec(input).outline;
-  return source.map((item: any, index: number) => {
+  const targetCount = getTargetSlideCount(input.slideCount);
+  const normalizedSource = targetCount ? fitOutlineToTargetCount(source, targetCount, input) : source;
+  return normalizedSource.map((item: any, index: number) => {
     const pageNumber = Number(item.pageNumber) || index + 1;
-    const layout = normalizeLayout(item.layout, index, source.length);
+    const layout = normalizeLayout(item.layout, index, normalizedSource.length);
     return {
       id: item.id || `slide-${pageNumber}`,
       pageNumber,
@@ -279,6 +302,35 @@ function normalizeOutline(rawOutline: any[], input: StrategistInput): SpecSlide[
       chartHint: item.chartHint ? String(item.chartHint) : undefined,
     };
   });
+}
+
+function fitOutlineToTargetCount(source: any[], targetCount: number, input: StrategistInput) {
+  const pages = source.slice(0, targetCount).map((item, index) => ({ ...item, pageNumber: index + 1 }));
+  while (pages.length < targetCount) {
+    const pageNumber = pages.length + 1;
+    const isEnding = pageNumber === targetCount;
+    pages.push({
+      id: `slide-${pageNumber}`,
+      pageNumber,
+      title: isEnding ? '总结与下一步' : `重点展开 ${pageNumber - 1}`,
+      bullets: isEnding
+        ? ['回顾核心结论', '明确后续行动', '留下讨论空间']
+        : ['补充关键背景', '展开核心观点', '说明执行要点'],
+      speakerNotes: isEnding
+        ? '收束本次演示内容，并引导听众进入讨论或下一步行动。'
+        : `围绕「${input.topic || '当前主题'}」补充一页可讲述、可落地的内容。`,
+      visualPrompt: '',
+      layout: isEnding ? 'ending' : 'content',
+      rhythm: isEnding ? 'anchor' : 'dense',
+    });
+  }
+
+  if (pages.length > 0) {
+    pages[0] = { ...pages[0], layout: 'cover', pageNumber: 1 };
+    pages[pages.length - 1] = { ...pages[pages.length - 1], layout: pages.length === 1 ? 'cover' : 'ending', pageNumber: pages.length };
+  }
+
+  return pages;
 }
 
 function resolveFallbackTemplate(input: StrategistInput): string {
@@ -318,13 +370,13 @@ function buildFallbackSpec(input: StrategistInput): DesignSpec {
     },
     canvas: CANVAS_FORMATS.ppt169,
     visualTheme: {
-      mode: MODE_BY_TONE[input.tone] || 'versatile',
+      mode: getPreferredMode(input.tone),
       style: '根据主题定制的清晰演示风格，不使用渐变',
       colors,
     },
     typography,
     iconStyle: 'tabler-outline',
-    imageUsage: input.imageStyle === 'none' ? 'none' : 'placeholder',
+    imageUsage: normalizeImageUsage(undefined, input.imageStyle),
     outline: [
       { id: 'slide-1', pageNumber: 1, title: input.topic || '项目概览', bullets: [], speakerNotes: '开场介绍本次演示的主题和目标。', visualPrompt: '', layout: 'cover', rhythm: 'anchor' },
       { id: 'slide-2', pageNumber: 2, title: '核心背景', bullets: ['问题背景与现状', '关键机会与挑战', '本次汇报的判断框架'], speakerNotes: '说明为什么这个主题值得讨论，并建立听众的共同上下文。', visualPrompt: '', layout: 'content', rhythm: 'dense' },

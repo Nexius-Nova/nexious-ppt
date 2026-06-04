@@ -95,7 +95,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function updateUser(data: { name?: string; avatar?: string; password?: string }) {
+  async function updateUser(data: { name?: string; avatar?: string; currentPassword?: string; password?: string }) {
     loading.value = true;
     error.value = null;
 
@@ -108,6 +108,24 @@ export const useAuthStore = defineStore('auth', () => {
       return true;
     } else {
       error.value = response.message || '更新失败';
+      loading.value = false;
+      return false;
+    }
+  }
+
+  async function uploadAvatar(file: Blob) {
+    loading.value = true;
+    error.value = null;
+
+    const response = await authApi.uploadAvatar(file);
+
+    if (response.success && response.data) {
+      user.value = response.data;
+      localStorage.setItem('auth_user', JSON.stringify(user.value));
+      loading.value = false;
+      return true;
+    } else {
+      error.value = response.message || '头像上传失败';
       loading.value = false;
       return false;
     }
@@ -152,6 +170,7 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     fetchUser,
     updateUser,
+    uploadAvatar,
     deleteAccount,
     logout,
   };

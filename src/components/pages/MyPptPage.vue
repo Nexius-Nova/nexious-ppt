@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { Plus, Search, Trash2, FileText, Clock, Calendar, Check, BookmarkCheck } from 'lucide-vue-next';
+import { Plus, Search, Trash2, FileText, Clock, Calendar, Check, BookmarkCheck, RefreshCw } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -28,6 +28,7 @@ const newProjectTitle = ref('');
 const savingTemplateIds = ref<Set<number>>(new Set());
 
 type ProjectDisplayStatus = 'draft' | 'generating' | 'completed';
+type TemplateSaveState = 'unsaved' | 'saved' | 'stale';
 type ProjectDisplay = Project & {
   displayStatus: ProjectDisplayStatus;
   displayProgress: number;
@@ -60,16 +61,47 @@ function templateNameForProject(project: Project) {
   return `${project.title || project.topic || '未命名 PPT'} 模板`;
 }
 
-function isTemplateSaved(project: Project) {
+function getSavedTemplate(project: Project) {
   const projectId = String(project.id);
   const expectedName = normalizeProjectText(templateNameForProject(project));
-  return templates.value.some((template) => {
+  return templates.value.find((template) => {
     const settings = getTemplateSettings(template);
     const sourceProjectId = settings.sourceProjectId ? String(settings.sourceProjectId) : '';
     if (sourceProjectId && sourceProjectId === projectId) return true;
 
     return normalizeProjectText(template.name) === expectedName;
-  });
+  }) || null;
+}
+
+function isTemplateSaved(project: Project) {
+  return Boolean(getSavedTemplate(project));
+}
+
+function getTemplateSaveState(project: Project): TemplateSaveState {
+  const template = getSavedTemplate(project);
+  if (!template) return 'unsaved';
+
+  const projectUpdatedAt = new Date(project.updated_at).getTime();
+  const templateUpdatedAt = new Date(template.updated_at).getTime();
+  if (Number.isFinite(projectUpdatedAt) && Number.isFinite(templateUpdatedAt) && projectUpdatedAt > templateUpdatedAt + 1000) {
+    return 'stale';
+  }
+
+  return 'saved';
+}
+
+function getTemplateActionTitle(project: Project) {
+  const state = getTemplateSaveState(project);
+  if (state === 'saved') return '查看模板广场中的模板';
+  if (state === 'stale') return '当前 PPT 已更新，可同步更新模板';
+  return '保存为模板';
+}
+
+function getTemplateActionLabel(project: Project) {
+  const state = getTemplateSaveState(project);
+  if (state === 'saved') return '已存模板';
+  if (state === 'stale') return '更新模板';
+  return '存为模板';
 }
 
 function isProjectTitleDuplicated(title: string) {
@@ -181,7 +213,7 @@ function deriveProjectDisplay(project: Project): ProjectDisplay {
   else if (pageReady > 0) stageLabel = `页面 ${pageReady}/${pageTotal || pageReady}`;
   else if (imageTotal > 0) stageLabel = `图片 ${imageReady}/${imageTotal}`;
   else if (state?.designSpec || (state?.outline?.length || 0) > 0) stageLabel = `大纲 ${state?.outline?.length || state?.designSpec?.outline?.length || 0} 页`;
-  else if (hasInputContent(state, project)) stageLabel = '资料已就绪';
+  else if (hasInputContent(state, project)) stageLabel = '内容已就绪';
 
   const detailParts = [
     pageTotal ? `${pageReady}/${pageTotal} 页` : '',
@@ -309,25 +341,61 @@ function openProject(project: Project) {
   router.push(`/project/${project.id}/input`);
 }
 
+function openSavedTemplate(project: Project) {
+  const template = getSavedTemplate(project);
+  if (!template) return;
+
+  toastStore.info('已定位模板广场', template.name);
+  router.push({
+    path: '/templates',
+    query: { templateId: String(template.id) }
+  });
+}
+
 async function saveProjectAsTemplate(project: Project) {
-  if (savingTemplateIds.value.has(project.id) || isTemplateSaved(project)) return;
+  if (savingTemplateIds.value.has(project.id)) return;
+  const savedTemplate = getSavedTemplate(project);
+  const saveState = getTemplateSaveState(project);
+  if (savedTemplate && saveState === 'saved') {
+    openSavedTemplate(project);
+    return;
+  }
 
   savingTemplateIds.value = new Set([...savingTemplateIds.value, project.id]);
-  toastStore.info('正在保存模板', `正在将「${project.title}」添加到模板广场`);
+  toastStore.info(saveState === 'stale' ? '正在更新模板' : '正在保存模板', `正在将「${project.title}」同步到模板广场`);
   try {
     const state = parseProjectState(project);
     const payload = buildTemplatePayloadFromProject(
       { ...project, state },
-      { name: templateNameForProject(project) }
+      {
+        name: savedTemplate?.name || templateNameForProject(project),
+        category: savedTemplate?.category || undefined,
+        isPublic: savedTemplate ? Boolean(savedTemplate.is_public) : undefined
+      }
     );
-    const response = await templateApi.create(payload);
+    const response = savedTemplate
+      ? await templateApi.update(savedTemplate.id, payload)
+      : await templateApi.create(payload);
 
     if (response.success && response.data) {
-      templates.value = [response.data, ...templates.value];
-      toastStore.success('已添加到模板广场', payload.name);
+      templates.value = savedTemplate
+        ? templates.value.map((template) => template.id === savedTemplate.id ? response.data! : template)
+        : [response.data, ...templates.value];
+      toastStore.success(savedTemplate ? '模板已更新' : '已添加到模板广场', payload.name);
+      await fetchTemplates();
       await agentStore.fetchTemplates();
     } else {
-      toastStore.error('保存模板失败', response.message || '请稍后重试');
+      if (response.status === 409 || response.code === 'TEMPLATE_NAME_DUPLICATED') {
+        await fetchTemplates();
+        await agentStore.fetchTemplates();
+        if (isTemplateSaved(project)) {
+          toastStore.info('模板已存在', '已同步保存状态，可从模板广场查看');
+        } else {
+          toastStore.error('模板名称重复', response.message || '请换一个模板名称');
+        }
+      } else {
+        toastStore.error('保存模板失败', response.message || '请稍后重试');
+      }
     }
   } catch (error) {
     toastStore.error('保存模板失败', error instanceof Error ? error.message : '未知错误');
@@ -454,14 +522,18 @@ onMounted(() => {
           <div class="project-card__actions">
             <button
               class="action-btn action-btn--template"
-              :class="{ 'action-btn--template-saved': isTemplateSaved(project) }"
-              :title="isTemplateSaved(project) ? '已保存到模板广场' : '保存为模板'"
-              :disabled="savingTemplateIds.has(project.id) || isTemplateSaved(project)"
+              :class="{
+                'action-btn--template-saved': getTemplateSaveState(project) === 'saved',
+                'action-btn--template-stale': getTemplateSaveState(project) === 'stale'
+              }"
+              :title="getTemplateActionTitle(project)"
+              :disabled="savingTemplateIds.has(project.id)"
               @click.stop="saveProjectAsTemplate(project)"
             >
-              <BookmarkCheck v-if="isTemplateSaved(project)" :size="14" />
+              <RefreshCw v-if="getTemplateSaveState(project) === 'stale'" :size="14" />
+              <BookmarkCheck v-else-if="isTemplateSaved(project)" :size="14" />
               <FileText v-else :size="14" />
-              <span>{{ savingTemplateIds.has(project.id) ? '保存中' : isTemplateSaved(project) ? '已保存为模板' : '保存为模板' }}</span>
+              <span>{{ savingTemplateIds.has(project.id) ? '保存中' : getTemplateActionLabel(project) }}</span>
             </button>
             <button class="action-btn action-btn--danger" title="删除" @click.stop="deleteProject(project)">
               <Trash2 :size="14" />
@@ -781,6 +853,12 @@ onMounted(() => {
   border-color: var(--color-success);
   background: var(--color-success-soft);
   color: var(--color-success);
+}
+
+.action-btn--template-stale {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
 }
 
 .action-btn--template-saved:disabled {

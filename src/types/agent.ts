@@ -1,4 +1,4 @@
-export type WorkflowStepId = 'input' | 'outline' | 'images' | 'layout' | 'preview' | 'my-ppt' | 'prompts' | 'skills' | 'models' | 'templates' | 'config';
+export type WorkflowStepId = 'input' | 'outline' | 'images' | 'layout' | 'preview' | 'my-ppt' | 'prompts' | 'skills' | 'models' | 'templates' | 'config' | 'profile';
 
 export type StepStatus = 'idle' | 'running' | 'done';
 
@@ -29,7 +29,7 @@ export interface AgentParameters {
   skillIntensity: number;
 }
 
-export type ConfigOptionKey = 'summaryLength' | 'tone' | 'imageStyle';
+export type ConfigOptionKey = 'slideCount' | 'summaryLength' | 'tone' | 'imageStyle' | 'skillIntensity';
 
 export interface ConfigOption {
   value: string;

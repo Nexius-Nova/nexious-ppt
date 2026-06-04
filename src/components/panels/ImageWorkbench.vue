@@ -5,7 +5,6 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
-import ModelSelector from '@/components/common/ModelSelector.vue';
 import type { GeneratedImage } from '@/types/agent';
 
 const props = defineProps<{
@@ -83,7 +82,6 @@ function getStyleLabel(style: string) {
 <template>
   <UiCard title="图像生成" subtitle="每页生成候选图，点击选择最佳配图">
     <template #actions>
-      <ModelSelector type="image" />
       <UiButton size="sm" variant="secondary" :disabled="isRunning" @click="$emit('run')">
         <RefreshCw :size="13" :class="{ 'animate-spin': isRunning }" />
         {{ isRunning ? '生成中...' : '重新生成' }}

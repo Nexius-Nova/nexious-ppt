@@ -14,9 +14,9 @@ import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { StrategistInput, DesignSpec, SpecLock } from '../engine/index.js';
 import { inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
 import { exportWithNexiousPpt } from '../engine/ppt-exporter.js';
+import { authMiddleware, AuthRequest } from './auth.js';
 
 const router = Router();
-const DEFAULT_USER_ID = 1;
 
 function publicBaseUrl() {
   return (process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/+$/, '');
@@ -181,11 +181,11 @@ async function streamText(
   return fullContent;
 }
 
-router.post('/strategist', async (req: Request, res: Response) => {
+router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const input: StrategistInput = req.body;
 
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
     if (!defaultKey) {
       return res.status(400).json({ success: false, message: '未配置文本模型' });
     }
@@ -224,11 +224,11 @@ router.post('/strategist', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/executor-page', async (req: Request, res: Response) => {
+router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { spec, lock, slide, imageUrl } = req.body;
 
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
     if (!defaultKey) {
       return res.status(400).json({ success: false, message: '未配置文本模型' });
     }
@@ -296,7 +296,7 @@ router.post('/executor-page', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/export-pptx', async (req: Request, res: Response) => {
+router.post('/export-pptx', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { pages, spec, lock } = req.body;
 

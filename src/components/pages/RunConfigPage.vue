@@ -1,41 +1,59 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-vue-next';
-import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
+import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
-import { useToastStore } from '@/stores/toastStore';
 import { useAgentStore } from '@/stores/agentStore';
+import { useToastStore } from '@/stores/toastStore';
 import type { ConfigOptionKey } from '@/types/agent';
 
-const toastStore = useToastStore();
 const store = useAgentStore();
+const toastStore = useToastStore();
 
-const paramDefs: Array<{ key: ConfigOptionKey; label: string; description: string }> = [
+const paramDefs: Array<{ key: ConfigOptionKey; label: string; description: string; example: string }> = [
+  {
+    key: 'slideCount',
+    label: 'PPT 页数',
+    description: '维护输入页可选择的目标页数。',
+    example: '例如：8 页'
+  },
   {
     key: 'summaryLength',
     label: '摘要长度',
-    description: '控制内容提炼的详略程度。'
+    description: '维护内容提炼的详略程度。',
+    example: '例如：精简版'
   },
   {
     key: 'tone',
     label: '语言风格',
-    description: '控制标题、正文和讲稿的表达口吻。'
+    description: '维护标题、正文和讲稿的表达口吻。',
+    example: '例如：商务汇报'
   },
   {
     key: 'imageStyle',
     label: '图像风格',
-    description: '控制需要配图时的画面方向。'
+    description: '维护需要配图时的画面方向。',
+    example: '例如：写实摄影'
+  },
+  {
+    key: 'skillIntensity',
+    label: '增强强度',
+    description: '维护 Skill 扩展处理深度。',
+    example: '例如：80'
   }
 ];
 
 const addingLabels = ref<Record<ConfigOptionKey, string>>({
+  slideCount: '',
   summaryLength: '',
   tone: '',
-  imageStyle: ''
+  imageStyle: '',
+  skillIntensity: ''
 });
 const editingOption = ref<{ key: ConfigOptionKey; value: string } | null>(null);
 const editingLabel = ref('');
+const savingKey = ref<ConfigOptionKey | null>(null);
 
 function startEdit(key: ConfigOptionKey, value: string, label: string) {
   editingOption.value = { key, value };
@@ -47,44 +65,55 @@ function cancelEdit() {
   editingLabel.value = '';
 }
 
-function saveEdit() {
-  if (!editingOption.value) return;
+async function saveEdit() {
+  if (!editingOption.value || savingKey.value) return;
   const label = editingLabel.value.trim();
   if (!label) {
-    toastStore.warning('名称不能为空', '请输入一个清晰的配置名称');
+    toastStore.warning('名称不能为空', '请输入清晰的配置名称');
     return;
   }
-  store.updateConfigOption(editingOption.value.key, editingOption.value.value, label);
+
+  savingKey.value = editingOption.value.key;
+  await store.updateConfigOption(editingOption.value.key, editingOption.value.value, label);
+  savingKey.value = null;
   cancelEdit();
 }
 
-function addOption(key: ConfigOptionKey) {
+async function addOption(key: ConfigOptionKey) {
+  if (savingKey.value) return;
   const label = addingLabels.value[key].trim();
   if (!label) {
     toastStore.warning('名称不能为空', '请输入要添加的配置名称');
     return;
   }
-  store.addConfigOption(key, label);
+
+  savingKey.value = key;
+  await store.addConfigOption(key, label);
+  savingKey.value = null;
   addingLabels.value[key] = '';
 }
 
-function deleteOption(key: ConfigOptionKey, value: string) {
-  if (store.configOptions[key].length <= 1) return;
+async function deleteOption(key: ConfigOptionKey, value: string) {
+  if (savingKey.value || store.configOptions[key].length <= 1) return;
   if (editingOption.value?.key === key && editingOption.value.value === value) {
     cancelEdit();
   }
-  store.deleteConfigOption(key, value);
+
+  savingKey.value = key;
+  await store.deleteConfigOption(key, value);
+  savingKey.value = null;
 }
 </script>
 
 <template>
   <div class="config-page">
-    <div class="page-header">
+    <header class="page-header">
       <div class="page-header__info">
         <h2>运行配置</h2>
-        <p>维护输入页可用的摘要、语言和图像选项，不改变当前 PPT 的已选设置。</p>
+        <p>管理 PPT 输入页的可选项。这里不改变当前项目已选择的参数，项目选择会独立保存。</p>
       </div>
-    </div>
+      <UiBadge tone="info">选项管理</UiBadge>
+    </header>
 
     <div class="param-list">
       <section
@@ -97,7 +126,7 @@ function deleteOption(key: ConfigOptionKey, value: string) {
             <h3>{{ def.label }}</h3>
             <p>{{ def.description }}</p>
           </div>
-          <UiBadge tone="neutral" size="sm">选项库</UiBadge>
+          <UiBadge tone="neutral" size="sm">{{ store.configOptions[def.key].length }} 项</UiBadge>
         </header>
 
         <div class="setting-options" role="group" :aria-label="def.label">
@@ -116,13 +145,14 @@ function deleteOption(key: ConfigOptionKey, value: string) {
             <div v-else class="setting-option__edit">
               <UiInput
                 v-model="editingLabel"
+                :disabled="savingKey === def.key"
                 @keydown.enter.prevent="saveEdit"
                 @keydown.esc.prevent="cancelEdit"
               />
-              <button type="button" class="icon-button" title="保存" @click="saveEdit">
+              <button type="button" class="icon-button" title="保存" :disabled="savingKey === def.key" @click="saveEdit">
                 <Check :size="14" />
               </button>
-              <button type="button" class="icon-button" title="取消" @click="cancelEdit">
+              <button type="button" class="icon-button" title="取消" :disabled="savingKey === def.key" @click="cancelEdit">
                 <X :size="14" />
               </button>
             </div>
@@ -131,14 +161,14 @@ function deleteOption(key: ConfigOptionKey, value: string) {
               v-if="!(editingOption?.key === def.key && editingOption.value === option.value)"
               class="setting-option__actions"
             >
-              <button type="button" class="icon-button" title="编辑" @click="startEdit(def.key, option.value, option.label)">
+              <button type="button" class="icon-button" title="编辑" :disabled="savingKey === def.key" @click="startEdit(def.key, option.value, option.label)">
                 <Pencil :size="13" />
               </button>
               <button
                 type="button"
                 class="icon-button icon-button--danger"
                 title="删除"
-                :disabled="store.configOptions[def.key].length <= 1"
+                :disabled="savingKey === def.key || store.configOptions[def.key].length <= 1"
                 @click="deleteOption(def.key, option.value)"
               >
                 <Trash2 :size="13" />
@@ -150,11 +180,11 @@ function deleteOption(key: ConfigOptionKey, value: string) {
         <form class="add-option" @submit.prevent="addOption(def.key)">
           <UiInput
             v-model="addingLabels[def.key]"
-            :placeholder="`添加${def.label}`"
+            :placeholder="def.example"
+            :disabled="savingKey === def.key"
           />
-          <UiButton type="submit" variant="secondary" size="sm">
+          <UiButton type="submit" variant="secondary" size="sm" class="add-option__button" :loading="savingKey === def.key" title="添加选项">
             <Plus :size="14" />
-            添加
           </UiButton>
         </form>
       </section>
@@ -184,6 +214,7 @@ function deleteOption(key: ConfigOptionKey, value: string) {
   color: var(--color-text);
   font-size: 24px;
   font-weight: 700;
+  letter-spacing: 0;
 }
 
 .page-header__info p {
@@ -223,6 +254,7 @@ function deleteOption(key: ConfigOptionKey, value: string) {
   color: var(--color-text);
   font-size: 15px;
   font-weight: 700;
+  letter-spacing: 0;
 }
 
 .param-card__info p {
@@ -317,20 +349,24 @@ function deleteOption(key: ConfigOptionKey, value: string) {
 
 .add-option {
   display: grid;
-  grid-template-columns: minmax(180px, 260px) max-content;
+  grid-template-columns: minmax(180px, 260px) 34px;
   gap: 8px;
   align-items: center;
   justify-content: start;
 }
 
 .add-option :deep(.ui-button) {
-  min-width: 72px;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
   border-radius: 8px;
 }
 
 @media (max-width: 760px) {
   .add-option {
-    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-columns: minmax(0, 1fr) 34px;
   }
 
   .setting-option,
@@ -340,16 +376,6 @@ function deleteOption(key: ConfigOptionKey, value: string) {
 
   .setting-option__label {
     flex: 1;
-  }
-}
-
-@media (max-width: 480px) {
-  .add-option {
-    grid-template-columns: 1fr;
-  }
-
-  .add-option :deep(.ui-button) {
-    justify-self: start;
   }
 }
 </style>

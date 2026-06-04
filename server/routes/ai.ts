@@ -3,10 +3,10 @@ import path from 'path';
 import { mkdir, writeFile } from 'fs/promises';
 import { getDefaultApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
+import { authMiddleware, AuthRequest } from './auth.js';
 
 const router = Router();
 
-const DEFAULT_USER_ID = 1;
 const GENERATED_IMAGE_DIR = path.join(process.cwd(), '.generated', 'images');
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'http://localhost:3001';
 
@@ -528,11 +528,11 @@ async function streamTextModel(
   }
 }
 
-router.post('/generate-outline-stream', async (req: Request, res: Response) => {
+router.post('/generate-outline-stream', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { topic, content, slideCount, tone, summaryLength, promptContent } = req.body;
 
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
     if (!defaultKey) {
       return res.status(400).json({
         success: false,
@@ -544,11 +544,27 @@ router.post('/generate-outline-stream', async (req: Request, res: Response) => {
     const provider = defaultKey.provider;
     const baseUrl = defaultKey.base_url || '';
     const model = defaultKey.model || 'gpt-4o';
+    const requestedSlideCount = Number(slideCount);
+    const effectiveSlideCount = Number.isFinite(requestedSlideCount) && requestedSlideCount > 0
+      ? Math.round(requestedSlideCount)
+      : undefined;
+    const slideCountText = effectiveSlideCount
+      ? `${effectiveSlideCount}页（AI可根据内容自主调整）`
+      : '由 AI 根据内容量自主决定';
+    const toneGuide = tone === 'professional'
+      ? '专业严谨'
+      : tone === 'creative'
+      ? '创意活泼'
+      : tone === 'auto'
+      ? '由 AI 根据主题、资料和使用场景自主判断'
+      : '通俗易懂';
 
     const lengthGuide = summaryLength === 'detailed'
       ? '详细展开，每页6-8个要点，每个要点2-3句话详细说明'
       : summaryLength === 'concise'
       ? '精简扼要，每页2-3个要点，每个要点一句话概括'
+      : summaryLength === 'auto'
+      ? '由 AI 根据资料密度和页面节奏自主决定详略'
       : '适中平衡，每页3-5个要点，每个要点适当展开';
 
     const systemPrompt = `你是一个专业的PPT内容策划专家。请根据用户提供的主题和内容，生成一份结构清晰、逻辑连贯的PPT大纲。
@@ -558,7 +574,7 @@ router.post('/generate-outline-stream', async (req: Request, res: Response) => {
 2. 标题要简洁有力，能概括该页核心内容
 3. 要点要具体、可执行，避免空洞表述
 4. 演讲备注要给出该页的讲述重点和过渡提示
-5. 风格要${tone === 'professional' ? '专业严谨' : tone === 'creative' ? '创意活泼' : '通俗易懂'}
+5. 风格要${toneGuide}
 6. 内容详细程度：${lengthGuide}
 7. 请根据内容量和逻辑结构自主决定合适的页数，确保内容完整且不过于冗长
 8. 推荐版式（layout）必须是以下之一：
@@ -574,7 +590,7 @@ router.post('/generate-outline-stream', async (req: Request, res: Response) => {
 
     const userPrompt = `主题：${topic}
 内容概述：${content}
-参考页数：${slideCount || 6}页（AI可根据内容自主调整）
+参考页数：${slideCountText}
 内容详细程度：${lengthGuide}
 ${promptContent ? `\n额外提示词指导：\n${promptContent}\n` : ''}
 请根据以上信息自主决定合适的页数，生成PPT大纲：`;
@@ -620,7 +636,7 @@ ${promptContent ? `\n额外提示词指导：\n${promptContent}\n` : ''}
         outline = JSON.parse(fullContent);
       }
     } catch {
-      outline = parseOutlineFromText(fullContent, slideCount || 6);
+      outline = parseOutlineFromText(fullContent, effectiveSlideCount || 6);
     }
 
     outline = outline.map((item: any, index: number) => ({
@@ -716,11 +732,11 @@ router.get('/proxy-image', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/generate-image-stream', async (req: Request, res: Response) => {
+router.post('/generate-image-stream', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { slideId, title, prompt, style } = req.body;
 
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'image');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'image');
     if (!defaultKey) {
       return res.status(400).json({
         success: false,
@@ -800,7 +816,7 @@ router.post('/generate-image-stream', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/persist-generated-image', async (req: Request, res: Response) => {
+router.post('/persist-generated-image', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { slideId, imageUrl } = req.body;
     if (typeof imageUrl !== 'string' || !imageUrl) {
@@ -817,7 +833,7 @@ router.post('/persist-generated-image', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/chat-stream', async (req: Request, res: Response) => {
+router.post('/chat-stream', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { messages } = req.body;
 
@@ -828,7 +844,7 @@ router.post('/chat-stream', async (req: Request, res: Response) => {
       });
     }
 
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
     if (!defaultKey) {
       return res.status(400).json({
         success: false,
@@ -879,9 +895,9 @@ router.post('/chat-stream', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/test-text-model', async (req: Request, res: Response) => {
+router.post('/test-text-model', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
     if (!defaultKey) {
       return res.json({
         success: false,
@@ -993,9 +1009,9 @@ router.post('/test-text-model', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/test-image-model', async (req: Request, res: Response) => {
+router.post('/test-image-model', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'image');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'image');
     if (!defaultKey) {
       return res.json({
         success: false,
@@ -1080,11 +1096,11 @@ router.post('/test-image-model', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/run-skill', async (req: Request, res: Response) => {
+router.post('/run-skill', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { skillId, skillName, slides, params, intensity } = req.body;
 
-    const defaultKey = await getDefaultApiKey(DEFAULT_USER_ID, 'text');
+    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
     if (!defaultKey) {
       return res.status(400).json({
         success: false,

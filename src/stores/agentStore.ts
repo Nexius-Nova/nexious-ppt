@@ -2,7 +2,8 @@
 import { computed, ref, watch } from 'vue';
 import { defaultPrompts, defaultSkills, exampleTemplates, workflowSteps } from '@/data/workflow';
 import { analyzeDeckInput, exportDeck, generateSlideImages } from '@/services/agentSimulator';
-import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi } from '@/services/api';
+import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi, generationJobApi, configApi } from '@/services/api';
+import type { GenerationJobStatus, RunConfig } from '@/services/api';
 import { applyTemplateLayoutParams, getTemplateColors } from '@/composables/templateColors';
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import { useApiKeyStore } from './apiKeyStore';
@@ -41,7 +42,21 @@ const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => (
   ...template,
   settings: template.settings ? structuredClone(template.settings) : undefined,
 }));
+const CONFIG_KEYS: ConfigOptionKey[] = ['slideCount', 'summaryLength', 'tone', 'imageStyle', 'skillIntensity'];
+const CONFIG_META: Record<ConfigOptionKey, { name: string; description: string; type: RunConfig['type']; min?: number; max?: number }> = {
+  slideCount: { name: 'PPT 页数', description: 'PPT 输入页可选择的目标页数。', type: 'number', min: 1, max: 60 },
+  summaryLength: { name: '摘要长度', description: '控制内容提炼的详略程度。', type: 'select' },
+  tone: { name: '语言风格', description: '控制标题、正文和讲稿的表达口吻。', type: 'select' },
+  imageStyle: { name: '图像风格', description: '控制需要配图时的画面方向。', type: 'select' },
+  skillIntensity: { name: 'Skill 强度', description: '控制 Skill 扩展功能的处理深度。', type: 'number', min: 0, max: 100 },
+};
 const cloneConfigOptions = (): ConfigOptionGroups => ({
+  slideCount: [
+    { value: '6', label: '6 页' },
+    { value: '8', label: '8 页' },
+    { value: '10', label: '10 页' },
+    { value: '12', label: '12 页' }
+  ],
   summaryLength: [
     { value: 'brief', label: '简洁' },
     { value: 'balanced', label: '均衡' },
@@ -59,8 +74,78 @@ const cloneConfigOptions = (): ConfigOptionGroups => ({
     { value: 'flat', label: '扁平化' },
     { value: '3d', label: '3D' },
     { value: 'photo', label: '摄影' }
+  ],
+  skillIntensity: [
+    { value: '30', label: '轻量' },
+    { value: '70', label: '标准' },
+    { value: '100', label: '深入' }
   ]
 });
+
+function normalizeConfigOptions(options?: Partial<ConfigOptionGroups> | null): ConfigOptionGroups {
+  const fallback = cloneConfigOptions();
+  if (!options) return fallback;
+
+  return {
+    slideCount: options.slideCount?.length ? options.slideCount.map(option => ({ ...option })) : fallback.slideCount,
+    summaryLength: options.summaryLength?.length ? options.summaryLength.map(option => ({ ...option })) : fallback.summaryLength,
+    tone: options.tone?.length ? options.tone.map(option => ({ ...option })) : fallback.tone,
+    imageStyle: options.imageStyle?.length ? options.imageStyle.map(option => ({ ...option })) : fallback.imageStyle,
+    skillIntensity: options.skillIntensity?.length ? options.skillIntensity.map(option => ({ ...option })) : fallback.skillIntensity,
+  };
+}
+
+function parseConfigOptions(rawOptions: unknown) {
+  if (Array.isArray(rawOptions)) return rawOptions;
+  if (typeof rawOptions === 'string') {
+    try {
+      const parsed = JSON.parse(rawOptions);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizeRunConfigGroups(records: RunConfig[]): ConfigOptionGroups {
+  const fallback = cloneConfigOptions();
+  const groups = cloneConfigOptions();
+
+  for (const key of CONFIG_KEYS) {
+    const record = records.find((item) => item.key === key);
+    const options = parseConfigOptions(record?.options)
+      .map((option: any) => ({
+        value: String(option?.value ?? '').trim(),
+        label: String(option?.label ?? option?.value ?? '').trim(),
+      }))
+      .filter((option) => option.value && option.label);
+
+    groups[key] = options.length ? options : fallback[key].map((option) => ({ ...option }));
+  }
+
+  return groups;
+}
+
+function isAutoParameterValue(key: ConfigOptionKey, value: unknown) {
+  const normalized = String(value);
+  return key === 'slideCount' || key === 'skillIntensity'
+    ? normalized === '0'
+    : normalized === 'auto';
+}
+
+function normalizeAgentParameters(value?: Partial<AgentParameters> | null): AgentParameters {
+  const slideCountValue = value?.slideCount;
+  const skillIntensityValue = value?.skillIntensity;
+  return {
+    summaryLength: String(value?.summaryLength || 'auto'),
+    slideCount: slideCountValue === 0 ? 0 : Number(slideCountValue) || 0,
+    tone: String(value?.tone || 'auto'),
+    imageStyle: String(value?.imageStyle || 'auto'),
+    template: (value?.template || 'auto') as TemplateStyle,
+    skillIntensity: skillIntensityValue === 0 ? 0 : Number(skillIntensityValue) || 0,
+  };
+}
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 const MAX_ACTIVITY_LOGS = 5000;
@@ -161,12 +246,12 @@ export const useAgentStore = defineStore('agent', () => {
     files: []
   });
   const parameters = ref<AgentParameters>({
-    summaryLength: 'balanced',
-    slideCount: 6,
-    tone: 'professional',
-    imageStyle: 'flat',
+    summaryLength: 'auto',
+    slideCount: 0,
+    tone: 'auto',
+    imageStyle: 'auto',
     template: 'auto',
-    skillIntensity: 70
+    skillIntensity: 0
   });
   const steps = ref<WorkflowStep[]>(cloneSteps());
   const outline = ref<SlideOutline[]>([]);
@@ -193,10 +278,12 @@ export const useAgentStore = defineStore('agent', () => {
   const generatedSlides = ref<Set<string>>(new Set());
   const retryingPageNumbers = ref<Set<number>>(new Set());
   const configOptions = ref<ConfigOptionGroups>(cloneConfigOptions());
+  const configRecords = ref<Partial<Record<ConfigOptionKey, RunConfig>>>({});
   const isDataLoaded = ref(false);
   const recoveredActiveWorkflow = ref(false);
   const workflowRunToken = ref(0);
   const runningProjectId = ref<string | null>(null);
+  const activeGenerationJobId = ref<number | null>(null);
 
   const enabledSkills = computed(() => skills.value.filter((skill) => skill.enabled).sort((a, b) => a.order - b.order));
   const selectedImages = computed(() => images.value.filter((image) => image.selected));
@@ -222,6 +309,7 @@ export const useAgentStore = defineStore('agent', () => {
   function cancelActiveRunForProjectSwitch() {
     if (!isRunning.value || !activePpt.value) return;
     const previousProject = activePpt.value;
+    const previousJobId = activeGenerationJobId.value;
     pushLog('已切换项目，当前工作流已保存，可稍后继续。');
     previousProject.state = {
       ...snapshotProjectState(),
@@ -237,6 +325,15 @@ export const useAgentStore = defineStore('agent', () => {
     isPaused.value = true;
     pauseRequested.value = false;
     currentGeneratingSlide.value = null;
+    activeGenerationJobId.value = null;
+    if (previousJobId) {
+      void generationJobApi.update(previousJobId, {
+        status: 'running',
+        phase: 'paused',
+        progress: steps.value.find((step) => step.id === activeStep.value)?.progress || 0,
+        metadata: buildGenerationJobMetadata({ resume: true }),
+      });
+    }
   }
 
   function mergePptProjects(projects: PptProject[], preferredActiveId: string | null = activePptId.value): PptProject[] {
@@ -298,14 +395,7 @@ export const useAgentStore = defineStore('agent', () => {
   function makeDefaultProjectState(): PptProjectState {
     return {
       input: { topic: '', content: '', files: [] },
-      parameters: {
-        summaryLength: 'balanced',
-        slideCount: 6,
-        tone: 'professional',
-        imageStyle: 'flat',
-        template: 'auto',
-        skillIntensity: 70
-      },
+      parameters: normalizeAgentParameters(),
       selectedTemplate: null,
       outline: [],
       images: [],
@@ -383,9 +473,11 @@ export const useAgentStore = defineStore('agent', () => {
         : svgPages.value,
       paused: isPaused.value,
       configOptions: {
+        slideCount: configOptions.value.slideCount.map(option => ({ ...option })),
         summaryLength: configOptions.value.summaryLength.map(option => ({ ...option })),
         tone: configOptions.value.tone.map(option => ({ ...option })),
         imageStyle: configOptions.value.imageStyle.map(option => ({ ...option })),
+        skillIntensity: configOptions.value.skillIntensity.map(option => ({ ...option })),
       },
       resumeStage: resumeStage.value,
       executorCursor: executorCursor.value,
@@ -396,7 +488,7 @@ export const useAgentStore = defineStore('agent', () => {
 
   function restoreProjectState(state: PptProjectState) {
     input.value = { ...state.input, files: [...state.input.files] };
-    parameters.value = { ...state.parameters };
+    parameters.value = normalizeAgentParameters(state.parameters);
     selectedTemplate.value = state.selectedTemplate
       ? { ...state.selectedTemplate, settings: structuredClone(state.selectedTemplate.settings || {}) }
       : null;
@@ -416,7 +508,7 @@ export const useAgentStore = defineStore('agent', () => {
     designSpec.value = state.designSpec || null;
     specLock.value = state.specLock || null;
     svgPages.value = state.svgPages || [];
-    configOptions.value = state.configOptions || cloneConfigOptions();
+    normalizeParametersAgainstConfig();
     retryingPageNumbers.value = new Set();
     const hadActiveWorkflow = Boolean(state.workflowActive || state.steps?.some(step => step.status === 'running'));
     recoveredActiveWorkflow.value = hadActiveWorkflow && !state.paused;
@@ -644,8 +736,89 @@ export const useAgentStore = defineStore('agent', () => {
     step.progress = progress;
   }
 
+  function buildGenerationJobMetadata(options: { resume?: boolean } = {}) {
+    return {
+      topic: input.value.topic,
+      slideCount: parameters.value.slideCount,
+      imageStyle: parameters.value.imageStyle,
+      template: selectedTemplate.value?.name || parameters.value.template || 'auto',
+      resume: Boolean(options.resume),
+    };
+  }
+
+  async function startGenerationJob(options: { resume?: boolean } = {}) {
+    if (!activePpt.value) return;
+
+    if (activeGenerationJobId.value) {
+      await reportGenerationJob(options.resume ? 'resuming' : 'outline', options.resume ? 10 : 5, 'running');
+      return;
+    }
+
+    try {
+      const response = await generationJobApi.create({
+        projectId: activePpt.value.id,
+        title: activePpt.value.title,
+        metadata: buildGenerationJobMetadata(options),
+      });
+
+      if (response.success && response.data?.id) {
+        activeGenerationJobId.value = response.data.id;
+        await reportGenerationJob('outline', 5, 'running');
+        return;
+      }
+
+      pushLog(`生成任务记录创建失败：${response.message || '服务端未返回任务 ID'}`);
+    } catch (error) {
+      console.warn('创建生成任务记录失败', error);
+    }
+  }
+
+  async function reportGenerationJob(
+    phase: string,
+    progress: number,
+    status: GenerationJobStatus = 'running',
+    errorMessage?: string
+  ) {
+    if (!activeGenerationJobId.value) return;
+
+    try {
+      const response = await generationJobApi.update(activeGenerationJobId.value, {
+        status,
+        phase,
+        progress,
+        errorMessage,
+        metadata: buildGenerationJobMetadata(),
+      });
+
+      if (!response.success) {
+        console.warn('更新生成任务记录失败', response.message);
+      }
+    } catch (error) {
+      console.warn('更新生成任务记录失败', error);
+    }
+  }
+
+  async function finishGenerationJob() {
+    await reportGenerationJob('preview', 100, 'completed');
+    activeGenerationJobId.value = null;
+  }
+
+  async function failGenerationJob(error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : '未知错误';
+    await reportGenerationJob(activeStep.value, steps.value.find((step) => step.id === activeStep.value)?.progress || 0, 'failed', errorMessage);
+    activeGenerationJobId.value = null;
+  }
+
   function normalizeConfigValue(label: string, key: ConfigOptionKey) {
     const base = label.trim() || '未命名';
+    if (key === 'slideCount' || key === 'skillIntensity') {
+      const numeric = Number(base.match(/\d+/)?.[0]);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        const candidate = String(numeric);
+        const existing = new Set(configOptions.value[key].map(option => option.value));
+        if (!existing.has(candidate)) return candidate;
+      }
+    }
     const slug = base
       .toLowerCase()
       .replace(/\s+/g, '-')
@@ -657,12 +830,66 @@ export const useAgentStore = defineStore('agent', () => {
     return `${candidate}-${Date.now().toString(36).slice(-5)}`;
   }
 
+  function parseConfigParameterValue(key: ConfigOptionKey, value: string) {
+    if (key === 'slideCount' || key === 'skillIntensity') {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return value;
+  }
+
+  function normalizeParametersAgainstConfig() {
+    const next = normalizeAgentParameters(parameters.value);
+
+    for (const key of CONFIG_KEYS) {
+      const options = configOptions.value[key];
+      if (!options.length) continue;
+      const current = String(next[key]);
+      if (isAutoParameterValue(key, current)) continue;
+      if (!options.some((option) => option.value === current)) {
+        (next as any)[key] = parseConfigParameterValue(key, options[0].value);
+      }
+    }
+
+    parameters.value = next;
+  }
+
+  async function saveConfigGroup(key: ConfigOptionKey) {
+    const meta = CONFIG_META[key];
+    const options = configOptions.value[key].map((option) => ({ ...option }));
+    const payload = {
+      name: meta.name,
+      key,
+      type: meta.type,
+      value: options[0]?.value || '',
+      options,
+      min_value: meta.min,
+      max_value: meta.max,
+      description: meta.description,
+    };
+
+    try {
+      const existing = configRecords.value[key];
+      const response = existing?.id
+        ? await configApi.update(existing.id, payload)
+        : await configApi.create(payload);
+      if (response.success && response.data) {
+        configRecords.value = { ...configRecords.value, [key]: response.data };
+      } else {
+        pushLog(`运行配置保存失败：${response.message || meta.name}`);
+      }
+    } catch (error) {
+      console.warn('保存运行配置失败', error);
+      pushLog(`运行配置保存失败：${meta.name}`);
+    }
+  }
+
   function setConfigOptionValue(key: ConfigOptionKey, value: string) {
-    parameters.value = { ...parameters.value, [key]: value };
+    parameters.value = { ...parameters.value, [key]: parseConfigParameterValue(key, value) };
     syncToProject();
   }
 
-  function addConfigOption(key: ConfigOptionKey, label: string) {
+  async function addConfigOption(key: ConfigOptionKey, label: string) {
     const trimmed = label.trim();
     if (!trimmed) return;
     const option = { label: trimmed, value: normalizeConfigValue(trimmed, key) };
@@ -670,28 +897,34 @@ export const useAgentStore = defineStore('agent', () => {
       ...configOptions.value,
       [key]: [...configOptions.value[key], option]
     };
+    normalizeParametersAgainstConfig();
+    await saveConfigGroup(key);
     pushLog(`已添加配置：${trimmed}`);
     syncToProject();
   }
 
-  function updateConfigOption(key: ConfigOptionKey, value: string, label: string) {
+  async function updateConfigOption(key: ConfigOptionKey, value: string, label: string) {
     const trimmed = label.trim();
     if (!trimmed) return;
     configOptions.value = {
       ...configOptions.value,
       [key]: configOptions.value[key].map(option => option.value === value ? { ...option, label: trimmed } : option)
     };
+    normalizeParametersAgainstConfig();
+    await saveConfigGroup(key);
     pushLog(`已更新配置：${trimmed}`);
     syncToProject();
   }
 
-  function deleteConfigOption(key: ConfigOptionKey, value: string) {
+  async function deleteConfigOption(key: ConfigOptionKey, value: string) {
     if (configOptions.value[key].length <= 1) return;
     const target = configOptions.value[key].find(option => option.value === value);
     configOptions.value = {
       ...configOptions.value,
       [key]: configOptions.value[key].filter(option => option.value !== value)
     };
+    normalizeParametersAgainstConfig();
+    await saveConfigGroup(key);
     pushLog(`已删除配置：${target?.label || value}`);
     syncToProject();
   }
@@ -711,6 +944,7 @@ export const useAgentStore = defineStore('agent', () => {
     isRunning.value = false;
     currentGeneratingSlide.value = null;
     pushLog('工作流已暂停。');
+    void reportGenerationJob(`paused-${stage}`, steps.value.find((step) => step.id === stage)?.progress || 0, 'running');
     syncToProject();
   }
 
@@ -1335,7 +1569,8 @@ export const useAgentStore = defineStore('agent', () => {
       if (!version) return false;
       saveHistory();
       outline.value = version.outline.map(s => ({ ...s, bullets: [...s.bullets] }));
-      parameters.value = { ...version.parameters };
+      parameters.value = normalizeAgentParameters(version.parameters);
+      normalizeParametersAgainstConfig();
       pushLog(`已回滚到版本：${version.label || versionId}`);
       syncToProject();
       return true;
@@ -1346,6 +1581,18 @@ export const useAgentStore = defineStore('agent', () => {
     try {
       await versionApi.delete(projectId, versionId);
     } catch { /* ignore */ }
+  }
+
+  function selectedPromptContent() {
+    if (!selectedPromptId.value) return undefined;
+    return prompts.value.find((item) => item.id === selectedPromptId.value)?.content || undefined;
+  }
+
+  function selectPrompt(id: string) {
+    selectedPromptId.value = id;
+    const prompt = prompts.value.find((item) => item.id === id);
+    pushLog(prompt ? `已选择提示词：${prompt.title}` : '已清空提示词选择。');
+    syncToProject();
   }
 
   function applyPrompt(id: string) {
@@ -1384,10 +1631,11 @@ export const useAgentStore = defineStore('agent', () => {
           content: input.value.content,
           tone: parameters.value.tone,
           summaryLength: parameters.value.summaryLength,
+          slideCount: parameters.value.slideCount,
           imageStyle: parameters.value.imageStyle,
           template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
           templateAsset: selectedTemplate.value,
-          promptContent: undefined,
+          promptContent: selectedPromptContent(),
           skills: [],
         },
         {
@@ -1916,8 +2164,9 @@ export const useAgentStore = defineStore('agent', () => {
       return;
     }
 
-    const intensity = parameters.value.skillIntensity / 100;
-    pushLog(`开始执行 ${activeSkills.length} 个 Skill（强度 ${parameters.value.skillIntensity}%）。`);
+    const effectiveSkillIntensity = parameters.value.skillIntensity > 0 ? parameters.value.skillIntensity : 70;
+    const intensityLabel = parameters.value.skillIntensity > 0 ? `${effectiveSkillIntensity}%` : 'AI 自动';
+    pushLog(`开始执行 ${activeSkills.length} 个 Skill（强度 ${intensityLabel}）。`);
 
     for (const skill of activeSkills) {
       pushLog(`执行 Skill：${skill.name}`);
@@ -1936,7 +2185,7 @@ export const useAgentStore = defineStore('agent', () => {
             skillName: skill.name,
             slides: slidesData,
             params: skill.params,
-            intensity: parameters.value.skillIntensity
+            intensity: effectiveSkillIntensity
           },
           {
             onStart: (message) => {
@@ -2027,12 +2276,14 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     try {
+      await startGenerationJob(options);
       toastStore.info('开始生成 PPT', '正在处理，请稍候。');
 
       const imagesStep = steps.value.find(s => s.id === 'images');
       const shouldRunOutline = !options.resume || !designSpec.value || !specLock.value || outline.value.length === 0;
       if (shouldRunOutline) {
         activeStep.value = 'outline';
+        await reportGenerationJob('outline', 10, 'running');
         await runStrategist(ctx);
         if (!isRunContextActive(ctx)) return;
         if (shouldPauseAt('images')) return;
@@ -2040,6 +2291,7 @@ export const useAgentStore = defineStore('agent', () => {
 
       if (!isRunContextActive(ctx)) return;
       activeStep.value = 'images';
+      await reportGenerationJob('images', 35, 'running');
 
       if (!needsImageGeneration()) {
         pushLog('本次不需要图片。');
@@ -2065,18 +2317,21 @@ export const useAgentStore = defineStore('agent', () => {
 
       if (!isRunContextActive(ctx)) return;
       activeStep.value = 'layout';
+      await reportGenerationJob('layout', 65, 'running');
       await runExecutor({ resume: options.resume || resumeStage.value === 'layout', embedded: true, ctx });
       if (!isRunContextActive(ctx)) return;
       if (isPaused.value) return;
 
       activeStep.value = 'preview';
       clearPauseState();
+      await finishGenerationJob();
 
       toastStore.success('PPT 生成完成', '可以在预览区查看结果');
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
       pushLog(`PPT 生成失败：${errMsg}`);
+      await failGenerationJob(error);
       syncToProject();
       toastStore.error('PPT 生成失败', errMsg);
     } finally {
@@ -2205,19 +2460,6 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
-  function addSampleOutline() {
-    saveHistory();
-    outline.value = [
-      { id: 'sample-1', title: '市场概况与行业趋势', bullets: ['市场规模与增长预测', '主要竞争对手分析', '行业技术演进路线', '政策与监管环境'], speakerNotes: '简要介绍行业背景，用数据支撑核心判断。', visualPrompt: '市场增长趋势图表', chartHint: '建议使用折线图展示增长趋势', layout: 'text-only' },
-      { id: 'sample-2', title: '核心产品与技术优势', bullets: ['产品架构与核心技术', '与竞品的差异化对比', '技术壁垒与专利布局', '产品路线图'], speakerNotes: '突出技术独特性，用对比说明优势。', visualPrompt: '产品架构示意图', chartHint: '建议使用对比表格', layout: 'text-image' },
-      { id: 'sample-3', title: '商业模式与盈利分析', bullets: ['收入模型与定价策略', '成本结构与毛利分析', '客户获取成本与 LTV', '盈亏平衡预测'], speakerNotes: '用数据说明单位经济模型和长期盈利预期。', visualPrompt: '商业模式画布', chartHint: '建议使用柱状图展示收入构成', layout: 'image-text' },
-      { id: 'sample-4', title: '实施计划与里程碑', bullets: ['分阶段实施路线图', '关键里程碑与交付物', '资源需求与团队配置', '风险管理计划'], speakerNotes: '明确时间节点和可量化交付标准。', visualPrompt: '项目甘特图', layout: 'text-only' },
-      { id: 'sample-5', title: '总结与展望', bullets: ['核心结论与关键数据', '未来发展方向', '合作建议与下一步行动'], speakerNotes: '总结核心观点，明确下一步行动计划。', visualPrompt: '未来愿景图示', layout: 'full-image' }
-    ];
-    pushLog('已加载示例大纲数据。');
-    syncToProject();
-  }
-
   async function fetchPrompts() {
     try {
       const response = await promptApi.getAll();
@@ -2276,6 +2518,32 @@ export const useAgentStore = defineStore('agent', () => {
       }
     } catch (error) {
       console.error('加载模板失败，使用默认数据', error);
+    }
+  }
+
+  async function fetchConfigs() {
+    try {
+      let response = await configApi.getAll();
+      if (response.success && (!response.data || response.data.length === 0)) {
+        response = await configApi.reset();
+      }
+
+      if (response.success && response.data) {
+        configRecords.value = response.data.reduce<Partial<Record<ConfigOptionKey, RunConfig>>>((records, config) => {
+          if (CONFIG_KEYS.includes(config.key as ConfigOptionKey)) {
+            records[config.key as ConfigOptionKey] = config;
+          }
+          return records;
+        }, {});
+        configOptions.value = normalizeRunConfigGroups(response.data);
+      } else {
+        configOptions.value = cloneConfigOptions();
+      }
+    } catch (error) {
+      console.error('加载运行配置失败，使用默认数据:', error);
+      configOptions.value = cloneConfigOptions();
+    } finally {
+      normalizeParametersAgainstConfig();
     }
   }
 
@@ -2384,7 +2652,8 @@ export const useAgentStore = defineStore('agent', () => {
       if (!response.success || !response.data?.snapshotData) return false;
       const snapshot = response.data.snapshotData;
       input.value = { ...snapshot.input, files: [...(snapshot.input?.files || [])] };
-      parameters.value = { ...snapshot.parameters };
+      parameters.value = normalizeAgentParameters(snapshot.parameters);
+      normalizeParametersAgainstConfig();
       outline.value = snapshot.outline || [];
       images.value = snapshot.images || [];
       skills.value = snapshot.skills || cloneSkills();
@@ -2446,6 +2715,7 @@ export const useAgentStore = defineStore('agent', () => {
 
   async function initializeData() {
     await fetchPptProjects();
+    await fetchConfigs();
     const restored = await restoreWorkflow();
     await Promise.all([fetchPrompts(), fetchSkills(), fetchTemplates()]);
     await fetchPptProjects();
@@ -2502,9 +2772,9 @@ export const useAgentStore = defineStore('agent', () => {
     addPrompt,
     updatePrompt,
     deletePrompt,
+    selectPrompt,
     applyPrompt,
     attachFiles,
-    addSampleOutline,
     exportCurrentDeck,
     runFullWorkflow,
     runInputStage,

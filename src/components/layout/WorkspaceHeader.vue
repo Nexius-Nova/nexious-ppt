@@ -1,15 +1,26 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-import { Circle, Monitor, Moon, Sun, Palette } from 'lucide-vue-next';
-import { ref } from 'vue';
+import { Circle, LogOut, Monitor, Moon, Palette, Sun, UserCircle } from 'lucide-vue-next';
+import { computed, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import NotificationCenter from '@/components/common/NotificationCenter.vue';
+import { resolveAssetUrl } from '@/services/api';
+import { useAuthStore } from '@/stores/authStore';
 import { useThemeStore } from '@/stores/themeStore';
+import { useToastStore } from '@/stores/toastStore';
 
+const router = useRouter();
 const themeStore = useThemeStore();
+const authStore = useAuthStore();
+const toastStore = useToastStore();
 const { mode, style } = storeToRefs(themeStore);
 
 const showStylePicker = ref(false);
+const showUserMenu = ref(false);
+const displayName = computed(() => authStore.user?.name || authStore.user?.email || '个人中心');
+const userInitial = computed(() => displayName.value.trim().slice(0, 1).toUpperCase() || 'U');
+const avatarSrc = computed(() => resolveAssetUrl(authStore.user?.avatar));
 
 const themeStyles = [
   { value: 'default', label: '默认', color: '#ef2d2d' },
@@ -25,6 +36,18 @@ function setMode(newMode: 'light' | 'dark' | 'system') {
 function setStyle(newStyle: 'default' | 'claw' | 'knot' | 'dash') {
   themeStore.setStyle(newStyle);
   showStylePicker.value = false;
+}
+
+function openProfile() {
+  showUserMenu.value = false;
+  void router.push('/profile');
+}
+
+function logout() {
+  showUserMenu.value = false;
+  authStore.logout();
+  toastStore.info('已退出登录');
+  void router.replace('/login');
 }
 </script>
 
@@ -93,6 +116,33 @@ function setStyle(newStyle: 'default' | 'claw' | 'knot' | 'dash') {
         </Transition>
       </div>
 
+      <div class="workspace-header__user">
+        <button
+          class="workspace-header__user-btn"
+          type="button"
+          title="个人中心"
+          @click="showUserMenu = !showUserMenu"
+        >
+          <span class="workspace-header__avatar">
+            <img v-if="avatarSrc" :src="avatarSrc" :alt="displayName" />
+            <span v-else>{{ userInitial }}</span>
+          </span>
+          <span class="workspace-header__user-name">{{ displayName }}</span>
+        </button>
+        <Transition name="dropdown">
+          <div v-if="showUserMenu" class="user-menu">
+            <button type="button" @click="openProfile">
+              <UserCircle :size="15" />
+              个人中心
+            </button>
+            <button type="button" @click="logout">
+              <LogOut :size="15" />
+              退出登录
+            </button>
+          </div>
+        </Transition>
+      </div>
+
       <NotificationCenter />
     </div>
   </header>
@@ -130,6 +180,87 @@ function setStyle(newStyle: 'default' | 'claw' | 'knot' | 'dash') {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.workspace-header__user {
+  position: relative;
+}
+
+.workspace-header__user-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  transition: all var(--transition-fast);
+}
+
+.workspace-header__user-btn:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-panel);
+}
+
+.workspace-header__avatar {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workspace-header__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.workspace-header__user-name {
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.user-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 1000;
+  min-width: 136px;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.user-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 9px;
+  border-radius: 6px;
+  color: var(--color-muted);
+  font-size: 13px;
+  text-align: left;
+}
+
+.user-menu button:hover {
+  background: var(--color-panel);
+  color: var(--color-text);
 }
 
 .workspace-header__tool {

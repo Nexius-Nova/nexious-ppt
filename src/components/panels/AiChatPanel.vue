@@ -166,7 +166,10 @@ function clearHistory() {
       <div class="chat-header">
         <div class="chat-header__info">
           <Bot :size="16" />
-          <span>AI PPT 助手</span>
+          <div class="chat-header__title">
+            <span>AI PPT 助手</span>
+            <small>当前仅操作：{{ projectTitle || '当前 PPT' }}</small>
+          </div>
         </div>
         <div class="chat-header__actions">
           <button class="chat-header-btn" title="清空对话" @click="clearHistory">⟳</button>
@@ -292,6 +295,26 @@ function clearHistory() {
   color: var(--color-accent);
   font-size: 14px;
   font-weight: 600;
+  min-width: 0;
+}
+
+.chat-header__title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-header__title span,
+.chat-header__title small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-header__title small {
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .chat-header__actions {

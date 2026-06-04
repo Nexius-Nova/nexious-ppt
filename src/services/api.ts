@@ -8,11 +8,15 @@ interface ApiResponse<T = any> {
   message?: string;
   error?: string;
   status?: number;
+  code?: string;
+  requestId?: string;
+  details?: unknown;
 }
 
 class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
+  private timeoutMs = 30000;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl;
@@ -37,9 +41,13 @@ class ApiClient {
     options: RequestInit = {}
   ): Promise<ApiResponse<T>> {
     const url = `${this.baseUrl}${endpoint}`;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), this.timeoutMs);
+    const requestId = this.createRequestId();
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'X-Request-Id': requestId,
       ...(options.headers as Record<string, string>),
     };
 
@@ -51,25 +59,44 @@ class ApiClient {
       const response = await fetch(url, {
         ...options,
         headers,
+        signal: options.signal || controller.signal,
       });
 
-      const data = await response.json();
+      const contentType = response.headers.get('content-type') || '';
+      const data = contentType.includes('application/json')
+        ? await response.json().catch(() => ({}))
+        : { message: await response.text().catch(() => '') };
+      const responseRequestId = response.headers.get('x-request-id') || data.requestId || requestId;
 
       if (!response.ok) {
+        if (response.status === 401 && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('api:unauthorized', {
+            detail: data.message || '\u767b\u5f55\u72b6\u6001\u5df2\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55'
+          }));
+        }
+
         return {
           success: false,
-          message: data.message || '请求失败',
+          message: data.message || '\u8bf7\u6c42\u5931\u8d25',
           error: data.error,
+          code: data.code,
           status: response.status,
+          requestId: responseRequestId,
+          details: data.details,
         };
       }
 
-      return data;
+      return { ...data, requestId: responseRequestId };
     } catch (error) {
+      const isAbortError = error instanceof DOMException && error.name === 'AbortError';
       return {
         success: false,
-        message: error instanceof Error ? error.message : '网络错误',
+        message: isAbortError ? '\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5' : error instanceof Error ? error.message : '\u7f51\u7edc\u9519\u8bef',
+        code: isAbortError ? 'REQUEST_TIMEOUT' : 'NETWORK_ERROR',
+        requestId,
       };
+    } finally {
+      window.clearTimeout(timeoutId);
     }
   }
 
@@ -91,6 +118,20 @@ class ApiClient {
     });
   }
 
+  private createRequestId(): string {
+    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+      return crypto.randomUUID();
+    }
+    return `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  async patch<T>(endpoint: string, body?: any): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, {
+      method: 'PATCH',
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
   async delete<T>(endpoint: string): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, { method: 'DELETE' });
   }
@@ -102,9 +143,11 @@ class ApiClient {
     onError?: (error: Error) => void
   ): Promise<void> {
     const url = `${this.baseUrl}${endpoint}`;
+    const requestId = this.createRequestId();
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'X-Request-Id': requestId,
     };
 
     if (this.token) {
@@ -119,8 +162,22 @@ class ApiClient {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || '请求失败');
+        const errorData = await response.json().catch(() => ({}));
+        if (response.status === 401 && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('api:unauthorized', {
+            detail: errorData.message || '登录状态已失效，请重新登录'
+          }));
+        }
+
+        const error = new Error(errorData.message || '请求失败') as Error & {
+          code?: string;
+          requestId?: string;
+          status?: number;
+        };
+        error.code = errorData.code;
+        error.status = response.status;
+        error.requestId = response.headers.get('x-request-id') || errorData.requestId || requestId;
+        throw error;
       }
 
       const reader = response.body?.getReader();
@@ -160,6 +217,12 @@ class ApiClient {
 }
 
 export const api = new ApiClient(API_BASE_URL);
+
+export function resolveAssetUrl(url?: string | null): string {
+  if (!url) return '';
+  if (/^(https?:|data:|blob:)/i.test(url)) return url;
+  return `${API_BASE_URL}${url.startsWith('/') ? url : `/${url}`}`;
+}
 
 export interface User {
   userId: number;
@@ -238,8 +301,29 @@ export const authApi = {
 
   getMe: () => api.get<User>('/api/auth/me'),
 
-  updateMe: (data: { name?: string; avatar?: string; password?: string }) =>
+  updateMe: (data: { name?: string; avatar?: string; currentPassword?: string; password?: string }) =>
     api.put<User>('/api/auth/me', data),
+
+  uploadAvatar: async (file: Blob) => {
+    const token = localStorage.getItem('auth_token');
+    const response = await fetch(`${API_BASE_URL}/api/auth/me/avatar`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': file.type || 'image/jpeg',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: file,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        success: false,
+        message: data.message || '头像上传失败',
+        status: response.status,
+      } as ApiResponse<User>;
+    }
+    return data as ApiResponse<User>;
+  },
 
   deleteMe: () => api.delete('/api/auth/me'),
 };
@@ -551,6 +635,7 @@ export const aiApi = {
       content: string;
       tone: string;
       summaryLength: string;
+      slideCount: number;
       imageStyle: string;
       template: string;
       templateAsset?: TemplateAsset | null;
@@ -615,9 +700,13 @@ export const aiApi = {
   },
 
   exportPptx: async (pages: Array<{ svg: string; speakerNotes: string }>, spec: DesignSpec, lock?: SpecLock): Promise<string> => {
+    const token = localStorage.getItem('auth_token');
     const response = await fetch(`${API_BASE_URL}/api/generate/export-pptx`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
       body: JSON.stringify({ pages, spec, lock }),
     });
     if (!response.ok) throw new Error('导出失败');
@@ -687,6 +776,23 @@ export interface RunConfig {
   description: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export type GenerationJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface GenerationJob {
+  id: number;
+  user_id: number;
+  project_id: string;
+  title: string | null;
+  status: GenerationJobStatus;
+  phase: string;
+  progress: number;
+  error_message: string | null;
+  metadata: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 export const promptApi = {
@@ -814,4 +920,25 @@ export const versionApi = {
 
   delete: (projectId: string, versionId: string) =>
     api.delete(`/api/versions/${projectId}/${versionId}`)
+};
+
+export const generationJobApi = {
+  create: (data: { projectId: string; title?: string; metadata?: Record<string, any> }) =>
+    api.post<{ id: number }>('/api/generation-jobs', data),
+
+  update: (id: number, data: {
+    status?: GenerationJobStatus;
+    phase?: string;
+    progress?: number;
+    errorMessage?: string | null;
+    metadata?: Record<string, any>;
+  }) => api.patch<{ updated: boolean }>(`/api/generation-jobs/${id}`, data),
+
+  getRecent: (limit = 20) =>
+    api.get<GenerationJob[]>(`/api/generation-jobs?limit=${limit}`),
+
+  getByProject: (projectId: string, limit = 20) =>
+    api.get<GenerationJob[]>(`/api/generation-jobs/project/${encodeURIComponent(projectId)}?limit=${limit}`),
+
+  cancel: (id: number) => api.post(`/api/generation-jobs/${id}/cancel`)
 };
