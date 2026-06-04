@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DesignSpec, SpecLock } from './spec.js';
 import { convertSvgPagesToPptx, inlineRemoteImages } from './svg-to-pptx.js';
+import { exportNativeEditablePptx } from './native-svg-pptx.js';
 
 export interface PptExportPage {
   pageNumber?: number;
@@ -185,11 +186,24 @@ export async function exportWithNexiousPpt(
     })
   );
 
-  const projectPath = await prepareExportDirectory(spec, lock, preparedPages, logs);
-  const buffer = await convertSvgPagesToPptx(preparedPages, spec, lock);
   const fileName = `${sanitizeName(spec.projectInfo.title || 'nexious-deck')}_${Date.now()}.pptx`;
-  await mkdir(path.join(projectPath, 'exports'), { recursive: true });
-  await writeFile(path.join(projectPath, 'exports', fileName), buffer);
+  const projectPath = await prepareExportDirectory(spec, lock, preparedPages, logs);
+  const exportPath = path.join(projectPath, 'exports', fileName);
+  await mkdir(path.dirname(exportPath), { recursive: true });
+
+  let buffer: Buffer;
+  try {
+    const nativeResult = await exportNativeEditablePptx(projectPath, exportPath, spec);
+    buffer = nativeResult.buffer;
+    await writeFile(exportPath, buffer);
+    logs.push(...nativeResult.logs);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logs.push(`可编辑导出未完成，已自动改用整页快照导出：${message}`);
+    buffer = await convertSvgPagesToPptx(preparedPages, spec, lock);
+    await writeFile(exportPath, buffer);
+  }
+
   logs.push('内置导出器已完成 PPTX 生成。');
   return { buffer, fileName, projectPath, logs };
 }
@@ -213,11 +227,14 @@ async function prepareExportDirectory(
   await writeFile(path.join(projectPath, 'sources', 'input.md'), renderSourceMarkdown(spec), 'utf-8');
   await writeFile(path.join(projectPath, 'notes', 'total.md'), renderTotalNotes(pages, spec), 'utf-8');
 
+  const notesByStem: Record<string, string> = {};
   for (let i = 0; i < pages.length; i += 1) {
     const pageNumber = pages[i].pageNumber || i + 1;
     const fileName = `${String(pageNumber).padStart(2, '0')}_${sanitizeName(spec.outline[i]?.title || `slide_${pageNumber}`)}.svg`;
+    notesByStem[path.parse(fileName).name] = pages[i].speakerNotes || spec.outline[i]?.speakerNotes || '';
     await writeFile(path.join(projectPath, 'svg_output', fileName), pages[i].svg, 'utf-8');
   }
+  await writeFile(path.join(projectPath, 'notes', 'export-notes.json'), JSON.stringify(notesByStem, null, 2), 'utf-8');
 
   logs.push(`导出快照已保存：${projectPath}`);
   return projectPath;
@@ -344,7 +361,7 @@ function escapeTextNodes(svg: string): string {
 
 function escapeTextContent(text: string): string {
   return text
-    .replace(/&(?!amp;|lt;|gt;quot;|apos;|#[0-9]+;|#x[0-9a-fA-F]+;)/g, '&amp;')
+    .replace(/&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;|#x[0-9a-fA-F]+;)/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 }
@@ -352,7 +369,7 @@ function escapeTextContent(text: string): string {
 function escapeAttrValue(value: string): string {
   return value
     .replace(/"/g, '')
-    .replace(/&(?!amp;|lt;|gt;quot;|apos;|#[0-9]+;|#x[0-9a-fA-F]+;)/g, '&amp;')
+    .replace(/&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;|#x[0-9a-fA-F]+;)/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 }
@@ -362,13 +379,17 @@ function isWellFormedXml(svg: string): boolean {
   if (/<[A-Za-z][^>]*$/m.test(svg) || /<\/\s*$/m.test(svg)) return false;
   if (/font-family="[^"]*"[^=\s>]+/.test(svg)) return false;
 
+  const normalized = svg
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<\?[\s\S]*?\?>/g, '')
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+
   const stack: string[] = [];
   const tagPattern = /<\/?([A-Za-z][\w:.-]*)([^<>]*)>/g;
   let match: RegExpExecArray | null;
-  while ((match = tagPattern.exec(svg)) !== null) {
+  while ((match = tagPattern.exec(normalized)) !== null) {
     const full = match[0];
     const tagName = match[1];
-    if (full.startsWith('<!--') || full.startsWith('<?') || full.startsWith('<!')) continue;
     if (full.startsWith('</')) {
       if (stack.pop() !== tagName) return false;
       continue;
@@ -378,7 +399,7 @@ function isWellFormedXml(svg: string): boolean {
     }
   }
 
-  const stripped = svg.replace(tagPattern, '');
+  const stripped = normalized.replace(tagPattern, '');
   return stack.length === 0 && !/[<>]/.test(stripped);
 }
 

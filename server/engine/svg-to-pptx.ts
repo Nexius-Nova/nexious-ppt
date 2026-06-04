@@ -616,32 +616,14 @@ export async function convertSvgPagesToPptx(
 
   for (const [index, page] of svgPages.entries()) {
     const slide = pptx.addSlide();
-    const nativeContext: NativeContext = {
-      pptx,
-      slide,
-      slideW,
-      slideH,
-      scaleX: slideW / spec.canvas.width,
-      scaleY: slideH / spec.canvas.height,
-      converted: 0,
-    };
-
-    try {
-      convertSvgToNativeSlide(nativeContext, page.svg);
-    } catch (error) {
-      nativeContext.converted = 0;
-    }
-
-    if (nativeContext.converted === 0) {
-      const pngBuffer = await renderSvgToPngBufferWithRepair(page.svg, spec.canvas.width * 2, spec, index + 1);
-      slide.addImage({
-        data: `data:image/png;base64,${pngBuffer.toString('base64')}`,
-        x: 0,
-        y: 0,
-        w: slideW,
-        h: slideH,
-      });
-    }
+    const pngBuffer = await renderSvgToPngBufferWithRepair(page.svg, spec.canvas.width * 2, spec, index + 1);
+    slide.addImage({
+      data: `data:image/png;base64,${pngBuffer.toString('base64')}`,
+      x: 0,
+      y: 0,
+      w: slideW,
+      h: slideH,
+    });
 
     if (page.speakerNotes) {
       slide.addNotes(page.speakerNotes);
@@ -653,7 +635,7 @@ export async function convertSvgPagesToPptx(
   return repairPptxPackage(buffer);
 }
 
-async function repairPptxPackage(buffer: Buffer): Promise<Buffer> {
+export async function repairPptxPackage(buffer: Buffer): Promise<Buffer> {
   const zip = await JSZip.loadAsync(buffer);
   const contentTypes = zip.file('[Content_Types].xml');
   if (!contentTypes) return buffer;
