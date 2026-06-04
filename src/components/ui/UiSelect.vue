@@ -1,10 +1,28 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { ChevronDown, Check } from 'lucide-vue-next';
+import TemplatePreviewDeck from '@/components/common/TemplatePreviewDeck.vue';
+
+type SelectPreviewSlide = {
+  title: string;
+  layout: string;
+  description?: string;
+  svg?: string;
+  pageNumber?: number;
+};
+
+type SelectOption = {
+  label: string;
+  value: string;
+  description?: string;
+  previewSlides?: SelectPreviewSlide[];
+  previewImageUrl?: string;
+  accent?: string;
+};
 
 const props = defineProps<{
   modelValue: string;
-  options: Array<{ label: string; value: string; description?: string }>;
+  options: SelectOption[];
   disabled?: boolean;
   placeholder?: string;
 }>();
@@ -31,8 +49,8 @@ function toggleDropdown() {
 }
 
 function selectOption(value: string) {
-  emit('update:modelValue', value);
   isOpen.value = false;
+  emit('update:modelValue', value);
 }
 
 function handleClickOutside(event: MouseEvent) {
@@ -73,8 +91,21 @@ onUnmounted(() => {
             type="button"
             class="ui-select__option"
             :class="{ 'ui-select__option--selected': option.value === modelValue }"
-            @click="selectOption(option.value)"
+            @pointerdown.prevent="selectOption(option.value)"
           >
+            <TemplatePreviewDeck
+              v-if="option.previewSlides?.length"
+              class="ui-select__option-preview"
+              :slides="option.previewSlides"
+              :accent="option.accent"
+            />
+            <span
+              v-else-if="option.previewImageUrl"
+              class="ui-select__option-image"
+              aria-hidden="true"
+            >
+              <img :src="option.previewImageUrl" :alt="option.label" />
+            </span>
             <span class="ui-select__option-content">
               <span class="ui-select__option-label">{{ option.label }}</span>
               <span v-if="option.description" class="ui-select__option-desc">{{ option.description }}</span>
@@ -173,6 +204,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   width: 100%;
   padding: 10px 12px;
   border: none;
@@ -202,6 +234,7 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 
 .ui-select__option-label {
@@ -217,6 +250,41 @@ onUnmounted(() => {
 .ui-select__option-check {
   flex-shrink: 0;
   color: var(--color-accent);
+}
+
+.ui-select__option-preview {
+  flex: 0 0 142px;
+}
+
+.ui-select__option-image {
+  display: block;
+  flex: 0 0 142px;
+  height: 86px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+
+.ui-select__option-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+@media (max-width: 520px) {
+  .ui-select__option:has(.ui-select__option-preview),
+  .ui-select__option:has(.ui-select__option-image) {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ui-select__option-preview,
+  .ui-select__option-image {
+    width: 100%;
+    flex-basis: auto;
+  }
 }
 
 /* Dropdown animation */

@@ -734,6 +734,7 @@ export interface Prompt {
   title: string;
   scene: string | null;
   content: string;
+  preview_url: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -800,11 +801,14 @@ export const promptApi = {
 
   getById: (id: number) => api.get<Prompt>(`/api/prompts/${id}`),
 
-  create: (data: { title: string; scene?: string; content: string }) =>
+  create: (data: { title: string; scene?: string; content: string; preview_url?: string | null }) =>
     api.post<Prompt>('/api/prompts', data),
 
-  update: (id: number, data: { title: string; scene?: string; content: string }) =>
+  update: (id: number, data: { title: string; scene?: string; content: string; preview_url?: string | null }) =>
     api.put<Prompt>(`/api/prompts/${id}`, data),
+
+  uploadPreviewImage: (data: { filename: string; dataUrl: string }) =>
+    api.post<{ url: string }>('/api/prompts/preview-image', data),
 
   delete: (id: number) => api.delete(`/api/prompts/${id}`)
 };

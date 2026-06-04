@@ -18,6 +18,19 @@ async function migrate(): Promise<void> {
 
     console.log('🔗 已连接到数据库，开始迁移...');
 
+    const [promptPreviewColumns] = await connection.query(
+      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'prompts' AND COLUMN_NAME = 'preview_url'"
+    );
+
+    if ((promptPreviewColumns as any[]).length === 0) {
+      await connection.query(
+        "ALTER TABLE `prompts` ADD COLUMN `preview_url` VARCHAR(500) DEFAULT NULL COMMENT '提示词效果图URL' AFTER `content`"
+      );
+      console.log('prompts.preview_url column added');
+    } else {
+      console.log('prompts.preview_url column exists, skipped');
+    }
+
     const [columns] = await connection.query(
       "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'projects' AND COLUMN_NAME = 'state'"
     );

@@ -84,6 +84,7 @@ export interface PromptDefinition {
   title: string;
   scene: string;
   content: string;
+  previewUrl?: string;
   updatedAt: number;
 }
 

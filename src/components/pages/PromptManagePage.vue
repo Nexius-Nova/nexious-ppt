@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { Plus, Search, Edit3, Trash2, Copy, FileText, Tag, Eye } from 'lucide-vue-next';
+import { Plus, Search, Edit3, Trash2, Copy, FileText, Tag, Eye, Upload, Image as ImageIcon, X } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
@@ -17,11 +17,16 @@ const showModal = ref(false);
 const showPreviewModal = ref(false);
 const previewPrompt = ref<Prompt | null>(null);
 const editingPrompt = ref<Prompt | null>(null);
+const previewFileInput = ref<HTMLInputElement | null>(null);
+const uploadingPreview = ref(false);
 const formData = ref({
   title: '',
   scene: '',
-  content: ''
+  content: '',
+  preview_url: ''
 });
+
+const apiBaseUrl = (import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
 
 const filteredPrompts = computed(() => {
   if (!searchQuery.value) return prompts.value;
@@ -32,6 +37,13 @@ const filteredPrompts = computed(() => {
     p.content.toLowerCase().includes(query)
   );
 });
+
+function resolvePreviewUrl(url?: string | null) {
+  if (!url) return '';
+  if (/^https?:\/\//i.test(url) || url.startsWith('data:')) return url;
+  if (url.startsWith('/generated-images/')) return `${apiBaseUrl}${url}`;
+  return url;
+}
 
 async function fetchPrompts() {
   loading.value = true;
@@ -49,7 +61,7 @@ async function fetchPrompts() {
 
 function openCreateModal() {
   editingPrompt.value = null;
-  formData.value = { title: '', scene: '', content: '' };
+  formData.value = { title: '', scene: '', content: '', preview_url: '' };
   showModal.value = true;
 }
 
@@ -58,7 +70,8 @@ function openEditModal(prompt: Prompt) {
   formData.value = {
     title: prompt.title,
     scene: prompt.scene || '',
-    content: prompt.content
+    content: prompt.content,
+    preview_url: resolvePreviewUrl(prompt.preview_url)
   };
   showModal.value = true;
 }
@@ -66,6 +79,57 @@ function openEditModal(prompt: Prompt) {
 function openPreviewModal(prompt: Prompt) {
   previewPrompt.value = prompt;
   showPreviewModal.value = true;
+}
+
+function triggerPreviewUpload() {
+  if (uploadingPreview.value) return;
+  previewFileInput.value?.click();
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('读取图片失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handlePreviewFileSelect(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+
+  if (!file.type.startsWith('image/')) {
+    toastStore.warning('文件格式不支持', '请上传 PNG、JPG、WEBP 或 GIF 图片');
+    input.value = '';
+    return;
+  }
+
+  uploadingPreview.value = true;
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    const response = await promptApi.uploadPreviewImage({
+      filename: file.name,
+      dataUrl
+    });
+
+    if (response.success && response.data?.url) {
+      formData.value.preview_url = response.data.url;
+      toastStore.success('上传成功', '提示词效果图已更新');
+    } else {
+      toastStore.error('上传失败', response.message || '请稍后重试');
+    }
+  } catch (error) {
+    toastStore.error('上传失败', error instanceof Error ? error.message : '未知错误');
+  } finally {
+    uploadingPreview.value = false;
+    input.value = '';
+  }
+}
+
+function clearPreviewImage() {
+  formData.value.preview_url = '';
 }
 
 async function savePrompt() {
@@ -80,7 +144,8 @@ async function savePrompt() {
       const response = await promptApi.update(editingPrompt.value.id, {
         title: formData.value.title,
         scene: formData.value.scene,
-        content: formData.value.content
+        content: formData.value.content,
+        preview_url: formData.value.preview_url
       });
       if (response.success) {
         toastStore.success('保存成功', '提示词已更新');
@@ -90,7 +155,8 @@ async function savePrompt() {
       const response = await promptApi.create({
         title: formData.value.title,
         scene: formData.value.scene,
-        content: formData.value.content
+        content: formData.value.content,
+        preview_url: formData.value.preview_url
       });
       if (response.success) {
         toastStore.success('创建成功', '新提示词已添加');
@@ -196,6 +262,9 @@ onMounted(() => {
         </div>
 
         <div class="prompt-card__body">
+          <div v-if="prompt.preview_url" class="prompt-card__effect">
+            <img :src="resolvePreviewUrl(prompt.preview_url)" :alt="`${prompt.title} 效果图`" />
+          </div>
           <h3 class="prompt-card__title">{{ prompt.title }}</h3>
           <div v-if="prompt.scene" class="prompt-card__scene">
             <Tag :size="12" />
@@ -242,6 +311,46 @@ onMounted(() => {
                 rows="6"
               ></textarea>
             </UiField>
+
+            <UiField label="效果图">
+              <input
+                ref="previewFileInput"
+                class="prompt-upload__input"
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                @change="handlePreviewFileSelect"
+              />
+              <button
+                v-if="!formData.preview_url"
+                class="prompt-upload"
+                type="button"
+                :disabled="uploadingPreview"
+                @click="triggerPreviewUpload"
+              >
+                <span class="prompt-upload__icon">
+                  <Upload v-if="!uploadingPreview" :size="20" />
+                  <span v-else class="prompt-upload__spinner" />
+                </span>
+                <span class="prompt-upload__text">
+                  {{ uploadingPreview ? '正在上传...' : '点击上传效果图' }}
+                </span>
+                <span class="prompt-upload__hint">支持 PNG、JPG、WEBP、GIF，建议 16:9 画面</span>
+              </button>
+
+              <div v-else class="prompt-effect-preview">
+                <img :src="resolvePreviewUrl(formData.preview_url)" alt="提示词效果图预览" />
+                <div class="prompt-effect-preview__actions">
+                  <UiButton size="sm" variant="secondary" :loading="uploadingPreview" @click="triggerPreviewUpload">
+                    <ImageIcon :size="14" />
+                    重新上传
+                  </UiButton>
+                  <UiButton size="sm" variant="ghost" @click="clearPreviewImage">
+                    <X :size="14" />
+                    移除
+                  </UiButton>
+                </div>
+              </div>
+            </UiField>
           </div>
           <div class="modal__footer">
             <UiButton variant="secondary" @click="showModal = false">取消</UiButton>
@@ -258,7 +367,10 @@ onMounted(() => {
             <h3>提示词预览</h3>
             <button class="modal__close" @click="showPreviewModal = false">×</button>
           </div>
-          <div class="modal__body">
+          <div class="modal__body modal__body--prompt-preview">
+            <div v-if="previewPrompt?.preview_url" class="prompt-preview-hero">
+              <img :src="resolvePreviewUrl(previewPrompt.preview_url)" :alt="`${previewPrompt.title} 效果图`" />
+            </div>
             <div class="preview-section">
               <div class="preview-label">标题</div>
               <div class="preview-value preview-value--title">{{ previewPrompt?.title }}</div>
@@ -270,7 +382,7 @@ onMounted(() => {
                 <span>{{ previewPrompt?.scene || '未设置' }}</span>
               </div>
             </div>
-            <div class="preview-section">
+            <div class="preview-section preview-section--content">
               <div class="preview-label">提示词内容</div>
               <div class="preview-content">{{ previewPrompt?.content }}</div>
             </div>
@@ -415,6 +527,115 @@ onMounted(() => {
   gap: 8px;
 }
 
+.prompt-card__effect,
+.prompt-effect-preview,
+.prompt-preview-hero {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+
+.prompt-card__effect {
+  aspect-ratio: 16 / 9;
+}
+
+.prompt-effect-preview,
+.prompt-preview-hero {
+  aspect-ratio: 16 / 9;
+  max-height: 260px;
+}
+
+.prompt-preview-hero {
+  flex: 0 0 auto;
+  height: clamp(180px, 26vh, 260px);
+  max-height: none;
+}
+
+.prompt-card__effect img,
+.prompt-effect-preview img,
+.prompt-preview-hero img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.prompt-upload__input {
+  display: none;
+}
+
+.prompt-upload {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 180px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-panel);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.prompt-upload:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.prompt-upload:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.prompt-upload__icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-accent);
+}
+
+.prompt-upload__text {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.prompt-upload__hint {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.prompt-upload__spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+.prompt-effect-preview__actions {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
 .prompt-card__title {
   margin: 0;
   font-size: 15px;
@@ -527,6 +748,11 @@ onMounted(() => {
   gap: 16px;
 }
 
+.modal__body--prompt-preview {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -568,6 +794,12 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 0 0 auto;
+}
+
+.preview-section--content {
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .preview-label {
@@ -592,7 +824,9 @@ onMounted(() => {
 }
 
 .preview-content {
-  max-height: min(52vh, 520px);
+  min-height: 180px;
+  max-height: none;
+  flex: 1 1 auto;
   overflow: auto;
   padding: 16px;
   border: 1px solid var(--color-border);

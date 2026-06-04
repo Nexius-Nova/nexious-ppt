@@ -1,5 +1,5 @@
-<script setup lang="ts">
-import { computed } from 'vue';
+﻿<script setup lang="ts">
+import { computed, ref } from 'vue';
 import { FileText, Image as ImageIcon, Layers, Palette, PenLine, SendHorizontal, SlidersHorizontal, Sparkles, Upload, X } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
@@ -7,7 +7,10 @@ import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
-import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, PromptDefinition, PptTemplate, TemplateAsset } from '@/types/agent';
+import TemplatePreviewDeck from '@/components/common/TemplatePreviewDeck.vue';
+import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, PromptDefinition, PptTemplate, TemplateAsset, TemplateAssetSettings } from '@/types/agent';
+
+type TemplatePreviewSlide = NonNullable<TemplateAssetSettings['previewSlides']>[number];
 
 const props = defineProps<{
   modelValue: DeckInput;
@@ -34,6 +37,9 @@ const fileTypeIcons: Record<string, any> = {
   default: FileText
 };
 
+const previewingTemplateSlide = ref<{ slide: TemplatePreviewSlide; index: number } | null>(null);
+const previewingPromptImage = ref<PromptDefinition | null>(null);
+
 const parameterGroups: Array<{ key: ConfigOptionKey; label: string; icon: any }> = [
   { key: 'slideCount', label: '页数', icon: Layers },
   { key: 'summaryLength', label: '摘要', icon: SlidersHorizontal },
@@ -46,9 +52,16 @@ const templateOptions = computed(() =>
   props.templates.map((template) => ({
     label: template.name,
     value: template.id,
-    description: template.category || template.description || '通用模板'
+    description: template.category || template.description || '通用模板',
+    previewSlides: template.settings?.previewSlides || [],
+    accent: template.accent
   }))
 );
+
+const templateSelectOptions = computed(() => [
+  { label: '不使用参考模板', value: '', description: '由 AI 根据主题和资料自主设计' },
+  ...templateOptions.value
+]);
 
 const selectedTemplateId = computed(() => props.selectedTemplate?.id || '');
 
@@ -59,7 +72,8 @@ const promptOptions = computed(() => [
   ...props.prompts.map((prompt) => ({
     label: prompt.title,
     value: prompt.id,
-    description: compactText(prompt.content || prompt.scene || '暂无提示词内容', 42)
+    description: compactText(prompt.content || prompt.scene || '暂无提示词内容', 42),
+    previewImageUrl: prompt.previewUrl
   }))
 ]);
 
@@ -101,7 +115,10 @@ function isParameterActive(key: ConfigOptionKey, value: string) {
 }
 
 function handleTemplateSelect(templateId: string) {
-  if (!templateId) return;
+  if (!templateId) {
+    emit('clear-template');
+    return;
+  }
   emit('select-template', templateId);
 }
 
@@ -112,6 +129,13 @@ function handlePromptSelect(promptId: string) {
 function compactText(value: string, maxLength = 88) {
   const normalized = value.trim().replace(/\s+/g, ' ');
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function normalizePreviewSvg(svg: string) {
+  const baseUrl = (import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
+  return svg
+    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])\.?\/generated-images\//gi, `$1${baseUrl}/generated-images/`)
+    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])generated-images\//gi, `$1${baseUrl}/generated-images/`);
 }
 
 function handleRun() {
@@ -154,33 +178,49 @@ function handleFileChange(event: Event) {
           />
         </UiField>
         <div v-if="selectedPrompt" class="prompt-selector__preview">
-          <strong>{{ selectedPrompt.title }}</strong>
-          <span>{{ compactText(selectedPrompt.content) }}</span>
+          <button
+            v-if="selectedPrompt.previewUrl"
+            type="button"
+            class="prompt-selector__image"
+            title="预览提示词效果图"
+            @click="previewingPromptImage = selectedPrompt"
+          >
+            <img :src="selectedPrompt.previewUrl" :alt="`${selectedPrompt.title} 效果图`" />
+          </button>
+          <div v-else class="prompt-selector__image prompt-selector__image--empty" aria-hidden="true">
+            <ImageIcon :size="26" />
+            <span>暂无效果图</span>
+          </div>
+          <div class="prompt-selector__preview-copy">
+            <strong>{{ selectedPrompt.title }}</strong>
+            <span>{{ compactText(selectedPrompt.content || selectedPrompt.scene || '当前提示词将参与本次生成') }}</span>
+          </div>
         </div>
         <p v-else class="prompt-selector__hint">可为空；选择后会和资料内容一起发送给 AI。</p>
       </div>
 
       <div class="template-selector">
-        <UiField class="template-selector__field" label="模板方案">
+        <UiField class="template-selector__field" label="参考模板">
           <UiSelect
             :model-value="selectedTemplateId"
-            :options="templateOptions"
-            :disabled="templateOptions.length === 0"
+            :options="templateSelectOptions"
             placeholder="选择本 PPT 使用的模板"
             @update:model-value="handleTemplateSelect"
           />
         </UiField>
-        <div v-if="selectedTemplate" class="template-selector__active">
-          <div class="template-selector__summary">
-            <span class="template-selector__dot" :style="{ background: selectedTemplate.accent || '#334155' }"></span>
-            <div>
-              <strong>{{ selectedTemplate.name }}</strong>
-              <p>{{ selectedTemplate.category || selectedTemplate.description || '当前 PPT 将按此模板生成' }}</p>
-            </div>
+        <div v-if="selectedTemplate" class="template-selector__preview">
+          <TemplatePreviewDeck
+            v-if="selectedTemplate.settings.previewSlides?.length"
+            :slides="selectedTemplate.settings.previewSlides"
+            :accent="selectedTemplate.accent"
+            variant="panel"
+            interactive
+            @preview="(slide, index) => { previewingTemplateSlide = { slide, index }; }"
+          />
+          <div class="template-selector__preview-copy">
+            <strong>{{ selectedTemplate.name }}</strong>
+            <span>{{ compactText(selectedTemplate.description || selectedTemplate.category || '当前 PPT 将按此模板生成') }}</span>
           </div>
-          <button type="button" class="template-selector__clear" title="清除模板方案" @click="$emit('clear-template')">
-            <X :size="14" />
-          </button>
         </div>
         <p v-else class="template-selector__hint">
           {{ templateOptions.length ? '未选择时由 AI 自主设计。' : '模板广场暂无模板。' }}
@@ -241,6 +281,60 @@ function handleFileChange(event: Event) {
         开始生成 PPT
       </UiButton>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="previewingTemplateSlide"
+        class="template-preview-modal"
+        @click.self="previewingTemplateSlide = null"
+      >
+        <div class="template-preview-modal__panel">
+          <header class="template-preview-modal__header">
+            <div>
+              <h3>{{ previewingTemplateSlide.slide.title }}</h3>
+              <span>第 {{ previewingTemplateSlide.slide.pageNumber || previewingTemplateSlide.index + 1 }} 页 · {{ previewingTemplateSlide.slide.layout }}</span>
+            </div>
+            <button type="button" class="template-preview-modal__close" title="关闭" @click="previewingTemplateSlide = null">
+              <X :size="18" />
+            </button>
+          </header>
+          <div class="template-preview-modal__body">
+            <div
+              v-if="previewingTemplateSlide.slide.svg"
+              class="template-preview-modal__canvas"
+              v-html="normalizePreviewSvg(previewingTemplateSlide.slide.svg)"
+            />
+            <div v-else class="template-preview-modal__fallback">
+              <strong>{{ previewingTemplateSlide.slide.title }}</strong>
+              <p>{{ previewingTemplateSlide.slide.description || '暂无 SVG 预览' }}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="previewingPromptImage"
+        class="template-preview-modal"
+        @click.self="previewingPromptImage = null"
+      >
+        <div class="template-preview-modal__panel">
+          <header class="template-preview-modal__header">
+            <div>
+              <h3>{{ previewingPromptImage.title }}</h3>
+              <span>{{ previewingPromptImage.scene || '提示词效果图' }}</span>
+            </div>
+            <button type="button" class="template-preview-modal__close" title="关闭" @click="previewingPromptImage = null">
+              <X :size="18" />
+            </button>
+          </header>
+          <div class="template-preview-modal__body">
+            <div class="template-preview-modal__image">
+              <img :src="previewingPromptImage.previewUrl" :alt="`${previewingPromptImage.title} 效果图`" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </UiCard>
 </template>
 
@@ -255,46 +349,39 @@ function handleFileChange(event: Event) {
   gap: 6px;
 }
 
-.template-selector__field,
-.prompt-selector__field {
-  gap: 6px;
-}
-
 .prompt-selector {
   display: grid;
   gap: 6px;
 }
 
-.template-selector__active,
+.template-selector__field,
+.prompt-selector__field {
+  gap: 6px;
+}
+
+.template-selector__preview,
 .prompt-selector__preview {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  display: grid;
+  gap: 10px;
   min-width: 0;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 10px;
   background: var(--color-panel);
 }
 
-.prompt-selector__preview {
-  align-items: flex-start;
-  flex-direction: column;
+.template-selector__preview-copy,
+.prompt-selector__preview-copy {
+  display: grid;
   gap: 3px;
-}
-
-.template-selector__summary {
-  display: flex;
-  align-items: center;
-  gap: 9px;
   min-width: 0;
+  width: 100%;
 }
 
-.template-selector__summary strong,
-.template-selector__summary p,
-.prompt-selector__preview strong,
-.prompt-selector__preview span {
+.template-selector__preview-copy strong,
+.template-selector__preview-copy span,
+.prompt-selector__preview-copy strong,
+.prompt-selector__preview-copy span {
   display: block;
   overflow: hidden;
   margin: 0;
@@ -302,48 +389,51 @@ function handleFileChange(event: Event) {
   white-space: nowrap;
 }
 
-.template-selector__summary strong,
-.prompt-selector__preview strong {
+.template-selector__preview-copy strong,
+.prompt-selector__preview-copy strong {
   color: var(--color-text);
   font-size: 12px;
   font-weight: 700;
 }
 
-.template-selector__summary p,
+.template-selector__preview-copy span,
 .template-selector__hint,
-.prompt-selector__preview span,
+.prompt-selector__preview-copy span,
 .prompt-selector__hint {
   color: var(--color-muted);
   font-size: 12px;
 }
 
-.template-selector__dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.12);
-}
-
-.template-selector__clear {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 auto;
+.prompt-selector__image {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 154px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  padding: 0;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: var(--color-card);
-  color: var(--color-muted);
-  cursor: pointer;
-  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+  background: var(--color-panel);
+  cursor: zoom-in;
 }
 
-.template-selector__clear:hover {
-  border-color: var(--color-danger);
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
+.prompt-selector__image:hover {
+  border-color: var(--color-border-strong);
+}
+
+.prompt-selector__image--empty {
+  gap: 8px;
+  color: var(--color-muted);
+  font-size: 12px;
+  cursor: default;
+}
+
+.prompt-selector__image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .template-selector__hint,
@@ -453,10 +543,137 @@ function handleFileChange(event: Event) {
   background: var(--color-panel);
 }
 
+.template-preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(8, 12, 18, 0.72);
+}
+
+.template-preview-modal__panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1120px, 94vw);
+  max-height: 92vh;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.template-preview-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.template-preview-modal__header h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.template-preview-modal__header span {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.template-preview-modal__close {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.template-preview-modal__close:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+  background: var(--color-panel);
+}
+
+.template-preview-modal__body {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  background: var(--color-panel);
+}
+
+.template-preview-modal__canvas,
+.template-preview-modal__image,
+.template-preview-modal__fallback {
+  width: min(100%, 1040px);
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.template-preview-modal__canvas :deep(svg) {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.template-preview-modal__image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--color-panel);
+}
+
+.template-preview-modal__fallback {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--color-muted);
+  text-align: center;
+}
+
+.template-preview-modal__fallback strong {
+  color: var(--color-text);
+  font-size: 18px;
+}
+
+.template-preview-modal__fallback p {
+  margin: 0;
+  font-size: 13px;
+}
+
 @media (max-width: 720px) {
   .parameter-group {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .template-preview-modal {
+    padding: 12px;
+  }
+
+  .template-preview-modal__body {
+    padding: 10px;
   }
 }
 </style>
