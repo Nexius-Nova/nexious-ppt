@@ -1,6 +1,8 @@
 import type { DesignSpec, SpecSlide, SkillExtension } from './spec.js';
 import { CANVAS_FORMATS, normalizeColors, normalizeTypography } from './spec.js';
 
+type TemplatePreviewSlide = { title: string; layout: string; description?: string; svg?: string; pageNumber?: number };
+
 export interface StrategistInput {
   topic: string;
   content: string;
@@ -31,7 +33,7 @@ export interface StrategistInput {
         summary?: string;
       };
       outlinePattern?: string[];
-      previewSlides?: Array<{ title: string; layout: string; description?: string }>;
+      previewSlides?: TemplatePreviewSlide[];
       constraints?: {
         preferredSlideCount?: number;
         suitableFor?: string[];
@@ -56,11 +58,12 @@ function getPreferredMode(tone: string): DesignSpec['visualTheme']['mode'] {
 
 export function buildStrategistPrompt(input: StrategistInput): { system: string; user: string } {
   const canvas = CANVAS_FORMATS.ppt169;
-  const selectedTemplate = input.templateAsset || null;
+  const selectedTemplate = sanitizeTemplateAsset(input.templateAsset);
+  const safeInput = { ...input, templateAsset: selectedTemplate };
   const mode = getPreferredMode(input.tone);
   const lengthGuide = getLengthGuide(input.summaryLength);
   const slideCountGuide = getSlideCountGuide(input.slideCount);
-  const templateGuide = buildTemplateGuide(input);
+  const templateGuide = buildTemplateGuide(safeInput);
   const colorGuide = buildColorGuide(selectedTemplate);
 
   const skillExtensions: SkillExtension[] = input.skills.map((s) => ({
@@ -123,13 +126,14 @@ ${colorGuide}
 5. 颜色只能使用 HEX；不能使用渐变、rgba 或透明色；整体至少包含 3 个有区分度的色相，避免一整套单色系。
 6. 未选择模板方案时，AI 必须根据主题自主决定主题风格、排版布局、大纲结构和颜色，不得固定套用 business、tech 或任何默认风格。
 7. 只有 templateAsset 存在时，才参考模板方案。模板方案只影响当前项目，不允许变成全局风格。
-8. 模板是参考约束，不是示例文案。可以参考主题、布局、大纲结构和示例页形式，但必须结合用户内容重新组织。
-9. layout 要和内容一致：图表页用 content-chart；需要配图、场景图、示意图、封面图，或图片能明显提升表达时，用 content-image 并填写 visualPrompt。
-10. speakerNotes 使用中文，能帮助演讲者自然讲述。
-11. ${lengthGuide}
-12. 默认视觉模式为 ${mode}。
-13. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、visualPrompt 都要和内容强相关。
-14. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。`;
+8. 模板只提供视觉设计样式参考，包括色彩、字体、图标、版式节奏、构图比例、留白、装饰方式和 SVG 绘制风格；模板不得影响用户输入内容。
+9. outline 的标题、要点、speakerNotes、visualPrompt 的语义内容必须来自用户主题、内容资料和额外提示词，不允许从模板名称、模板说明、模板示例页或模板 SVG 中提取业务内容。
+10. layout 要先匹配用户内容，再借鉴模板的视觉版式。图表页用 content-chart；需要配图、场景图、示意图、封面图，或图片能明显提升表达时，用 content-image 并填写 visualPrompt。
+11. speakerNotes 使用中文，能帮助演讲者自然讲述。
+12. ${lengthGuide}
+13. 默认视觉模式为 ${mode}。
+14. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、visualPrompt 都要和用户内容强相关。
+15. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。`;
 
   const user = `主题：${input.topic || '未命名主题'}
 内容资料：${input.content || '用户未提供详细资料，请基于主题生成结构完整、信息可信但不过度编造的演示文稿。'}
@@ -212,7 +216,7 @@ function buildColorGuide(templateAsset: StrategistInput['templateAsset']) {
 }
 
 function buildTemplateGuide(input: StrategistInput) {
-  const template = input.templateAsset;
+  const template = sanitizeTemplateAsset(input.templateAsset);
   if (!template) {
     return '模板方案：未选择。请由 AI 根据当前主题、资料、受众和场景自主决定主题风格、排版布局、大纲结构、色彩和视觉节奏。不要沿用上一次项目或历史模板的风格。';
   }
@@ -235,11 +239,68 @@ function buildTemplateGuide(input: StrategistInput) {
 - 内容页：${(layout.contentLayouts || []).join('、') || '结合内容灵活安排'}
 - 数据页：${(layout.dataLayouts || []).join('、') || '按数据表达选择'}
 - 总结页：${layout.summary || '收束结论和行动建议'}
-大纲结构参考：${(settings.outlinePattern || []).join(' -> ') || '按内容生成'}
-示例 PPT 预览：${(settings.previewSlides || []).map((slide) => `${slide.title}（${slide.layout}${slide.description ? `：${slide.description}` : ''}）`).join('；') || '无'}
+示例页 SVG 参考（只用于学习视觉样式、构图、元素比例和装饰语言，不得提取或复用其中的业务内容）：${formatTemplatePreviewSlides(settings.previewSlides)}
 适用场景：${(constraints.suitableFor || []).join('、') || '未设置'}
-避免：${(constraints.avoid || []).join('、') || '不要照搬示例文字'}
-参考页数：${constraints.preferredSlideCount || template.slideCount || '由内容决定'}`;
+避免：${(constraints.avoid || []).join('、') || '不要照搬示例文字'}`;
+}
+
+function formatTemplatePreviewSlides(previewSlides?: TemplatePreviewSlide[]) {
+  if (!Array.isArray(previewSlides) || previewSlides.length === 0) return '无';
+  return previewSlides
+    .slice(0, 3)
+    .map((slide: any, index) => {
+      const meta = `${slide.title || `示例页 ${index + 1}`}（${slide.layout || 'content'}${slide.description ? `：${slide.description}` : ''}）`;
+      const svg = typeof slide.svg === 'string' && slide.svg.trim() ? `\nSVG:\n${slide.svg.trim()}` : '';
+      return `${meta}${svg}`;
+    })
+    .join('\n\n');
+}
+
+function sanitizeTemplateAsset(template: StrategistInput['templateAsset']): StrategistInput['templateAsset'] {
+  if (!template) return null;
+  const settings = template.settings || {};
+  return {
+    id: String(template.id || ''),
+    name: String(template.name || ''),
+    category: template.category ? String(template.category) : undefined,
+    description: template.description ? String(template.description) : undefined,
+    slideCount: Number(template.slideCount) || undefined,
+    accent: template.accent ? String(template.accent) : undefined,
+    settings: {
+      styleGuide: settings.styleGuide
+        ? {
+            visualTone: settings.styleGuide.visualTone,
+            colorPalette: Array.isArray(settings.styleGuide.colorPalette) ? settings.styleGuide.colorPalette.map(String) : undefined,
+            typography: settings.styleGuide.typography,
+            iconStyle: settings.styleGuide.iconStyle,
+          }
+        : undefined,
+      layoutGuide: settings.layoutGuide
+        ? {
+            cover: settings.layoutGuide.cover,
+            section: settings.layoutGuide.section,
+            contentLayouts: Array.isArray(settings.layoutGuide.contentLayouts) ? settings.layoutGuide.contentLayouts.map(String) : undefined,
+            dataLayouts: Array.isArray(settings.layoutGuide.dataLayouts) ? settings.layoutGuide.dataLayouts.map(String) : undefined,
+            summary: settings.layoutGuide.summary,
+          }
+        : undefined,
+      previewSlides: Array.isArray(settings.previewSlides)
+        ? settings.previewSlides.slice(0, 3).map((slide) => ({
+            title: String(slide.title || '示例页'),
+            layout: String(slide.layout || 'content'),
+            description: slide.description ? String(slide.description) : undefined,
+            svg: typeof slide.svg === 'string' && slide.svg.trim() ? slide.svg : undefined,
+            pageNumber: Number(slide.pageNumber) || undefined,
+          }))
+        : undefined,
+      constraints: settings.constraints
+        ? {
+            suitableFor: Array.isArray(settings.constraints.suitableFor) ? settings.constraints.suitableFor.map(String) : undefined,
+            avoid: Array.isArray(settings.constraints.avoid) ? settings.constraints.avoid.map(String) : undefined,
+          }
+        : undefined,
+    },
+  };
 }
 
 function getLengthGuide(summaryLength: string) {

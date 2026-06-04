@@ -825,7 +825,7 @@ async function retryImage(slideId: string) {
                       <Sparkles :size="14" />
                       生成图片
                     </UiButton>
-                    <UiButton variant="secondary" :disabled="isRunning || !designSpec" @click="store.runLayout">
+                    <UiButton variant="secondary" :disabled="isRunning || isPaused || !designSpec" @click="store.runLayout">
                       <Paintbrush :size="14" />
                       生成页面
                     </UiButton>
@@ -914,7 +914,7 @@ async function retryImage(slideId: string) {
                   </div>
 
                   <div class="stage-actions">
-                    <UiButton variant="primary" :disabled="isRunning || !designSpec" @click="store.runLayout">
+                    <UiButton variant="primary" :disabled="isRunning || isPaused || !designSpec" @click="store.runLayout">
                       <Play :size="14" />
                       生成页面
                     </UiButton>

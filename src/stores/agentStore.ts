@@ -462,7 +462,7 @@ export const useAgentStore = defineStore('agent', () => {
       const project = {
         ...rawProject,
         id: String(rawProject.id),
-        state: rawProject.state || makeDefaultProjectState()
+        state: normalizeProjectState(rawProject.state || makeDefaultProjectState())
       };
       const existingById = byId.get(project.id);
       if (existingById) {
@@ -533,6 +533,39 @@ export const useAgentStore = defineStore('agent', () => {
     };
   }
 
+  function normalizeProjectState(state?: Partial<PptProjectState> | null): PptProjectState {
+    const fallback = makeDefaultProjectState();
+    if (!state) return fallback;
+    return {
+      ...fallback,
+      ...state,
+      input: { ...fallback.input, ...(state.input || {}), files: [...(state.input?.files || [])] },
+      parameters: normalizeAgentParameters(state.parameters || fallback.parameters),
+      selectedTemplate: state.selectedTemplate ? snapshotTemplateAsset(state.selectedTemplate) : null,
+      outline: (state.outline || []).map(s => ({ ...s, bullets: [...(s.bullets || [])] })),
+      images: (state.images || []).map(img => ({ ...img })),
+      exportArtifacts: (state.exportArtifacts || []).map(item => ({ ...item })),
+      enabledSkillIds: [...(state.enabledSkillIds || [])],
+      selectedPromptId: state.selectedPromptId || '',
+      activityLog: [...(state.activityLog || [])],
+      steps: (state.steps || fallback.steps).map(s => ({ ...s })),
+      svgPages: (state.svgPages || []).map(page => ({ ...page })),
+      configOptions: state.configOptions || fallback.configOptions,
+    };
+  }
+
+  function persistCurrentSelectionToActiveProject() {
+    if (!activePpt.value) return;
+    const baseState = normalizeProjectState(activePpt.value.state);
+    activePpt.value.state = {
+      ...baseState,
+      selectedPromptId: selectedPromptId.value,
+      selectedTemplate: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
+    };
+    activePpt.value.templateId = selectedTemplate.value?.id || 'auto';
+    activePpt.value.updatedAt = Date.now();
+  }
+
   function getReadyImageSlideIds(sourceImages = images.value) {
     return sourceImages
       .filter((image) => image.selected && !image.error && Boolean(image.url))
@@ -567,9 +600,7 @@ export const useAgentStore = defineStore('agent', () => {
     return {
       input: { ...input.value, files: [...input.value.files] },
       parameters: { ...parameters.value },
-      selectedTemplate: selectedTemplate.value
-        ? { ...selectedTemplate.value, settings: structuredClone(selectedTemplate.value.settings) }
-        : null,
+      selectedTemplate: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
       outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
       images: persistable
         ? images.value.map(img => ({ ...img, url: img.url?.startsWith('data:') ? '' : img.url }))
@@ -604,47 +635,48 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function restoreProjectState(state: PptProjectState) {
-    input.value = { ...state.input, files: [...state.input.files] };
-    parameters.value = normalizeAgentParameters(state.parameters);
-    selectedTemplate.value = state.selectedTemplate
-      ? { ...state.selectedTemplate, settings: structuredClone(state.selectedTemplate.settings || {}) }
+    const normalizedState = normalizeProjectState(state);
+    input.value = { ...normalizedState.input, files: [...normalizedState.input.files] };
+    parameters.value = normalizeAgentParameters(normalizedState.parameters);
+    selectedTemplate.value = normalizedState.selectedTemplate
+      ? snapshotTemplateAsset(normalizedState.selectedTemplate!)
       : null;
-    outline.value = state.outline.map(s => ({ ...s }));
-    images.value = state.images.map(img => ({ ...img }));
+    outline.value = normalizedState.outline.map(s => ({ ...s }));
+    images.value = normalizedState.images.map(img => ({ ...img }));
     syncGeneratedSlidesFromImages();
-    exportArtifacts.value = [...state.exportArtifacts];
+    exportArtifacts.value = [...normalizedState.exportArtifacts];
 
-    const savedSkillIds = new Set(state.enabledSkillIds || []);
+    const savedSkillIds = new Set(normalizedState.enabledSkillIds || []);
     skills.value = skills.value.map(s => ({
       ...s,
       enabled: savedSkillIds.has(s.id)
     }));
 
-    selectedPromptId.value = state.selectedPromptId || '';
+    selectedPromptId.value = normalizedState.selectedPromptId || '';
 
-    designSpec.value = state.designSpec || null;
-    specLock.value = state.specLock || null;
-    svgPages.value = state.svgPages || [];
+    designSpec.value = normalizedState.designSpec || null;
+    specLock.value = normalizedState.specLock || null;
+    svgPages.value = normalizedState.svgPages || [];
     normalizeParametersAgainstConfig();
     retryingPageNumbers.value = new Set();
-    const hadActiveWorkflow = Boolean(state.workflowActive || state.steps?.some(step => step.status === 'running'));
-    recoveredActiveWorkflow.value = hadActiveWorkflow && !state.paused;
-    isPaused.value = Boolean(state.paused || hadActiveWorkflow);
+    const hadActiveWorkflow = Boolean(normalizedState.workflowActive || normalizedState.steps?.some(step => step.status === 'running'));
+    recoveredActiveWorkflow.value = hadActiveWorkflow && !normalizedState.paused;
+    isPaused.value = Boolean(normalizedState.paused || hadActiveWorkflow);
     pauseRequested.value = false;
-    resumeStage.value = state.resumeStage || state.lastActiveStep || null;
-    executorCursor.value = state.executorCursor || svgPages.value.length || 0;
-    if (state.lastActiveStep && workflowSteps.some(step => step.id === state.lastActiveStep)) {
-      activeStep.value = state.lastActiveStep;
+    resumeStage.value = normalizedState.resumeStage || normalizedState.lastActiveStep || null;
+    executorCursor.value = normalizedState.executorCursor || svgPages.value.length || 0;
+    if (normalizedState.lastActiveStep && workflowSteps.some(step => step.id === normalizedState.lastActiveStep)) {
+      activeStep.value = normalizedState.lastActiveStep;
     }
 
-    if (state.activityLog && state.activityLog.length > 0) {
-      activityLog.value = [...state.activityLog];
+    if (normalizedState.activityLog && normalizedState.activityLog.length > 0) {
+      activityLog.value = [...normalizedState.activityLog];
     } else {
       activityLog.value = [];
     }
 
-    if (state.steps && state.steps.length > 0) {
-      const restoredSteps = state.steps.map(s => ({
+    if (normalizedState.steps && normalizedState.steps.length > 0) {
+      const restoredSteps = normalizedState.steps.map(s => ({
         ...s,
         status: (s.status === 'running' ? (hadActiveWorkflow ? 'running' : 'idle') : s.status) as WorkflowStep['status'],
         progress: s.status === 'running' && !hadActiveWorkflow ? 0 : s.progress,
@@ -742,7 +774,9 @@ export const useAgentStore = defineStore('agent', () => {
         return {};
       }
     }
-    return typeof value === 'object' ? value as Record<string, any> : {};
+    if (typeof value !== 'object') return {};
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null ? value as Record<string, any> : {};
   }
 
   function toStringArray(value: unknown): string[] {
@@ -835,6 +869,22 @@ export const useAgentStore = defineStore('agent', () => {
       slideCount: Number(template.slideCount || (template as any).slide_count || 10),
       accent: template.accent || '#334155',
     };
+    return {
+      ...base,
+      settings: normalizeTemplateSettings(template.settings, base),
+    };
+  }
+
+  function snapshotTemplateAsset(template: TemplateAsset): TemplateAsset {
+    const base = {
+      id: String(template.id),
+      name: String(template.name || ''),
+      category: String(template.category || ''),
+      description: String(template.description || ''),
+      slideCount: Number(template.slideCount || 10),
+      accent: String(template.accent || '#334155'),
+    };
+
     return {
       ...base,
       settings: normalizeTemplateSettings(template.settings, base),
@@ -1092,6 +1142,104 @@ export const useAgentStore = defineStore('agent', () => {
     return true;
   }
 
+  function releaseActiveRunLock() {
+    workflowRunToken.value += 1;
+    isRunning.value = false;
+    pauseRequested.value = false;
+    runningProjectId.value = null;
+    currentGeneratingSlide.value = null;
+  }
+
+  function takeoverPendingLayoutPauseForRetry(pageNumber: number) {
+    const shouldResumePausedLayoutAfterRetry = Boolean(
+      isPaused.value &&
+      activeStep.value === 'layout' &&
+      (resumeStage.value === 'layout' || hasPendingLayoutPages())
+    );
+    const shouldResumeAfterRetry = Boolean(
+      shouldResumePausedLayoutAfterRetry ||
+      (
+        isRunning.value &&
+        pauseRequested.value &&
+        activeStep.value === 'layout' &&
+        !isPaused.value
+      )
+    );
+
+    if (isRunning.value && !pauseRequested.value && !isPaused.value) {
+      const toastStore = useToastStore();
+      toastStore.warning('页面正在生成', '请先暂停后再重试单页');
+      return { allowed: false, shouldResumeAfterRetry: false };
+    }
+
+    if (isRunning.value || pauseRequested.value) {
+      releaseActiveRunLock();
+      if (shouldResumeAfterRetry) {
+        pushLog(`已接管暂停中的页面生成，第 ${pageNumber} 页重试成功后会继续后续页面。`);
+      }
+    } else if (shouldResumePausedLayoutAfterRetry) {
+      pushLog(`第 ${pageNumber} 页重试成功后会继续后续页面。`);
+    }
+
+    return { allowed: true, shouldResumeAfterRetry };
+  }
+
+  function isFallbackSvgPage(svg?: string) {
+    return Boolean(svg && svg.includes('本页待重试'));
+  }
+
+  function sortSvgPagesByPageNumber() {
+    svgPages.value = [...svgPages.value].sort((left, right) => left.pageNumber - right.pageNumber);
+  }
+
+  function layoutPageCount() {
+    return designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount || svgPages.value.length;
+  }
+
+  function hasPendingLayoutPages(totalPages = layoutPageCount()) {
+    if (totalPages <= 0) return false;
+    const pagesByNumber = new Map(svgPages.value.map(page => [page.pageNumber, page]));
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      const page = pagesByNumber.get(pageNumber);
+      if (!page || isFallbackSvgPage(page.svg)) return true;
+    }
+    return false;
+  }
+
+  function completedLeadingLayoutPages(totalPages = layoutPageCount()) {
+    if (totalPages <= 0) return 0;
+    const pagesByNumber = new Map(svgPages.value.map(page => [page.pageNumber, page]));
+
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      const page = pagesByNumber.get(pageNumber);
+      if (!page || isFallbackSvgPage(page.svg)) return pageNumber - 1;
+    }
+
+    return totalPages;
+  }
+
+  function updateLayoutStepAfterPageRetry() {
+    const totalPages = layoutPageCount();
+    if (totalPages <= 0) return;
+    const pagesByNumber = new Map(svgPages.value.map(page => [page.pageNumber, page]));
+    let completedPages = 0;
+
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      const page = pagesByNumber.get(pageNumber);
+      if (page && !isFallbackSvgPage(page.svg)) completedPages += 1;
+    }
+
+    const progress = Math.min(100, Math.round((completedPages / totalPages) * 100));
+    if (completedPages >= totalPages) {
+      executorCursor.value = totalPages;
+      setStepStatus('layout', 'done', 100);
+      return;
+    }
+
+    executorCursor.value = completedLeadingLayoutPages(totalPages);
+    setStepStatus('layout', isPaused.value ? 'running' : 'idle', progress);
+  }
+
   function resetDownstreamSteps(afterStepId: WorkflowStepId) {
     const stepOrder: WorkflowStepId[] = ['input', 'outline', 'images', 'layout', 'preview'];
     const afterIndex = stepOrder.indexOf(afterStepId);
@@ -1285,6 +1433,8 @@ export const useAgentStore = defineStore('agent', () => {
         selectPptProject(activePpt.value.id);
       } else {
         input.value = { topic: '', content: '', files: [] };
+        selectedPromptId.value = '';
+        selectedTemplate.value = null;
         outline.value = [];
         images.value = [];
         exportArtifacts.value = [];
@@ -1301,7 +1451,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     if (activePpt.value) {
       cancelActiveRunForProjectSwitch();
-      syncToProject();
+      await syncToProject();
     }
 
     const numericId = parseInt(id.replace(/\D/g, '') || '0', 10);
@@ -1707,6 +1857,7 @@ export const useAgentStore = defineStore('agent', () => {
 
   function selectPrompt(id: string) {
     selectedPromptId.value = id;
+    persistCurrentSelectionToActiveProject();
     const prompt = prompts.value.find((item) => item.id === id);
     pushLog(prompt ? `已选择提示词：${prompt.title}` : '已清空提示词选择。');
     syncToProject();
@@ -1751,7 +1902,7 @@ export const useAgentStore = defineStore('agent', () => {
           slideCount: parameters.value.slideCount,
           imageStyle: parameters.value.imageStyle,
           template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
-          templateAsset: selectedTemplate.value,
+          templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
           promptContent: selectedPromptContent(),
           skills: [],
         },
@@ -2214,10 +2365,13 @@ export const useAgentStore = defineStore('agent', () => {
   async function retrySlidePage(pageNumber: number) {
     if (!checkActivePpt() || !checkApiKeys() || !designSpec.value || !specLock.value) return;
     if (retryingPageNumbers.value.has(pageNumber)) return;
+    const takeover = takeoverPendingLayoutPauseForRetry(pageNumber);
+    if (!takeover.allowed) return;
     const ctx = createRunContext();
     const slide = designSpec.value.outline.find(item => item.pageNumber === pageNumber);
     if (!slide) return;
     retryingPageNumbers.value = new Set([...retryingPageNumbers.value, pageNumber]);
+    let shouldContinueAfterRetry = false;
 
     activeStep.value = 'layout';
     setStepStatus('layout', 'running', Math.round(((pageNumber - 1) / Math.max(1, designSpec.value.outline.length)) * 100));
@@ -2233,18 +2387,34 @@ export const useAgentStore = defineStore('agent', () => {
       } else {
         svgPages.value.push(page);
       }
-      setStepStatus('layout', 'done', 100);
+      sortSvgPagesByPageNumber();
+      updateLayoutStepAfterPageRetry();
       pushLog(`第 ${pageNumber} 页已重新生成。`);
       await syncToProjectNow();
+      shouldContinueAfterRetry = takeover.shouldResumeAfterRetry && hasPendingLayoutPages();
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : '未知错误';
-      setStepStatus('layout', 'idle', 0);
+      if (takeover.shouldResumeAfterRetry) {
+        markPaused('layout');
+      } else {
+        updateLayoutStepAfterPageRetry();
+      }
       pushLog(`第 ${pageNumber} 页重试失败：${errMsg}`);
       await syncToProjectNow();
     } finally {
       const nextRetrying = new Set(retryingPageNumbers.value);
       nextRetrying.delete(pageNumber);
       retryingPageNumbers.value = nextRetrying;
+    }
+
+    if (shouldContinueAfterRetry) {
+      clearPauseState();
+      await runFullWorkflow({ resume: true });
+    } else if (takeover.shouldResumeAfterRetry && !hasPendingLayoutPages()) {
+      clearPauseState();
+      activeStep.value = 'preview';
+      await finishGenerationJob();
+      await syncToProjectNow();
     }
   }
 
@@ -2704,8 +2874,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     if (activePpt.value) {
       selectedTemplate.value = templateAsset;
-      activePpt.value.templateId = templateAsset.id;
-      activePpt.value.updatedAt = Date.now();
+      persistCurrentSelectionToActiveProject();
     } else {
       const toastStore = useToastStore();
       toastStore.info('请先选择 PPT 项目', '模板方案只会应用到当前 PPT。');
@@ -2718,6 +2887,7 @@ export const useAgentStore = defineStore('agent', () => {
 
   function clearGalleryTemplate() {
     selectedTemplate.value = null;
+    persistCurrentSelectionToActiveProject();
     if (activePpt.value) {
       activePpt.value.templateId = 'auto';
       activePpt.value.updatedAt = Date.now();

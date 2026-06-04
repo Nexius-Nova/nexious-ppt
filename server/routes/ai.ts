@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'fs/promises';
 import { getDefaultApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
 import { authMiddleware, AuthRequest } from './auth.js';
+import { buildOpenAIEndpoint, normalizeOpenAIBaseUrl } from '../utils/openaiUrl.js';
 
 const router = Router();
 
@@ -91,15 +92,6 @@ function resolveProvider(provider: string, model: string): string {
     }
   }
   return 'openai';
-}
-
-function normalizeBaseUrl(baseUrl: string, defaultUrl: string): string {
-  let url = baseUrl || defaultUrl;
-  url = url.replace(/\/+$/, '');
-  if (!url.endsWith('/v1') && !url.includes('/v1/')) {
-    url = `${url}/v1`;
-  }
-  return url;
 }
 
 function buildAuthHeaders(authType: AuthType, apiKey: string): Record<string, string> {
@@ -248,8 +240,7 @@ async function generateWithOpenAIProtocol(
   baseUrl: string,
   config: ImageProviderConfig
 ): Promise<string> {
-  const normalizedUrl = normalizeBaseUrl(baseUrl, config.defaultBaseUrl);
-  const url = `${normalizedUrl}/images/generations`;
+  const url = buildOpenAIEndpoint(baseUrl, '/images/generations', config.defaultBaseUrl);
   const fullPrompt = `${prompt}，${getStylePrompt(style)}，高质量，适合PPT展示`.slice(0, 4000);
 
   const response = await fetchWithRetry(url, {
@@ -295,12 +286,7 @@ async function streamOpenAI(
   messages: Message[],
   res: Response
 ): Promise<void> {
-  let normalizedBaseUrl = baseUrl || 'https://api.openai.com/v1';
-  normalizedBaseUrl = normalizedBaseUrl.replace(/\/+$/, '');
-  if (!normalizedBaseUrl.endsWith('/v1') && !normalizedBaseUrl.includes('/v1/')) {
-    normalizedBaseUrl = `${normalizedBaseUrl}/v1`;
-  }
-  const url = `${normalizedBaseUrl}/chat/completions`;
+  const url = buildOpenAIEndpoint(baseUrl, '/chat/completions');
 
   const response = await fetch(url, {
     method: 'POST',
@@ -934,12 +920,7 @@ router.post('/test-text-model', authMiddleware, async (req: AuthRequest, res: Re
         break;
       default: {
         const effectiveBaseUrl = TEXT_PROVIDER_BASE_URLS[provider] || baseUrl;
-        let normalizedBaseUrl = effectiveBaseUrl || 'https://api.openai.com/v1';
-        normalizedBaseUrl = normalizedBaseUrl.replace(/\/+$/, '');
-        if (!normalizedBaseUrl.endsWith('/v1') && !normalizedBaseUrl.includes('/v1/')) {
-          normalizedBaseUrl = `${normalizedBaseUrl}/v1`;
-        }
-        testUrl = `${normalizedBaseUrl}/chat/completions`;
+        testUrl = buildOpenAIEndpoint(effectiveBaseUrl, '/chat/completions');
         testBody = {
           model,
           messages: testMessages,
@@ -1034,10 +1015,9 @@ router.post('/test-image-model', authMiddleware, async (req: AuthRequest, res: R
     };
 
     if (config.supportsBaseUrl && baseUrl) {
-      const normalizedUrl = normalizeBaseUrl(baseUrl, config.defaultBaseUrl);
-      testUrl = `${normalizedUrl}${config.testEndpoint}`;
+      testUrl = buildOpenAIEndpoint(baseUrl, config.testEndpoint, config.defaultBaseUrl);
     } else {
-      testUrl = `${config.defaultBaseUrl}${config.testEndpoint}`;
+      testUrl = buildOpenAIEndpoint(config.defaultBaseUrl, config.testEndpoint, config.defaultBaseUrl);
     }
 
     const response = await fetch(testUrl, {

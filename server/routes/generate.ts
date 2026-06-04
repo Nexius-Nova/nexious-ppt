@@ -15,6 +15,7 @@ import type { StrategistInput, DesignSpec, SpecLock } from '../engine/index.js';
 import { inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
 import { exportWithNexiousPpt } from '../engine/ppt-exporter.js';
 import { authMiddleware, AuthRequest } from './auth.js';
+import { buildOpenAIEndpoint, normalizeOpenAIBaseUrl } from '../utils/openaiUrl.js';
 
 const router = Router();
 
@@ -70,11 +71,7 @@ async function streamText(
   let normalizedBaseUrl = baseUrl || 'https://api.openai.com/v1';
   if (provider !== 'anthropic' && provider !== 'google') {
     const effectiveBaseUrl = TEXT_PROVIDER_BASE_URLS[provider] || baseUrl;
-    normalizedBaseUrl = effectiveBaseUrl || 'https://api.openai.com/v1';
-    normalizedBaseUrl = normalizedBaseUrl.replace(/\/+$/, '');
-    if (!normalizedBaseUrl.endsWith('/v1') && !normalizedBaseUrl.includes('/v1/')) {
-      normalizedBaseUrl = `${normalizedBaseUrl}/v1`;
-    }
+    normalizedBaseUrl = normalizeOpenAIBaseUrl(effectiveBaseUrl, 'https://api.openai.com/v1');
   }
 
   let url: string;
@@ -103,7 +100,7 @@ async function streamText(
       generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
     };
   } else {
-    url = `${normalizedBaseUrl}/chat/completions`;
+    url = buildOpenAIEndpoint(normalizedBaseUrl, '/chat/completions');
     headers['Authorization'] = `Bearer ${apiKey}`;
     body = { model, messages, temperature: 0.7, max_tokens: 8192, stream: true };
   }
