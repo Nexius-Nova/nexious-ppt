@@ -287,6 +287,10 @@ def convert_g(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
 # ---------------------------------------------------------------------------
 
 _NON_VISUAL_TAGS = frozenset(('defs', 'title', 'desc', 'metadata', 'style'))
+_DEFINITION_TAGS = frozenset((
+    'clipPath', 'mask', 'pattern', 'marker',
+    'linearGradient', 'radialGradient', 'filter',
+))
 
 
 def _supports_matrix_transform(elem: ET.Element) -> bool:
@@ -344,6 +348,43 @@ def collect_defs(root: ET.Element) -> dict[str, ET.Element]:
             if elem_id:
                 defs[elem_id] = child
     return defs
+
+
+def hoist_definition_elements(root: ET.Element) -> int:
+    """Move SVG definition nodes that were emitted in visual groups into <defs>.
+
+    LLM-generated SVG sometimes places <clipPath> directly beside the <image>
+    that references it. Browsers accept that, but the native PPTX converter
+    treats non-<defs> children as visual content and rejects the slide. Hoisting
+    preserves the resource for later lookup while keeping the slide editable.
+    """
+    defs_elem = _find_or_create_defs(root)
+    moved = 0
+
+    def walk(parent: ET.Element, in_defs: bool = False) -> None:
+        nonlocal moved
+        parent_tag = _local_tag(parent)
+        next_in_defs = in_defs or parent_tag == 'defs'
+        for child in list(parent):
+            child_tag = _local_tag(child)
+            if child_tag in _DEFINITION_TAGS and not next_in_defs:
+                parent.remove(child)
+                defs_elem.append(child)
+                moved += 1
+                continue
+            walk(child, next_in_defs)
+
+    walk(root)
+    return moved
+
+
+def _find_or_create_defs(root: ET.Element) -> ET.Element:
+    for child in list(root):
+        if _local_tag(child) == 'defs':
+            return child
+    defs_elem = ET.Element(f'{{{SVG_NS}}}defs')
+    root.insert(0, defs_elem)
+    return defs_elem
 
 
 def convert_element(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
@@ -480,6 +521,12 @@ def convert_svg_to_slide_shapes(
         })
         if verbose:
             print('  Flattened positional <tspan> into independent <text>')
+
+    hoisted_defs = hoist_definition_elements(root)
+    if hoisted_defs:
+        trace_steps.append({'action': 'hoist-definition-elements', 'count': hoisted_defs})
+        if verbose:
+            print(f'  Hoisted {hoisted_defs} definition element(s) into <defs>')
 
     unsupported = _collect_unsupported_visuals(root)
     if unsupported:

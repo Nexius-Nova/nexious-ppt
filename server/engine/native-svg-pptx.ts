@@ -106,11 +106,16 @@ async function assertEditablePptx(buffer: Buffer) {
   }
 
   let editableSlides = 0;
+  const rasterOnlySlides: string[] = [];
   for (const slideFile of slideFiles) {
     const xml = await zip.file(slideFile)?.async('string');
     if (!xml) continue;
-    if (/<p:(?:sp|grpSp|cxnSp)\b/.test(xml)) {
+    const stats = inspectSlideEditability(xml);
+    if (stats.editablePrimitiveCount > 0) {
       editableSlides += 1;
+    }
+    if (stats.isRasterOnlySnapshot) {
+      rasterOnlySlides.push(slideFile);
     }
   }
 
@@ -118,10 +123,59 @@ async function assertEditablePptx(buffer: Buffer) {
     throw new Error(`可编辑形状检查失败：${editableSlides}/${slideFiles.length} 页包含原生形状。`);
   }
 
+  if (rasterOnlySlides.length) {
+    throw new Error(`检测到整页图片快照幻灯片，已拒绝导出不可编辑 PPT：${rasterOnlySlides.slice(0, 5).join(', ')}`);
+  }
+
   const missingTargets = await findMissingRelationshipTargets(zip);
   if (missingTargets.length) {
     throw new Error(`PPTX 关系目标缺失：${missingTargets.slice(0, 3).join('; ')}`);
   }
+}
+
+function inspectSlideEditability(xml: string) {
+  const shapeCount = countMatches(xml, /<p:sp\b/g);
+  const groupCount = countMatches(xml, /<p:grpSp\b/g);
+  const connectorCount = countMatches(xml, /<p:cxnSp\b/g);
+  const textFrameCount = countMatches(xml, /<p:txBody\b/g);
+  const picBlocks = xml.match(/<p:pic\b[\s\S]*?<\/p:pic>/g) || [];
+  const hasFullSlidePicture = picBlocks.some((block) => isFullSlidePicture(block));
+  const editablePrimitiveCount = shapeCount + groupCount + connectorCount;
+
+  return {
+    editablePrimitiveCount,
+    isRasterOnlySnapshot:
+      picBlocks.length > 0
+      && hasFullSlidePicture
+      && textFrameCount === 0
+      && editablePrimitiveCount <= 1,
+  };
+}
+
+function countMatches(value: string, pattern: RegExp) {
+  return (value.match(pattern) || []).length;
+}
+
+function isFullSlidePicture(picXml: string) {
+  const off = picXml.match(/<a:off\b[^>]*\bx="(-?\d+)"[^>]*\by="(-?\d+)"/);
+  const ext = picXml.match(/<a:ext\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/);
+  if (!off || !ext) return false;
+
+  const x = Number(off[1]);
+  const y = Number(off[2]);
+  const cx = Number(ext[1]);
+  const cy = Number(ext[2]);
+  const wide16x9 = { cx: 12192000, cy: 6858000 };
+  const standard4x3 = { cx: 9144000, cy: 6858000 };
+
+  return Math.abs(x) <= 5000
+    && Math.abs(y) <= 5000
+    && (isNearSize(cx, cy, wide16x9) || isNearSize(cx, cy, standard4x3));
+}
+
+function isNearSize(cx: number, cy: number, size: { cx: number; cy: number }) {
+  const tolerance = 50000;
+  return Math.abs(cx - size.cx) <= tolerance && Math.abs(cy - size.cy) <= tolerance;
 }
 
 async function findMissingRelationshipTargets(zip: JSZip): Promise<string[]> {

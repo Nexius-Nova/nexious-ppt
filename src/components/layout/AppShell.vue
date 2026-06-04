@@ -23,4 +23,11 @@
 .app-shell--nav-collapsed {
   grid-template-columns: 68px 1fr;
 }
+
+.app-shell--workflow-focus {
+  grid-template-columns: 1fr;
+  grid-template-areas:
+    "header"
+    "main";
+}
 </style>

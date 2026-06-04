@@ -669,7 +669,7 @@ export interface Template {
   slide_count: number;
   accent: string;
   preview_url: string | null;
-  settings: TemplateAssetSettings;
+  settings: TemplateAssetSettings | string | null;
   is_public: boolean;
   created_at: string;
   updated_at: string;

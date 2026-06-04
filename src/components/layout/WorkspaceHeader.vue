@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-import { Brain, Circle, Monitor, Moon, Sun, Palette } from 'lucide-vue-next';
+import { Circle, Monitor, Moon, Sun, Palette } from 'lucide-vue-next';
 import { ref } from 'vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import NotificationCenter from '@/components/common/NotificationCenter.vue';
@@ -93,9 +93,6 @@ function setStyle(newStyle: 'default' | 'claw' | 'knot' | 'dash') {
         </Transition>
       </div>
 
-      <button class="workspace-header__tool" title="AI 模型">
-        <Brain :size="14" />
-      </button>
       <NotificationCenter />
     </div>
   </header>

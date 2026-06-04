@@ -236,6 +236,19 @@ export async function exportSvgPagesToPptx(
   canvasHeight: number,
   title: string
 ): Promise<string> {
+  void pages;
+  void canvasWidth;
+  void canvasHeight;
+  void title;
+  throw new Error('已禁用 SVG 整页图片版 PPTX 导出：请使用后端可编辑 PPTX 导出接口。');
+}
+
+async function exportSvgPagesToPptxLegacy(
+  pages: Array<{ svg: string; speakerNotes: string }>,
+  canvasWidth: number,
+  canvasHeight: number,
+  title: string
+): Promise<string> {
   const { default: pptxgen } = await import('pptxgenjs');
   const pptx = new pptxgen();
 

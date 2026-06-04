@@ -113,6 +113,13 @@ const editorOutlineItems = computed(() => splitLines(editorForm.value.outlinePat
 const editorSuitableItems = computed(() => splitLines(editorForm.value.suitableFor || editorForm.value.category));
 const editorAvoidItems = computed(() => splitLines(editorForm.value.avoid));
 const editorPreviewSlides = computed(() => parsePreviewSlideLines(editorForm.value.previewSlides));
+const isTemplateNameDuplicated = computed(() => {
+  const name = normalizeTemplateText(editorForm.value.name);
+  if (!name) return false;
+  return templates.value.some((template) =>
+    normalizeTemplateText(template.name) === name && template.id !== editingTemplate.value?.id
+  );
+});
 const editorCompleteness = computed(() => {
   const checks = [
     Boolean(editorForm.value.name.trim()),
@@ -162,6 +169,10 @@ function parseSettings(value: unknown): Record<string, any> {
   return typeof value === 'object' ? value as Record<string, any> : {};
 }
 
+function normalizeTemplateText(value: unknown) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 function splitLines(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
   if (typeof value === 'string') return value.split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
@@ -186,6 +197,8 @@ function parsePreviewSlideLines(value: string) {
 function normalizeSettings(template: Template): TemplateAssetSettings {
   const raw = parseSettings(template.settings);
   return {
+    sourceProjectId: raw.sourceProjectId ? String(raw.sourceProjectId) : undefined,
+    sourceProjectTitle: raw.sourceProjectTitle ? String(raw.sourceProjectTitle) : undefined,
     styleGuide: {
       visualTone: raw.styleGuide?.visualTone || template.description || '按主题定制的演示风格',
       colorPalette: splitLines(raw.styleGuide?.colorPalette).length
@@ -235,7 +248,10 @@ function normalizeSettings(template: Template): TemplateAssetSettings {
 
 function buildSettingsFromForm(): TemplateAssetSettings {
   const existingSlides = editingTemplate.value ? normalizeSettings(editingTemplate.value).previewSlides || [] : [];
+  const existingSettings = editingTemplate.value ? normalizeSettings(editingTemplate.value) : {};
   return {
+    sourceProjectId: existingSettings.sourceProjectId,
+    sourceProjectTitle: existingSettings.sourceProjectTitle,
     styleGuide: {
       visualTone: editorForm.value.visualTone.trim(),
       colorPalette: splitLines(editorForm.value.colorPalette),
@@ -386,6 +402,11 @@ async function saveTemplate() {
     activeEditorSection.value = 'basic';
     return;
   }
+  if (isTemplateNameDuplicated.value) {
+    toastStore.error('模板名称重复', `「${editorForm.value.name.trim()}」已存在，请换一个名称`);
+    activeEditorSection.value = 'basic';
+    return;
+  }
   if (!editorForm.value.visualTone.trim()) {
     toastStore.warning('请填写视觉气质');
     activeEditorSection.value = 'style';
@@ -408,12 +429,13 @@ async function saveTemplate() {
   };
 
   saving.value = true;
+  toastStore.info(editingTemplate.value ? '正在更新模板' : '正在创建模板', payload.name);
   try {
     const response = editingTemplate.value
       ? await templateApi.update(editingTemplate.value.id, payload)
       : await templateApi.create(payload);
     if (response.success) {
-      toastStore.success(editingTemplate.value ? '模板方案已更新' : '模板方案已创建');
+      toastStore.success(editingTemplate.value ? '模板方案已更新' : '模板方案已创建', payload.name);
       showEditor.value = false;
       await fetchTemplates();
       await agentStore.fetchTemplates();
@@ -770,6 +792,9 @@ onMounted(fetchTemplates);
                 <div class="editor-grid">
                   <UiField label="方案名称" required>
                     <UiInput v-model="editorForm.name" placeholder="例如：年度经营复盘" />
+                    <p v-if="isTemplateNameDuplicated" class="field-hint field-hint--error">
+                      模板名称已存在，请换一个名称。
+                    </p>
                   </UiField>
                   <UiField label="分类">
                     <UiInput v-model="editorForm.category" placeholder="例如：商务、产品、教育" />
@@ -922,7 +947,7 @@ onMounted(fetchTemplates);
 
           <footer class="modal-footer">
             <UiButton variant="secondary" @click="showEditor = false">取消</UiButton>
-            <UiButton variant="primary" :loading="saving" :disabled="!editorForm.name.trim()" @click="saveTemplate">
+            <UiButton variant="primary" :loading="saving" :disabled="!editorForm.name.trim() || isTemplateNameDuplicated" @click="saveTemplate">
               {{ editingTemplate ? '保存方案' : '创建方案' }}
             </UiButton>
           </footer>
@@ -1892,6 +1917,17 @@ onMounted(fetchTemplates);
   border-color: var(--color-accent);
   outline: none;
   box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+.field-hint {
+  margin: 8px 0 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.field-hint--error {
+  color: var(--color-danger);
 }
 
 .color-row {

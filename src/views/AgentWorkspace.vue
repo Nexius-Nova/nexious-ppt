@@ -31,7 +31,6 @@ import InputComposer from '@/components/panels/InputComposer.vue';
 import OutlineEditor from '@/components/panels/OutlineEditor.vue';
 import DeckPreview from '@/components/preview/DeckPreview.vue';
 import SvgDeckPreview from '@/components/preview/SvgDeckPreview.vue';
-import WorkflowRail from '@/components/workflow/WorkflowRail.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiProgress from '@/components/ui/UiProgress.vue';
@@ -67,7 +66,6 @@ const {
   parameters,
   selectedImages,
   steps,
-  streamingText,
   svgPages,
   currentGeneratingSlide,
   isDataLoaded,
@@ -156,6 +154,7 @@ const stepTitles: Record<string, string> = {
 
 const currentStepTitle = computed(() => stepTitles[activeStep.value] || '工作区');
 const isPageView = computed(() => ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config'].includes(activeStep.value));
+const isProjectRoute = computed(() => route.path.startsWith('/project/'));
 const latestSvgPage = computed(() => svgPages.value[svgPages.value.length - 1] || null);
 const layoutTotalPages = computed(() => designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount || 0);
 const layoutCompletedPages = computed(() => svgPages.value.length);
@@ -324,10 +323,6 @@ function nearestAvailableWorkflowStep(target: WorkflowStepId) {
   return 'input';
 }
 
-const disabledWorkflowSteps = computed(() =>
-  workflowTabs.filter((step) => !canOpenWorkflowStep(step)) as WorkflowStepId[]
-);
-
 function routeWorkflowTab(): WorkflowStepId {
   const tab = String(route.params.tab || 'input');
   return isWorkflowTab(tab) ? tab : 'input';
@@ -449,6 +444,10 @@ function handleNavigate(step: string) {
   }
 }
 
+function returnToMyPpt() {
+  void router.push('/my-ppt');
+}
+
 async function runFromCurrentStep() {
   switch (activeStep.value) {
     case 'input':
@@ -547,9 +546,10 @@ async function retryImage(slideId: string) {
 </script>
 
 <template>
-  <AppShell :class="{ 'app-shell--nav-collapsed': isSideNavCollapsed }">
+  <AppShell :class="{ 'app-shell--nav-collapsed': isSideNavCollapsed, 'app-shell--workflow-focus': isProjectRoute }">
     <WorkspaceHeader />
     <SideNavigation
+      v-if="!isProjectRoute"
       :collapsed="isSideNavCollapsed"
       @toggle-collapse="isSideNavCollapsed = !isSideNavCollapsed"
     />
@@ -572,6 +572,9 @@ async function retryImage(slideId: string) {
       <template v-else>
         <section class="workspace-step-header">
           <div class="workspace-step-header__info">
+            <button class="workflow-back-button" type="button" title="返回我的 PPT" @click="returnToMyPpt">
+              <ChevronLeft :size="16" />
+            </button>
             <div>
               <h2>{{ currentStepTitle }}</h2>
               <p>{{ activeProjectTitle }}</p>
@@ -595,10 +598,6 @@ async function retryImage(slideId: string) {
             <UiButton variant="secondary" :disabled="isRunning || isPaused" @click="runFromCurrentStep">
               <Play :size="14" />
               运行当前阶段
-            </UiButton>
-            <UiButton variant="primary" :disabled="isRunning || isPaused" @click="store.runFullWorkflow">
-              <RefreshCw :size="14" />
-              完整生成
             </UiButton>
             <button class="workspace-step-header__toggle" @click="showRightPanel = !showRightPanel" title="切换运行日志">
               <component :is="showRightPanel ? ChevronRight : ChevronLeft" :size="16" />
@@ -663,8 +662,8 @@ async function retryImage(slideId: string) {
                   />
                 </div>
 
-                <div v-show="activeStep === 'outline'" class="stage-panel stage-panel--split">
-                  <aside class="outline-control">
+                <div v-show="activeStep === 'outline'" class="stage-panel">
+                  <section class="outline-control">
                     <div class="outline-control__header">
                       <span class="outline-control__icon">
                         <Wand2 :size="18" />
@@ -706,20 +705,11 @@ async function retryImage(slideId: string) {
                       </UiButton>
                     </div>
 
-                    <div v-if="streamingText" class="outline-stream">
-                      <div>
-                        <Loader2 :size="14" class="spin" />
-                        <strong>正在生成</strong>
-                      </div>
-                      <p>{{ streamingText.slice(-180) }}</p>
-                    </div>
-
-                  </aside>
+                  </section>
 
                   <OutlineEditor
                     :outline="outline"
-                    :is-running="isRunning && activeStep === 'outline'"
-                    :streaming-text="streamingText"
+                    :is-running="outlineStepStatus === 'running'"
                     :show-run-action="false"
                     @update-title="store.updateSlideTitle"
                     @update-bullet="store.updateSlideBullet"
@@ -954,24 +944,6 @@ async function retryImage(slideId: string) {
           </aside>
         </div>
 
-        <footer class="workspace-status-bar">
-          <div class="workspace-status-bar__left">
-            <WorkflowRail
-              :steps="workflowDisplaySteps"
-              :active-step="activeStep"
-              :disabled-steps="disabledWorkflowSteps"
-              @select="goToWorkflowStep"
-            />
-          </div>
-          <div class="workspace-status-bar__right">
-            <span class="status-item">
-              <Brain :size="12" />
-              文本模型就绪
-            </span>
-            <span class="status-item">{{ outline.length }} 页大纲</span>
-            <span class="status-item">{{ images.length }} 张图片</span>
-          </div>
-        </footer>
       </template>
     </main>
 
@@ -1006,7 +978,12 @@ async function retryImage(slideId: string) {
         </footer>
       </div>
     </div>
-    <AiChatPanel />
+    <AiChatPanel
+      v-if="isProjectRoute && activePpt"
+      :key="activePpt.id"
+      :project-id="activePpt.id"
+      :project-title="activePpt.title"
+    />
   </AppShell>
 </template>
 
@@ -1044,8 +1021,29 @@ async function retryImage(slideId: string) {
 .workspace-step-header__info {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
+}
+
+.workflow-back-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast), transform var(--transition-fast);
+}
+
+.workflow-back-button:hover {
+  transform: translateX(-1px);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+  background: var(--color-panel);
 }
 
 .workspace-step-header__info h2 {
@@ -1192,15 +1190,20 @@ async function retryImage(slideId: string) {
 
 .pipeline-console {
   display: grid;
-  gap: 14px;
-  max-width: 1180px;
+  grid-template-columns: 260px minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+  max-width: 1360px;
   margin: 0 auto;
 }
 
 .pipeline-stages {
   display: grid;
-  grid-template-columns: repeat(5, minmax(150px, 1fr));
-  gap: 10px;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  align-self: start;
 }
 
 .pipeline-stage {
@@ -1208,8 +1211,8 @@ async function retryImage(slideId: string) {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  min-height: 144px;
-  padding: 14px;
+  min-height: 92px;
+  padding: 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-card);
@@ -1270,12 +1273,15 @@ async function retryImage(slideId: string) {
 
 .pipeline-stage__body {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+  width: 100%;
 }
 
 .pipeline-stage__head {
-  display: grid;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
 
@@ -1288,7 +1294,7 @@ async function retryImage(slideId: string) {
 .pipeline-stage__desc {
   color: var(--color-muted);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.45;
 }
 
 .pipeline-stage__foot {
@@ -1332,11 +1338,6 @@ async function retryImage(slideId: string) {
   min-width: 0;
 }
 
-.stage-panel--split {
-  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
-  align-items: start;
-}
-
 .loading-placeholder,
 .outline-control,
 .image-gate,
@@ -1359,10 +1360,10 @@ async function retryImage(slideId: string) {
 
 .outline-control {
   display: grid;
-  gap: 12px;
-  padding: 12px;
-  position: sticky;
-  top: 0;
+  grid-template-columns: minmax(190px, 1fr) minmax(320px, 1.35fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
 }
 
 .outline-control__header,
@@ -1410,15 +1411,15 @@ async function retryImage(slideId: string) {
 
 .outline-control__stats {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
 .outline-control__stats > div {
   display: grid;
   gap: 5px;
-  min-height: 56px;
-  padding: 10px;
+  min-height: 54px;
+  padding: 9px 10px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-panel);
@@ -1440,36 +1441,14 @@ async function retryImage(slideId: string) {
 }
 
 .outline-control__actions {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+  min-width: 132px;
 }
 
 .outline-control__actions :deep(.ui-button) {
   width: 100%;
-}
-
-.outline-stream {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface);
-}
-
-.outline-stream > div {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--color-accent);
-  font-size: 12px;
-}
-
-.outline-stream p {
-  margin: 0;
-  color: var(--color-muted);
-  font-size: 12px;
-  line-height: 1.55;
 }
 
 .image-gate {
@@ -1922,16 +1901,31 @@ async function retryImage(slideId: string) {
 }
 
 @media (max-width: 1180px) {
-  .pipeline-stages {
-    grid-template-columns: repeat(2, minmax(220px, 1fr));
-  }
-
-  .stage-panel--split {
+  .pipeline-console {
     grid-template-columns: 1fr;
   }
 
-  .outline-control {
+  .pipeline-stages {
     position: static;
+    grid-template-columns: repeat(5, minmax(150px, 1fr));
+  }
+
+  .pipeline-stage {
+    min-height: 120px;
+  }
+
+  .outline-control {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .outline-control__actions {
+    flex-direction: row;
+    min-width: 0;
+  }
+
+  .outline-control__actions :deep(.ui-button) {
+    width: auto;
   }
 }
 
@@ -1945,7 +1939,6 @@ async function retryImage(slideId: string) {
   }
 
   .workspace-step-header,
-  .workspace-status-bar,
   .image-gate,
   .executor-board__header,
   .quality-strip {
@@ -1953,9 +1946,16 @@ async function retryImage(slideId: string) {
     flex-direction: column;
   }
 
-  .workspace-step-header__actions,
-  .workspace-status-bar__right {
+  .workspace-step-header__actions {
     flex-wrap: wrap;
+  }
+
+  .pipeline-stages {
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+  }
+
+  .outline-control__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .executor-preview {
@@ -1970,6 +1970,18 @@ async function retryImage(slideId: string) {
 
   .pipeline-stages {
     grid-template-columns: 1fr;
+  }
+
+  .outline-control__stats {
+    grid-template-columns: 1fr;
+  }
+
+  .outline-control__actions {
+    flex-direction: column;
+  }
+
+  .outline-control__actions :deep(.ui-button) {
+    width: 100%;
   }
 
   .image-page-item {

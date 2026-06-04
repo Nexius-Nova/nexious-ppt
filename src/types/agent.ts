@@ -131,6 +131,8 @@ export interface PptTemplate {
 }
 
 export interface TemplateAssetSettings {
+  sourceProjectId?: string;
+  sourceProjectTitle?: string;
   styleGuide?: {
     visualTone?: string;
     colorPalette?: string[];

@@ -6,6 +6,27 @@ const router = Router();
 
 router.use(authMiddleware);
 
+function normalizeName(value: unknown): string {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+async function findDuplicateTemplate(
+  userId: number,
+  name: unknown,
+  excludeId?: string | number
+): Promise<any | null> {
+  const normalized = normalizeName(name);
+  if (!normalized) return null;
+
+  const templates = await query(
+    'SELECT id, name FROM templates WHERE user_id = ?',
+    [userId]
+  );
+  return templates.find((template: any) =>
+    normalizeName(template.name) === normalized && String(template.id) !== String(excludeId || '')
+  ) || null;
+}
+
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { category } = req.query;
@@ -58,12 +79,17 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const { name, category, description, slide_count, accent, preview_url, settings, is_public } = req.body;
-    if (!name) {
+    const templateName = String(name || '').trim();
+    if (!templateName) {
       return res.status(400).json({ success: false, message: '模版名称不能为空' });
+    }
+    const duplicate = await findDuplicateTemplate(req.userId!, templateName);
+    if (duplicate) {
+      return res.status(409).json({ success: false, message: `模版名称「${templateName}」已存在，请换一个名称` });
     }
     const result = await query(
       'INSERT INTO templates (user_id, name, category, description, slide_count, accent, preview_url, settings, is_public) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [req.userId, name, category || '其他', description || '', slide_count || 10, accent || '#ef2d2d', preview_url, JSON.stringify(settings || {}), is_public ? 1 : 0]
+      [req.userId, templateName, category || '其他', description || '', slide_count || 10, accent || '#ef2d2d', preview_url, JSON.stringify(settings || {}), is_public ? 1 : 0]
     );
     const newTemplate = await query(
       'SELECT * FROM templates WHERE id = ?',
@@ -79,6 +105,10 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { name, category, description, slide_count, accent, preview_url, settings, is_public } = req.body;
+    const templateName = String(name || '').trim();
+    if (!templateName) {
+      return res.status(400).json({ success: false, message: '模版名称不能为空' });
+    }
     const existing = await query(
       'SELECT id FROM templates WHERE id = ? AND user_id = ?',
       [req.params.id, req.userId]
@@ -86,9 +116,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     if (existing.length === 0) {
       return res.status(404).json({ success: false, message: '模版不存在或无权编辑' });
     }
+    const duplicate = await findDuplicateTemplate(req.userId!, templateName, req.params.id);
+    if (duplicate) {
+      return res.status(409).json({ success: false, message: `模版名称「${templateName}」已存在，请换一个名称` });
+    }
     await query(
       'UPDATE templates SET name = ?, category = ?, description = ?, slide_count = ?, accent = ?, preview_url = ?, settings = ?, is_public = ? WHERE id = ?',
-      [name, category || '其他', description || '', slide_count || 10, accent || '#ef2d2d', preview_url, JSON.stringify(settings || {}), is_public ? 1 : 0, req.params.id]
+      [templateName, category || '其他', description || '', slide_count || 10, accent || '#ef2d2d', preview_url, JSON.stringify(settings || {}), is_public ? 1 : 0, req.params.id]
     );
     const updated = await query(
       'SELECT * FROM templates WHERE id = ?',

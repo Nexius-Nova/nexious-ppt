@@ -52,6 +52,18 @@ async function findReusableProjectId(userId: number, title: unknown, topic: unkn
   return match?.id || null;
 }
 
+async function findDuplicateProjectId(userId: number, title: unknown, excludeId?: number): Promise<number | null> {
+  const normalizedTitle = normalizeProjectText(title);
+  if (!normalizedTitle) return null;
+
+  const projects = await getProjectsByUserId(userId);
+  const match = projects.find((project) =>
+    normalizeProjectText(project.title) === normalizedTitle && project.id !== excludeId
+  );
+
+  return match?.id || null;
+}
+
 router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     if (!req.userId) {
@@ -188,12 +200,11 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const reusableProjectId = await findReusableProjectId(req.userId, title, topic);
-    if (reusableProjectId) {
-      return res.json({
-        success: true,
-        data: { id: reusableProjectId, reused: true },
-        message: '已复用已有项目'
+    const duplicateProjectId = await findDuplicateProjectId(req.userId, title);
+    if (duplicateProjectId) {
+      return res.status(409).json({
+        success: false,
+        message: `项目名称「${String(title).trim()}」已存在，请换一个名称`
       });
     }
 
@@ -280,6 +291,22 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
         success: false,
         message: '没有提供要更新的数据'
       });
+    }
+
+    if (updateData.title !== undefined) {
+      if (!String(updateData.title || '').trim()) {
+        return res.status(400).json({
+          success: false,
+          message: '项目标题不能为空'
+        });
+      }
+      const duplicateProjectId = await findDuplicateProjectId(req.userId, updateData.title, projectId);
+      if (duplicateProjectId) {
+        return res.status(409).json({
+          success: false,
+          message: `项目名称「${String(updateData.title).trim()}」已存在，请换一个名称`
+        });
+      }
     }
 
     const success = await updateProject(projectId, updateData);

@@ -4,10 +4,15 @@ import { MessageCircle, X, SendHorizonal, Bot, User, Loader2 } from 'lucide-vue-
 import { storeToRefs } from 'pinia';
 import { useAgentStore } from '@/stores/agentStore';
 import { chatService, type ChatMessage } from '@/services/chatService';
-import { parseSlideActions, stripActionDirectives } from '@/composables/slideActionHelpers';
+import { parseSlideActions } from '@/composables/slideActionHelpers';
+
+const props = defineProps<{
+  projectId: string;
+  projectTitle?: string;
+}>();
 
 const store = useAgentStore();
-const { outline, parameters, activeStep, isRunning } = storeToRefs(store);
+const { outline, parameters, activeStep, activePptId } = storeToRefs(store);
 
 const isOpen = ref(false);
 const messages = ref<ChatMessage[]>([]);
@@ -20,10 +25,21 @@ onMounted(() => {
   addWelcomeMessage();
 });
 
+watch(
+  () => props.projectId,
+  () => {
+    isOpen.value = false;
+    isLoading.value = false;
+    inputText.value = '';
+    messages.value = [];
+    addWelcomeMessage();
+  }
+);
+
 function addWelcomeMessage() {
   messages.value.push({
     role: 'assistant',
-    content: '你好！我是 AI PPT 助手。我可以帮你：\n\n• 修改幻灯片标题和内容\n• 添加或删除要点\n• 回答 PPT 相关问题\n\n你可以直接说"把第3页标题改为xxx"或"为第1页添加一个要点"。'
+    content: `你好！我是 AI PPT 助手，当前只会操作「${props.projectTitle || '当前 PPT'}」。\n\n• 修改幻灯片标题和内容\n• 添加或删除要点\n• 回答本 PPT 相关问题\n\n你可以直接说"把第3页标题改为xxx"或"为第1页添加一个要点"。`
   });
 }
 
@@ -45,6 +61,8 @@ function toggle() {
 
 function buildContext() {
   return {
+    projectId: props.projectId,
+    projectTitle: props.projectTitle || '',
     currentStep: activeStep.value,
     totalSlides: outline.value.length,
     slideTitles: outline.value.map(s => s.title),
@@ -55,6 +73,7 @@ function buildContext() {
 async function sendMessage() {
   const text = inputText.value.trim();
   if (!text || isLoading.value) return;
+  const requestProjectId = props.projectId;
 
   inputText.value = '';
   const userMessage: ChatMessage = { role: 'user', content: text };
@@ -73,33 +92,45 @@ async function sendMessage() {
       buildContext(),
       {
         onContent: (text) => {
+          if (!isCurrentProject(requestProjectId)) return;
           assistantMessage.content = text;
           scrollToBottom();
         },
         onComplete: (text) => {
+          if (!isCurrentProject(requestProjectId)) return;
           assistantMessage.content = text;
           scrollToBottom();
-          processActions(text);
+          processActions(text, requestProjectId);
         },
         onError: () => {
+          if (!isCurrentProject(requestProjectId)) return;
           assistantMessage.content = '抱歉，AI 回复失败。请检查模型配置后重试。';
         }
       }
     );
   } catch {
-    assistantMessage.content = '抱歉，AI 回复失败。请检查模型配置后重试。';
+    if (isCurrentProject(requestProjectId)) {
+      assistantMessage.content = '抱歉，AI 回复失败。请检查模型配置后重试。';
+    }
   } finally {
-    isLoading.value = false;
-    scrollToBottom();
+    if (isCurrentProject(requestProjectId)) {
+      isLoading.value = false;
+      scrollToBottom();
+    }
   }
 }
 
-function processActions(text: string) {
+function isCurrentProject(projectId: string) {
+  return props.projectId === projectId && activePptId.value === projectId;
+}
+
+function processActions(text: string, projectId: string) {
+  if (!isCurrentProject(projectId)) return;
   const actions = parseSlideActions(text);
   if (actions.length === 0) return;
 
   const action = actions[0];
-  const feedback = store.executeChatAction(action);
+  const feedback = store.executeChatAction(action, projectId);
   if (feedback) {
     const actionMsg: ChatMessage = {
       role: 'assistant',

@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { Plus, Search, Trash2, FileText, Clock, Calendar, Check } from 'lucide-vue-next';
+import { Plus, Search, Trash2, FileText, Clock, Calendar, Check, BookmarkCheck } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
-import { projectApi, templateApi, type Project } from '@/services/api';
+import { projectApi, templateApi, type Project, type Template } from '@/services/api';
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import type { PptProjectState, WorkflowStep } from '@/types/agent';
 import { buildTemplatePayloadFromProject } from '@/utils/templateFromProject';
@@ -18,6 +18,7 @@ const agentStore = useAgentStore();
 const toastStore = useToastStore();
 
 const projects = ref<Project[]>([]);
+const templates = ref<Template[]>([]);
 const loading = ref(false);
 const searchQuery = ref('');
 const showDeleteModal = ref(false);
@@ -40,6 +41,41 @@ type ProjectDisplay = Project & {
 
 function normalizeProjectText(value: unknown) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function getTemplateSettings(template: Template): Record<string, any> {
+  if (!template.settings) return {};
+  if (typeof template.settings === 'string') {
+    try {
+      const parsed = JSON.parse(template.settings);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof template.settings === 'object' ? template.settings as Record<string, any> : {};
+}
+
+function templateNameForProject(project: Project) {
+  return `${project.title || project.topic || '未命名 PPT'} 模板`;
+}
+
+function isTemplateSaved(project: Project) {
+  const projectId = String(project.id);
+  const expectedName = normalizeProjectText(templateNameForProject(project));
+  return templates.value.some((template) => {
+    const settings = getTemplateSettings(template);
+    const sourceProjectId = settings.sourceProjectId ? String(settings.sourceProjectId) : '';
+    if (sourceProjectId && sourceProjectId === projectId) return true;
+
+    return normalizeProjectText(template.name) === expectedName;
+  });
+}
+
+function isProjectTitleDuplicated(title: string) {
+  const normalizedTitle = normalizeProjectText(title);
+  if (!normalizedTitle) return false;
+  return uniqueProjects.value.some((project) => normalizeProjectText(project.title) === normalizedTitle);
 }
 
 function isSameProjectIdentity(left: Project, right: Project) {
@@ -189,11 +225,23 @@ async function fetchProjects() {
     const response = await projectApi.getAll();
     if (response.success && response.data) {
       projects.value = response.data;
+    } else {
+      toastStore.error('加载项目失败', response.message || '请稍后重试');
     }
   } catch (error) {
     console.error('Failed to fetch projects:', error);
+    toastStore.error('加载项目失败', error instanceof Error ? error.message : '未知错误');
   } finally {
     loading.value = false;
+  }
+}
+
+async function fetchTemplates() {
+  const response = await templateApi.getAll();
+  if (response.success && response.data) {
+    templates.value = response.data;
+  } else {
+    toastStore.error('加载模板状态失败', response.message || '无法判断项目是否已保存为模板');
   }
 }
 
@@ -202,16 +250,21 @@ async function createProject() {
     toastStore.warning('请输入项目名称', '项目名称不能为空');
     return;
   }
+  const title = newProjectTitle.value.trim();
+  if (isProjectTitleDuplicated(title)) {
+    toastStore.error('项目名称重复', `「${title}」已存在，请换一个名称`);
+    return;
+  }
 
   loading.value = true;
   try {
     const response = await projectApi.create({
-      title: newProjectTitle.value.trim(),
+      title,
       status: 'draft'
     });
 
     if (response.success && response.data) {
-      toastStore.success('创建成功', '新项目已创建');
+      toastStore.success('创建成功', `「${title}」已创建`);
       showCreateModal.value = false;
       newProjectTitle.value = '';
       await fetchProjects();
@@ -257,18 +310,20 @@ function openProject(project: Project) {
 }
 
 async function saveProjectAsTemplate(project: Project) {
-  if (savingTemplateIds.value.has(project.id)) return;
+  if (savingTemplateIds.value.has(project.id) || isTemplateSaved(project)) return;
 
   savingTemplateIds.value = new Set([...savingTemplateIds.value, project.id]);
+  toastStore.info('正在保存模板', `正在将「${project.title}」添加到模板广场`);
   try {
     const state = parseProjectState(project);
     const payload = buildTemplatePayloadFromProject(
       { ...project, state },
-      { name: `${project.title || project.topic || '未命名 PPT'} 模板` }
+      { name: templateNameForProject(project) }
     );
     const response = await templateApi.create(payload);
 
-    if (response.success) {
+    if (response.success && response.data) {
+      templates.value = [response.data, ...templates.value];
       toastStore.success('已添加到模板广场', payload.name);
       await agentStore.fetchTemplates();
     } else {
@@ -302,7 +357,7 @@ function formatDate(dateStr: string) {
 }
 
 onMounted(() => {
-  fetchProjects();
+  void Promise.all([fetchProjects(), fetchTemplates()]);
 });
 </script>
 
@@ -389,6 +444,7 @@ onMounted(() => {
         v-for="project in filteredProjects"
         :key="project.id"
         class="project-card"
+        :class="{ 'project-card--template-saved': isTemplateSaved(project) }"
         @click="openProject(project)"
       >
         <div class="project-card__header">
@@ -398,11 +454,14 @@ onMounted(() => {
           <div class="project-card__actions">
             <button
               class="action-btn action-btn--template"
-              title="保存为模板"
-              :disabled="savingTemplateIds.has(project.id)"
+              :class="{ 'action-btn--template-saved': isTemplateSaved(project) }"
+              :title="isTemplateSaved(project) ? '已保存到模板广场' : '保存为模板'"
+              :disabled="savingTemplateIds.has(project.id) || isTemplateSaved(project)"
               @click.stop="saveProjectAsTemplate(project)"
             >
-              <FileText :size="14" />
+              <BookmarkCheck v-if="isTemplateSaved(project)" :size="14" />
+              <FileText v-else :size="14" />
+              <span>{{ savingTemplateIds.has(project.id) ? '保存中' : isTemplateSaved(project) ? '已保存为模板' : '保存为模板' }}</span>
             </button>
             <button class="action-btn action-btn--danger" title="删除" @click.stop="deleteProject(project)">
               <Trash2 :size="14" />
@@ -453,6 +512,9 @@ onMounted(() => {
               placeholder="输入项目名称"
               @keyup.enter="createProject"
             />
+            <p v-if="isProjectTitleDuplicated(newProjectTitle)" class="field-hint field-hint--error">
+              项目名称已存在，请换一个名称。
+            </p>
           </div>
           <div class="modal__footer">
             <UiButton variant="secondary" @click="showCreateModal = false">取消</UiButton>
@@ -666,26 +728,39 @@ onMounted(() => {
 
 .project-card__actions {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
   opacity: 0;
   transition: opacity var(--transition-fast);
 }
 
-.project-card:hover .project-card__actions {
+.project-card:hover .project-card__actions,
+.project-card__actions:focus-within,
+.project-card--template-saved .project-card__actions {
   opacity: 1;
 }
 
 .action-btn {
-  display: grid;
-  place-items: center;
-  width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 28px;
   height: 28px;
+  padding: 0 8px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-panel);
   color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   transition: all var(--transition-fast);
+}
+
+.action-btn span {
+  display: inline-block;
 }
 
 .action-btn:hover {
@@ -700,6 +775,16 @@ onMounted(() => {
 
 .action-btn--template {
   color: var(--color-accent);
+}
+
+.action-btn--template-saved {
+  border-color: var(--color-success);
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.action-btn--template-saved:disabled {
+  opacity: 0.95;
 }
 
 .action-btn--template:hover:not(:disabled) {
@@ -859,6 +944,16 @@ onMounted(() => {
   font-size: 14px;
   color: var(--color-text);
   line-height: 1.6;
+}
+
+.field-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.field-hint--error {
+  color: var(--color-danger);
 }
 
 .modal__footer {

@@ -31,6 +31,40 @@ async function migrate(): Promise<void> {
       console.log('⏭️ projects.state 列已存在，跳过');
     }
 
+    const [projectTitleIndex] = await connection.query(
+      "SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'projects' AND INDEX_NAME = 'uk_projects_user_title'"
+    );
+
+    if ((projectTitleIndex as any[]).length === 0) {
+      try {
+        await connection.query(
+          "ALTER TABLE `projects` ADD UNIQUE KEY `uk_projects_user_title` (`user_id`, `title`)"
+        );
+        console.log('✅ projects 表已添加用户项目名称唯一索引');
+      } catch (error) {
+        console.warn('⚠️ projects 名称唯一索引添加失败，请先清理同用户下的重复项目名称后重试。');
+      }
+    } else {
+      console.log('⏭️ projects 用户项目名称唯一索引已存在，跳过');
+    }
+
+    const [templateNameIndex] = await connection.query(
+      "SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'templates' AND INDEX_NAME = 'uk_templates_user_name'"
+    );
+
+    if ((templateNameIndex as any[]).length === 0) {
+      try {
+        await connection.query(
+          "ALTER TABLE `templates` ADD UNIQUE KEY `uk_templates_user_name` (`user_id`, `name`)"
+        );
+        console.log('✅ templates 表已添加用户模板名称唯一索引');
+      } catch (error) {
+        console.warn('⚠️ templates 名称唯一索引添加失败，请先清理同用户下的重复模板名称后重试。');
+      }
+    } else {
+      console.log('⏭️ templates 用户模板名称唯一索引已存在，跳过');
+    }
+
     const [tables] = await connection.query(
       "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'version_snapshots'"
     );

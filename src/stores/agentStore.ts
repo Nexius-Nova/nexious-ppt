@@ -2,7 +2,6 @@
 import { computed, ref, watch } from 'vue';
 import { defaultPrompts, defaultSkills, exampleTemplates, workflowSteps } from '@/data/workflow';
 import { analyzeDeckInput, exportDeck, generateSlideImages } from '@/services/agentSimulator';
-import { exportOutlineToPptx } from '@/services/pptExporter';
 import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi } from '@/services/api';
 import { applyTemplateLayoutParams, getTemplateColors } from '@/composables/templateColors';
 import { slideNeedsImage } from '@/utils/slideVisuals';
@@ -80,6 +79,79 @@ const isSameProjectIdentity = (left: Pick<PptProject, 'title' | 'topic'>, right:
   const rightTopic = normalizeProjectText(right.topic);
   return leftTopic === rightTopic || !leftTopic || !rightTopic;
 };
+
+function parseStreamingStrategistOutline(raw: string): SlideOutline[] {
+  const outlineStart = raw.search(/"outline"\s*:\s*\[/);
+  if (outlineStart < 0) return [];
+
+  const arrayStart = raw.indexOf('[', outlineStart);
+  if (arrayStart < 0) return [];
+
+  const items: any[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let objectStart = -1;
+
+  for (let i = arrayStart + 1; i < raw.length; i += 1) {
+    const char = raw[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) objectStart = i;
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        const candidate = raw.slice(objectStart, i + 1);
+        try {
+          items.push(JSON.parse(candidate));
+        } catch {
+          // The current object may still be streaming; keep previously parsed slides.
+        }
+        objectStart = -1;
+      }
+    }
+
+    if (char === ']' && depth === 0) break;
+  }
+
+  return items.map((item, index) => normalizeStreamingOutlineSlide(item, index));
+}
+
+function normalizeStreamingOutlineSlide(item: any, index: number): SlideOutline {
+  const bullets = Array.isArray(item?.bullets)
+    ? item.bullets.map((bullet: unknown) => String(bullet || '').trim()).filter(Boolean)
+    : [];
+
+  return {
+    id: String(item?.id || `slide-${index + 1}`),
+    title: String(item?.title || `第 ${index + 1} 页`),
+    bullets,
+    speakerNotes: String(item?.speakerNotes || ''),
+    visualPrompt: String(item?.visualPrompt || ''),
+    chartHint: item?.chartHint ? String(item.chartHint) : undefined,
+    layout: item?.layout as SlideLayout | undefined,
+  };
+}
 
 export const useAgentStore = defineStore('agent', () => {
   const activeStep = ref<WorkflowStepId>('input');
@@ -811,6 +883,24 @@ export const useAgentStore = defineStore('agent', () => {
         pushLog(`已添加 PPT：${project.title}`);
         return project;
       }
+
+      if (response.status === 409) {
+        const toastStore = useToastStore();
+        toastStore.error('项目名称重复', response.message || `「${title}」已存在，请换一个名称`);
+        await fetchPptProjects();
+        const duplicate = mergePptProjects(pptProjects.value).find((project) => normalizeProjectText(project.title) === normalizeProjectText(title));
+        if (duplicate) {
+          activePptId.value = duplicate.id;
+          restoreProjectState(duplicate.state);
+          pushLog(`已打开已有 PPT：${duplicate.title}`);
+          return duplicate;
+        }
+        return null;
+      }
+
+      const toastStore = useToastStore();
+      toastStore.error('创建项目失败', response.message || '请稍后重试');
+      return null;
     } catch (error) {
       console.warn('创建远端项目失败，使用本地项目', error);
     }
@@ -1150,15 +1240,21 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   // ---- Chat action execution ----
-  function executeChatAction(action: { type: string; params: Record<string, string> }): string | null {
+  function executeChatAction(action: { type: string; params: Record<string, string> }, projectId?: string): string | null {
+    if (projectId && activePptId.value !== projectId) return null;
+
     const newOutline = outline.value.map(s => ({ ...s, bullets: [...s.bullets] }));
+    const commitOutline = () => {
+      outline.value = newOutline;
+      syncToProject();
+    };
 
     switch (action.type) {
       case 'updateSlideTitle': {
         const slide = newOutline.find(s => s.id === action.params.slideId);
         if (!slide) return null;
         slide.title = action.params.title || slide.title;
-        outline.value = newOutline;
+        commitOutline();
         return `已将「${slide.title}」标题更新`;
       }
       case 'updateSlideIndex': {
@@ -1166,14 +1262,14 @@ export const useAgentStore = defineStore('agent', () => {
         const slide = newOutline[idx];
         if (!slide) return null;
         if (action.params.title) slide.title = action.params.title;
-        outline.value = newOutline;
+        commitOutline();
         return `已更新第 ${idx + 1} 页`;
       }
       case 'addBullet': {
         const slide = newOutline.find(s => s.id === action.params.slideId);
         if (!slide) return null;
         slide.bullets.push(action.params.text || '新要点');
-        outline.value = newOutline;
+        commitOutline();
         return `已为「${slide.title}」添加要点`;
       }
       case 'addBulletByIndex': {
@@ -1181,7 +1277,7 @@ export const useAgentStore = defineStore('agent', () => {
         const slide = newOutline[idx];
         if (!slide) return null;
         slide.bullets.push(action.params.text || '新要点');
-        outline.value = newOutline;
+        commitOutline();
         return `已为第 ${idx + 1} 页添加要点`;
       }
       case 'deleteBullet': {
@@ -1190,7 +1286,7 @@ export const useAgentStore = defineStore('agent', () => {
         const bIdx = parseInt(action.params.index, 10);
         if (!isNaN(bIdx) && bIdx >= 0 && bIdx < slide.bullets.length) {
           slide.bullets.splice(bIdx, 1);
-          outline.value = newOutline;
+          commitOutline();
           return '已删除要点';
         }
         return null;
@@ -1204,7 +1300,7 @@ export const useAgentStore = defineStore('agent', () => {
           visualPrompt: action.params.visualPrompt || ''
         };
         newOutline.push(newSlide);
-        outline.value = newOutline;
+        commitOutline();
         return `已添加新幻灯片「${newSlide.title}」`;
       }
       default:
@@ -1303,6 +1399,12 @@ export const useAgentStore = defineStore('agent', () => {
           onContent: (content) => {
             if (!isRunContextActive(ctx)) return;
             streamingText.value += content;
+            const draftOutline = parseStreamingStrategistOutline(streamingText.value);
+            if (draftOutline.length > outline.value.length) {
+              outline.value = draftOutline;
+            } else if (draftOutline.length && outline.value.length === draftOutline.length) {
+              outline.value = draftOutline;
+            }
             const progress = Math.min(90, 20 + streamingText.value.length / 100);
             setStepStatus('outline', 'running', progress);
           },
@@ -2007,24 +2109,20 @@ export const useAgentStore = defineStore('agent', () => {
       let artifact: ExportArtifact;
 
       if (format === 'pptx') {
-        if (svgPages.value.length > 0 && designSpec.value) {
-          const fileName = await aiApi.exportPptx(
-            svgPages.value.map(p => ({ svg: p.svg, speakerNotes: p.speakerNotes })),
-            designSpec.value,
-            specLock.value || undefined
-          );
-          artifact = {
-            format,
-            name: fileName,
-            status: 'ready'
-          };
-        } else {
-          artifact = {
-            format,
-            name: await exportOutlineToPptx(outline.value, selectedImages.value, parameters.value),
-            status: 'ready'
-          };
+        if (svgPages.value.length === 0 || !designSpec.value) {
+          throw new Error('请先生成 PPT 页面后再导出可编辑 PPTX');
         }
+
+        const fileName = await aiApi.exportPptx(
+          svgPages.value.map(p => ({ svg: p.svg, speakerNotes: p.speakerNotes })),
+          designSpec.value,
+          specLock.value || undefined
+        );
+        artifact = {
+          format,
+          name: fileName,
+          status: 'ready'
+        };
       } else {
         artifact = await exportDeck(format);
       }

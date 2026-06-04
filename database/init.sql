@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS `projects` (
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_user_id` (`user_id`),
+  UNIQUE KEY `uk_projects_user_title` (`user_id`, `title`),
   KEY `idx_status` (`status`),
   KEY `idx_created_at` (`created_at`),
   CONSTRAINT `fk_projects_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
@@ -163,6 +164,7 @@ CREATE TABLE IF NOT EXISTS `templates` (
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_user_id` (`user_id`),
+  UNIQUE KEY `uk_templates_user_name` (`user_id`, `name`),
   KEY `idx_category` (`category`),
   KEY `idx_is_public` (`is_public`),
   CONSTRAINT `fk_templates_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE

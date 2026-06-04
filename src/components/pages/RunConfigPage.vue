@@ -152,7 +152,7 @@ function deleteOption(key: ConfigOptionKey, value: string) {
             v-model="addingLabels[def.key]"
             :placeholder="`添加${def.label}`"
           />
-          <UiButton type="submit" variant="secondary">
+          <UiButton type="submit" variant="secondary" size="sm">
             <Plus :size="14" />
             添加
           </UiButton>
@@ -317,14 +317,20 @@ function deleteOption(key: ConfigOptionKey, value: string) {
 
 .add-option {
   display: grid;
-  grid-template-columns: minmax(180px, 320px) auto;
+  grid-template-columns: minmax(180px, 260px) max-content;
   gap: 8px;
   align-items: center;
+  justify-content: start;
+}
+
+.add-option :deep(.ui-button) {
+  min-width: 72px;
+  border-radius: 8px;
 }
 
 @media (max-width: 760px) {
   .add-option {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) max-content;
   }
 
   .setting-option,
@@ -334,6 +340,16 @@ function deleteOption(key: ConfigOptionKey, value: string) {
 
   .setting-option__label {
     flex: 1;
+  }
+}
+
+@media (max-width: 480px) {
+  .add-option {
+    grid-template-columns: 1fr;
+  }
+
+  .add-option :deep(.ui-button) {
+    justify-self: start;
   }
 }
 </style>

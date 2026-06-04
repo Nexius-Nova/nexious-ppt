@@ -2,7 +2,7 @@ import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DesignSpec, SpecLock } from './spec.js';
-import { convertSvgPagesToPptx, inlineRemoteImages } from './svg-to-pptx.js';
+import { inlineRemoteImages } from './svg-to-pptx.js';
 import { exportNativeEditablePptx } from './native-svg-pptx.js';
 
 export interface PptExportPage {
@@ -199,9 +199,9 @@ export async function exportWithNexiousPpt(
     logs.push(...nativeResult.logs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logs.push(`可编辑导出未完成，已自动改用整页快照导出：${message}`);
-    buffer = await convertSvgPagesToPptx(preparedPages, spec, lock);
-    await writeFile(exportPath, buffer);
+    logs.push(`可编辑 PPTX 导出失败：${message}`);
+    await rm(exportPath, { force: true });
+    throw new Error(`可编辑 PPTX 导出失败，已阻止生成整页图片版 PPT：${message}`);
   }
 
   logs.push('内置导出器已完成 PPTX 生成。');

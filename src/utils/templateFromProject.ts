@@ -108,6 +108,8 @@ export function buildTemplatePayloadFromProject(
     accent: colors?.accent || colors?.primary || '#334155',
     is_public: Boolean(options.isPublic),
     settings: {
+      sourceProjectId: String(project.id),
+      sourceProjectTitle: projectTitle,
       styleGuide: {
         visualTone: spec?.visualTheme?.style || '从现有 PPT 提取的视觉风格',
         colorPalette: colorPalette.length >= 3 ? colorPalette : ['#334155', '#172026', '#C9A227'],

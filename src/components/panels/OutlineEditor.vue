@@ -16,7 +16,6 @@ const toastStore = useToastStore();
 const props = defineProps<{
   outline: SlideOutline[];
   isRunning?: boolean;
-  streamingText?: string;
   showRunAction?: boolean;
 }>();
 
@@ -220,6 +219,11 @@ function isCopilotLoading(slideId: string, type: SuggestionType): boolean {
   return !!copilotLoading.value[`${slideId}-${type}`];
 }
 
+function scrollToSlide(slideId: string) {
+  const target = document.querySelector(`[data-slide-id="${slideId.replace(/"/g, '\\"')}"]`);
+  target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 </script>
 
@@ -232,54 +236,52 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
       </UiButton>
     </template>
 
-    <div v-if="isRunning && streamingText" class="streaming-container">
+    <div v-if="isRunning" class="streaming-container">
       <div class="streaming-header">
         <Loader2 :size="16" class="animate-spin" />
-        <span>正在整理大纲...</span>
+        <span>{{ outline.length ? `已生成 ${outline.length} 页` : '正在生成大纲...' }}</span>
       </div>
-      <div class="streaming-content">
-        <pre class="streaming-text">{{ streamingText }}</pre>
-        <span class="streaming-cursor">|</span>
-      </div>
+      <p class="streaming-hint">AI 返回内容会实时整理成下面的大纲卡片。</p>
     </div>
 
-    <div v-else-if="outline.length" class="outline-editor">
-      <!-- Batch toolbar -->
-      <Transition name="slide-fade">
-        <div v-if="selectedSlides.size > 0" class="batch-bar">
-          <span class="batch-bar__info">
-            <CheckSquare :size="14" />
-            已选 {{ selectedSlides.size }} 页
-          </span>
-          <div class="batch-bar__actions">
-            <UiButton size="sm" variant="danger" @click="batchDeleteSlides">
-              <Trash2 :size="12" />
-              删除选中
-            </UiButton>
-            <UiButton size="sm" variant="ghost" @click="selectedSlides = new Set(); allSelected = false">
-              取消
-            </UiButton>
+    <div v-if="outline.length" class="outline-editor">
+      <div class="outline-editor__main">
+        <!-- Batch toolbar -->
+        <Transition name="slide-fade">
+          <div v-if="selectedSlides.size > 0" class="batch-bar">
+            <span class="batch-bar__info">
+              <CheckSquare :size="14" />
+              已选 {{ selectedSlides.size }} 页
+            </span>
+            <div class="batch-bar__actions">
+              <UiButton size="sm" variant="danger" @click="batchDeleteSlides">
+                <Trash2 :size="12" />
+                删除选中
+              </UiButton>
+              <UiButton size="sm" variant="ghost" @click="selectedSlides = new Set(); allSelected = false">
+                取消
+              </UiButton>
+            </div>
           </div>
-        </div>
-      </Transition>
+        </Transition>
 
-      <article
-        v-for="(slide, index) in outline"
-        :key="slide.id"
-        :data-slide-id="slide.id"
-        class="outline-slide"
-        :class="{
-          'outline-slide--dragging': dragIndex === index,
-          'outline-slide--drop-target': dropIndex === index && dragIndex !== index,
-          'outline-slide--selected': selectedSlides.has(slide.id)
-        }"
-        draggable="true"
-        @dragstart="onSlideDragStart(index, $event)"
-        @dragover="onSlideDragOver(index, $event)"
-        @dragleave="onSlideDragLeave"
-        @drop="onSlideDrop(index)"
-        @dragend="onSlideDragEnd"
-      >
+        <article
+          v-for="(slide, index) in outline"
+          :key="slide.id"
+          :data-slide-id="slide.id"
+          class="outline-slide"
+          :class="{
+            'outline-slide--dragging': dragIndex === index,
+            'outline-slide--drop-target': dropIndex === index && dragIndex !== index,
+            'outline-slide--selected': selectedSlides.has(slide.id)
+          }"
+          draggable="true"
+          @dragstart="onSlideDragStart(index, $event)"
+          @dragover="onSlideDragOver(index, $event)"
+          @dragleave="onSlideDragLeave"
+          @drop="onSlideDrop(index)"
+          @dragend="onSlideDragEnd"
+        >
         <div class="outline-slide__header">
           <button class="slide-checkbox" @click.stop="toggleSlide(slide.id)">
             <component :is="selectedSlides.has(slide.id) ? CheckSquare : Square" :size="14" />
@@ -401,11 +403,26 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
             </Transition>
           </div>
         </div>
-      </article>
+        </article>
+      </div>
+
+      <nav class="outline-toc" aria-label="大纲目录">
+        <span class="outline-toc__title">目录</span>
+        <button
+          v-for="(slide, index) in outline"
+          :key="`toc-${slide.id}`"
+          type="button"
+          class="outline-toc__item"
+          @click="scrollToSlide(slide.id)"
+        >
+          <span>{{ index + 1 }}</span>
+          <strong>{{ slide.title }}</strong>
+        </button>
+      </nav>
     </div>
 
     <UiEmpty
-      v-else
+      v-else-if="!isRunning"
       title="还没有大纲"
       description="运行文本分析生成大纲，或使用示例数据快速开始"
     >
@@ -425,7 +442,9 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 
 <style scoped>
 .streaming-container {
-  padding: 16px;
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
   border: 1px solid var(--color-accent-soft);
   border-radius: var(--radius-md);
   background: var(--color-accent-soft);
@@ -435,48 +454,92 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
   color: var(--color-accent);
   font-size: 13px;
   font-weight: 500;
 }
 
-.streaming-content {
-  position: relative;
-  max-height: 300px;
-  overflow-y: auto;
-  padding: 12px;
-  background: var(--color-panel);
-  border-radius: 8px;
-  border: 1px solid var(--color-border);
-}
-
-.streaming-text {
+.streaming-hint {
   margin: 0;
-  padding: 0;
-  font-family: var(--font-mono);
+  color: var(--color-muted);
   font-size: 12px;
-  line-height: 1.6;
-  color: var(--color-text);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.streaming-cursor {
-  display: inline-block;
-  color: var(--color-accent);
-  font-weight: bold;
-  animation: blink 1s infinite;
-}
-
-@keyframes blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
 }
 
 .outline-editor {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) 176px;
+  align-items: start;
   gap: var(--space-3);
+}
+
+.outline-editor__main {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.outline-toc {
+  display: grid;
+  gap: 6px;
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.outline-toc__title {
+  padding: 0 4px 4px;
+  color: var(--color-subtle);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.outline-toc__item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.outline-toc__item:hover {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.outline-toc__item span {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--color-panel);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.outline-toc__item strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Batch bar */
@@ -545,6 +608,7 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 }
 
 .outline-slide {
+  scroll-margin-top: 76px;
   padding: 16px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -911,5 +975,30 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+@media (max-width: 1100px) {
+  .outline-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .outline-toc {
+    order: -1;
+    display: flex;
+    position: static;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .outline-toc__title {
+    display: none;
+  }
+
+  .outline-toc__item {
+    width: auto;
+    min-width: 124px;
+    max-width: 220px;
+  }
 }
 </style>

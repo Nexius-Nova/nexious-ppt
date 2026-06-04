@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS `templates` (
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
   KEY `idx_user_id` (`user_id`),
+  UNIQUE KEY `uk_templates_user_name` (`user_id`, `name`),
   KEY `idx_category` (`category`),
   KEY `idx_is_public` (`is_public`),
   CONSTRAINT `fk_templates_user_id` FOREIGN KEY (`user_id`)

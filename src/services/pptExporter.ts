@@ -59,6 +59,17 @@ export async function exportOutlineToPptx(
   images: GeneratedImage[],
   parameters: AgentParameters
 ): Promise<string> {
+  void outline;
+  void images;
+  void parameters;
+  throw new Error('已禁用旧版本地 PPTX 导出：请先生成 SVG 页面，并通过后端可编辑 PPTX 导出接口导出。');
+}
+
+async function exportOutlineToPptxLegacy(
+  outline: SlideOutline[],
+  images: GeneratedImage[],
+  parameters: AgentParameters
+): Promise<string> {
   const { default: pptxgen } = await import('pptxgenjs');
   const pptx = new pptxgen();
   const colors = templateColors[parameters.template];
