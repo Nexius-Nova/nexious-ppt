@@ -464,6 +464,24 @@ export interface StreamCallbacks {
   onError?: (message: string) => void;
 }
 
+export interface QueueJobSnapshot {
+  id: string;
+  kind: 'generate' | 'export';
+  dbJobId?: number;
+  userId: number;
+  projectId: string;
+  title?: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  phase: string;
+  progress: number;
+  message?: string;
+  errorMessage?: string;
+  result?: any;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
 export const aiApi = {
   generateOutline: (data: {
     topic: string;
@@ -697,6 +715,136 @@ export const aiApi = {
         }
       );
     });
+  },
+
+  createGenerateJob: (data: {
+    projectId: string;
+    title?: string;
+    input: {
+      topic: string;
+      content: string;
+      tone: string;
+      summaryLength: string;
+      slideCount: number;
+      imageStyle: string;
+      template: string;
+      templateAsset?: TemplateAsset | null;
+      promptContent?: string;
+      skills: Array<{ id: string; name: string; instruction?: string }>;
+    };
+    projectState?: any;
+    includeImages?: boolean;
+  }) => api.post<QueueJobSnapshot>('/api/generate/jobs/generate', data),
+
+  createExportPptxJob: (data: {
+    projectId: string;
+    title?: string;
+    pages: Array<{ pageNumber?: number; svg: string; speakerNotes: string }>;
+    spec: DesignSpec;
+    lock?: SpecLock;
+  }) => api.post<QueueJobSnapshot>('/api/generate/jobs/export-pptx', data),
+
+  getQueueJob: (id: string) => api.get<QueueJobSnapshot>(`/api/generate/jobs/${id}`),
+
+  subscribeQueueJob: async (
+    id: string,
+    onJob: (job: QueueJobSnapshot) => void,
+    onError?: (error: Error) => void
+  ): Promise<void> => {
+    const token = localStorage.getItem('auth_token');
+    const response = await fetch(`${API_BASE_URL}/api/generate/jobs/${id}/events`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      }
+    });
+    if (!response.ok) {
+      throw new Error('任务订阅失败');
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('任务订阅不可用');
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const job = JSON.parse(line.slice(6));
+            onJob(job);
+            if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+              await reader.cancel();
+              return;
+            }
+          } catch {
+            // ignore malformed event frames
+          }
+        }
+      }
+    } catch (error) {
+      onError?.(error instanceof Error ? error : new Error('任务订阅中断'));
+      throw error;
+    }
+  },
+
+  waitForQueueJob: async (
+    id: string,
+    onJob: (job: QueueJobSnapshot) => void,
+    timeoutMs = 30 * 60 * 1000
+  ): Promise<QueueJobSnapshot> => {
+    const startedAt = Date.now();
+    let lastJob: QueueJobSnapshot | null = null;
+    try {
+      await aiApi.subscribeQueueJob(id, (job) => {
+        lastJob = job;
+        onJob(job);
+      });
+    } catch (error) {
+      // Fall back to polling below when SSE is interrupted.
+    }
+
+    while (!lastJob || !['completed', 'failed', 'cancelled'].includes(lastJob.status)) {
+      if (Date.now() - startedAt > timeoutMs) throw new Error('任务等待超时');
+      await new Promise(resolve => window.setTimeout(resolve, 1500));
+      const response = await aiApi.getQueueJob(id);
+      if (!response.success || !response.data) throw new Error(response.message || '获取任务状态失败');
+      lastJob = response.data;
+      onJob(lastJob);
+    }
+
+    if (lastJob.status === 'failed') throw new Error(lastJob.errorMessage || '任务执行失败');
+    if (lastJob.status === 'cancelled') throw new Error('任务已取消');
+    return lastJob;
+  },
+
+  downloadExportJob: async (id: string): Promise<string> => {
+    const token = localStorage.getItem('auth_token');
+    const response = await fetch(`${API_BASE_URL}/api/generate/jobs/${id}/download`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      }
+    });
+    if (!response.ok) throw new Error('导出文件下载失败');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const encodedFileName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    const fallbackFileName = disposition.match(/filename="([^"]+)"/)?.[1];
+    const fileName = encodedFileName
+      ? decodeURIComponent(encodedFileName)
+      : fallbackFileName || `nexious-deck-${Date.now()}.pptx`;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return fileName;
   },
 
   exportPptx: async (pages: Array<{ svg: string; speakerNotes: string }>, spec: DesignSpec, lock?: SpecLock): Promise<string> => {

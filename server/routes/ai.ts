@@ -219,7 +219,7 @@ function imageExtension(mime: string): string {
   return 'png';
 }
 
-async function persistDataImage(imageUrl: string, slideId: string): Promise<string> {
+export async function persistDataImage(imageUrl: string, slideId: string): Promise<string> {
   if (!imageUrl.startsWith('data:image/')) return imageUrl;
   const match = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!match) return imageUrl;
@@ -264,7 +264,7 @@ async function generateWithOpenAIProtocol(
   return imageUrl;
 }
 
-async function generateImage(
+export async function generateImage(
   provider: string,
   apiKey: string,
   model: string,

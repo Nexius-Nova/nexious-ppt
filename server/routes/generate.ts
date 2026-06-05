@@ -15,7 +15,14 @@ import type { StrategistInput, DesignSpec, SpecLock } from '../engine/index.js';
 import { inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
 import { exportWithNexiousPpt } from '../engine/ppt-exporter.js';
 import { authMiddleware, AuthRequest } from './auth.js';
-import { buildOpenAIEndpoint, normalizeOpenAIBaseUrl } from '../utils/openaiUrl.js';
+import { streamText, type Message } from '../services/textModel.js';
+import {
+  enqueueExportJob,
+  enqueueGenerateJob,
+  getExportArtifact,
+  getQueuedJob,
+  subscribeQueuedJob,
+} from '../services/generationQueue.js';
 
 const router = Router();
 
@@ -40,142 +47,6 @@ function buildAttachmentDisposition(fileName: string): string {
     .replace(/[;]+/g, '_')
     || `nexious-deck-${Date.now()}.pptx`;
   return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
-}
-
-interface Message {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
-
-const TEXT_PROVIDER_BASE_URLS: Record<string, string> = {
-  deepseek: 'https://api.deepseek.com/v1',
-  moonshot: 'https://api.moonshot.cn/v1',
-  zhipu: 'https://open.bigmodel.cn/api/paas/v4',
-  qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  baichuan: 'https://api.baichuan-ai.com/v1',
-  minimax: 'https://api.minimax.chat/v1',
-  yi: 'https://api.lingyiwanwu.com/v1',
-  mistral: 'https://api.mistral.ai/v1',
-  groq: 'https://api.groq.com/openai/v1',
-  perplexity: 'https://api.perplexity.ai',
-};
-
-async function streamText(
-  provider: string,
-  apiKey: string,
-  baseUrl: string,
-  model: string,
-  messages: Message[],
-  res: Response
-): Promise<string> {
-  let normalizedBaseUrl = baseUrl || 'https://api.openai.com/v1';
-  if (provider !== 'anthropic' && provider !== 'google') {
-    const effectiveBaseUrl = TEXT_PROVIDER_BASE_URLS[provider] || baseUrl;
-    normalizedBaseUrl = normalizeOpenAIBaseUrl(effectiveBaseUrl, 'https://api.openai.com/v1');
-  }
-
-  let url: string;
-  let headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  let body: any;
-
-  if (provider === 'anthropic') {
-    url = 'https://api.anthropic.com/v1/messages';
-    headers['x-api-key'] = apiKey;
-    headers['anthropic-version'] = '2023-06-01';
-    const systemMsg = messages.find(m => m.role === 'system');
-    body = {
-      model,
-      max_tokens: 8192,
-      system: systemMsg?.content || '',
-      messages: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role, content: m.content })),
-      stream: true,
-    };
-  } else if (provider === 'google') {
-    const systemMsg = messages.find(m => m.role === 'system');
-    const userMsgs = messages.filter(m => m.role === 'user');
-    url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
-    body = {
-      contents: userMsgs.map(m => ({ parts: [{ text: m.content }] })),
-      systemInstruction: systemMsg ? { parts: [{ text: systemMsg.content }] } : undefined,
-      generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
-    };
-  } else {
-    url = buildOpenAIEndpoint(normalizedBaseUrl, '/chat/completions');
-    headers['Authorization'] = `Bearer ${apiKey}`;
-    body = { model, messages, temperature: 0.7, max_tokens: 8192, stream: true };
-  }
-
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!response.ok) {
-    const errorText = await response.text();
-    let errorMessage = `API error (${response.status}): ${errorText}`;
-    try {
-      const errorJson = JSON.parse(errorText);
-      const apiMessage = errorJson.error?.message || errorJson.message || errorJson.error?.type || '';
-      if (apiMessage) {
-        if (apiMessage.includes('Insufficient Balance') || apiMessage.includes('insufficient_quota') || apiMessage.includes('billing_hard_limit_reached')) {
-          errorMessage = 'API 余额不足，请充值后重试';
-        } else if (apiMessage.includes('invalid_api_key') || apiMessage.includes('Incorrect API key')) {
-          errorMessage = 'API Key 无效，请检查配置';
-        } else if (apiMessage.includes('model_not_found') || apiMessage.includes('Model not found')) {
-          errorMessage = '模型不可用，请检查模型名称';
-        } else if (apiMessage.includes('rate_limit') || apiMessage.includes('Rate limit')) {
-          errorMessage = 'API 请求频率超限，请稍后重试';
-        } else if (apiMessage.includes('maximum context length') || apiMessage.includes('context_length_exceeded') || apiMessage.includes('too many tokens')) {
-          errorMessage = '请求内容超出模型上下文长度限制，请减少内容后重试';
-        } else {
-          errorMessage = apiMessage;
-        }
-      }
-    } catch {}
-    throw new Error(errorMessage);
-  }
-
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('No reader available');
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let fullContent = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6);
-      if (data === '[DONE]') continue;
-
-      try {
-        const parsed = JSON.parse(data);
-        let content = '';
-
-        if (provider === 'anthropic') {
-          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-            content = parsed.delta.text;
-          }
-        } else if (provider === 'google') {
-          content = parsed.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        } else {
-          content = parsed.choices?.[0]?.delta?.content || '';
-        }
-
-        if (content) {
-          fullContent += content;
-          res.write(`data: ${JSON.stringify({ content })}\n\n`);
-        }
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  return fullContent;
 }
 
 router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Response) => {
@@ -332,6 +203,79 @@ router.post('/export-pptx', authMiddleware, async (req: AuthRequest, res: Respon
     console.error('Export PPTX error:', error);
     res.status(500).json({ success: false, message: error instanceof Error ? error.message : '导出失败' });
   }
+});
+
+router.post('/jobs/generate', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const { projectId, title, input, projectState, includeImages } = req.body || {};
+    if (!projectId || !input || typeof input !== 'object') {
+      return res.status(400).json({ success: false, message: '缺少生成任务参数' });
+    }
+
+    const job = await enqueueGenerateJob(req.userId!, {
+      projectId: String(projectId),
+      title: typeof title === 'string' ? title : undefined,
+      input,
+      projectState,
+      includeImages,
+    });
+
+    res.status(202).json({ success: true, data: job });
+  } catch (error) {
+    console.error('Create generate job error:', error);
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '创建生成任务失败' });
+  }
+});
+
+router.post('/jobs/export-pptx', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const { projectId, title, pages, spec, lock } = req.body || {};
+    if (!projectId || !spec || !Array.isArray(pages) || pages.length === 0) {
+      return res.status(400).json({ success: false, message: '缺少导出任务参数' });
+    }
+
+    const job = enqueueExportJob(req.userId!, {
+      projectId: String(projectId),
+      title: typeof title === 'string' ? title : undefined,
+      pages: pages.map((page: any, index: number) => ({
+        pageNumber: page.pageNumber || index + 1,
+        svg: page.svg,
+        speakerNotes: page.speakerNotes || '',
+      })),
+      spec,
+      lock,
+    });
+
+    res.status(202).json({ success: true, data: job });
+  } catch (error) {
+    console.error('Create export job error:', error);
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '创建导出任务失败' });
+  }
+});
+
+router.get('/jobs/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
+  const job = getQueuedJob(req.params.id, req.userId!);
+  if (!job) {
+    return res.status(404).json({ success: false, message: '任务不存在' });
+  }
+  res.json({ success: true, data: job });
+});
+
+router.get('/jobs/:id/events', authMiddleware, async (req: AuthRequest, res: Response) => {
+  const ok = subscribeQueuedJob(req.params.id, req.userId!, res);
+  if (!ok) {
+    return res.status(404).json({ success: false, message: '任务不存在' });
+  }
+});
+
+router.get('/jobs/:id/download', authMiddleware, async (req: AuthRequest, res: Response) => {
+  const artifact = getExportArtifact(req.params.id, req.userId!);
+  if (!artifact) {
+    return res.status(404).json({ success: false, message: '导出文件不存在或尚未完成' });
+  }
+  res.setHeader('Content-Type', artifact.contentType);
+  res.setHeader('Content-Disposition', buildAttachmentDisposition(artifact.fileName));
+  res.send(artifact.buffer);
 });
 
 router.post('/render-png', async (req: Request, res: Response) => {

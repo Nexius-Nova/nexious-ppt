@@ -266,6 +266,7 @@ function normalizeAgentParameters(value?: Partial<AgentParameters> | null): Agen
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 const MAX_ACTIVITY_LOGS = 5000;
+const OUTLINE_STREAM_FLUSH_INTERVAL_MS = 120;
 const LAYOUT_GENERATION_CONCURRENCY = 3;
 const PROJECT_STATE_SYNC_INTERVAL_MS = 1800;
 const PROJECT_STATE_SYNC_PAGE_BATCH = 2;
@@ -275,6 +276,24 @@ const MAX_FILE_TEXT_CHARS = 120_000;
 const normalizeProjectText = (value: unknown) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const projectIdentityKey = (project: Pick<PptProject, 'title' | 'topic'>) =>
   `${normalizeProjectText(project.title)}::${normalizeProjectText(project.topic)}`;
+
+class MissingSlideImageError extends Error {
+  constructor(public pageNumber: number, public slideTitle: string) {
+    super(`第 ${pageNumber} 页需要图片，但图片自动重试后仍未生成：${slideTitle}`);
+    this.name = 'MissingSlideImageError';
+  }
+}
+
+function isMissingSlideImageError(error: unknown): error is MissingSlideImageError {
+  return error instanceof MissingSlideImageError ||
+    (error instanceof Error && error.name === 'MissingSlideImageError');
+}
+
+function isBlockingImageGenerationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /图片/.test(message) && /(未完成|未生成|缺少|失败|重试)/.test(message);
+}
+
 const isSameProjectIdentity = (left: Pick<PptProject, 'title' | 'topic'>, right: Pick<PptProject, 'title' | 'topic'>) => {
   const leftTitle = normalizeProjectText(left.title);
   const rightTitle = normalizeProjectText(right.title);
@@ -1011,6 +1030,62 @@ export const useAgentStore = defineStore('agent', () => {
       pushLog(`生成任务记录创建失败：${response.message || '服务端未返回任务 ID'}`);
     } catch (error) {
       console.warn('创建生成任务记录失败', error);
+    }
+  }
+
+  function applyQueuedGenerationResult(
+    result: any,
+    options: { phase?: WorkflowStepId | 'completed'; progress?: number; final?: boolean } = {}
+  ) {
+    if (!result?.spec || !result?.lock) {
+      throw new Error('服务端生成结果不完整');
+    }
+    designSpec.value = result.spec;
+    specLock.value = result.lock;
+    outline.value = (result.outline || result.spec.outline || []).map((s: any) => ({
+      id: s.id,
+      title: s.title,
+      bullets: s.bullets || [],
+      speakerNotes: s.speakerNotes || '',
+      visualPrompt: s.visualPrompt || '',
+      chartHint: s.chartHint,
+      layout: s.layout as SlideLayout,
+    }));
+    images.value = Array.isArray(result.images) ? result.images : [];
+    svgPages.value = Array.isArray(result.svgPages)
+      ? result.svgPages.map((page: any, index: number) => ({
+          pageNumber: page.pageNumber || index + 1,
+          svg: page.svg || '',
+          speakerNotes: page.speakerNotes || '',
+        }))
+      : [];
+    sortSvgPagesByPageNumber();
+    executorCursor.value = svgPages.value.length;
+    syncGeneratedSlidesFromImages();
+    setStepStatus('outline', 'done', 100);
+
+    const imageGate = updateImageStepFromGate(options.phase === 'images' ? 'running' : 'idle');
+    if (options.final) {
+      setStepStatus('images', 'done', 100);
+      setStepStatus('layout', 'done', 100);
+      setStepStatus('preview', 'done', 100);
+      return;
+    }
+
+    if (options.phase === 'images') {
+      activeStep.value = 'images';
+      setStepStatus(
+        'images',
+        imageGate.complete ? 'done' : 'running',
+        imageGate.complete ? 100 : Math.min(99, options.progress || steps.value.find(step => step.id === 'images')?.progress || 0)
+      );
+      setStepStatus('layout', 'idle', 0);
+      setStepStatus('preview', 'idle', 0);
+    } else if (options.phase === 'layout') {
+      activeStep.value = 'layout';
+      setStepStatus('images', 'done', 100);
+      setStepStatus('layout', 'running', Math.min(99, options.progress || steps.value.find(step => step.id === 'layout')?.progress || 0));
+      setStepStatus('preview', 'idle', 0);
     }
   }
 
@@ -2009,6 +2084,43 @@ export const useAgentStore = defineStore('agent', () => {
     currentGeneratingSlide.value = null;
     pushLog('正在生成大纲。');
 
+    let streamedOutlineText = '';
+    let outlineFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastOutlineFlushAt = 0;
+
+    const clearOutlineFlushTimer = () => {
+      if (!outlineFlushTimer) return;
+      clearTimeout(outlineFlushTimer);
+      outlineFlushTimer = null;
+    };
+
+    const flushStreamingOutline = () => {
+      clearOutlineFlushTimer();
+      if (!isRunContextActive(ctx)) return;
+      lastOutlineFlushAt = Date.now();
+      streamingText.value = streamedOutlineText;
+      const draftOutline = parseStreamingStrategistOutline(streamedOutlineText);
+      if (draftOutline.length > outline.value.length) {
+        outline.value = draftOutline;
+      } else if (draftOutline.length && outline.value.length === draftOutline.length) {
+        outline.value = draftOutline;
+      }
+      const progress = Math.min(90, 20 + streamedOutlineText.length / 100);
+      setStepStatus('outline', 'running', progress);
+    };
+
+    const scheduleStreamingOutlineFlush = () => {
+      if (!isRunContextActive(ctx)) return;
+      const elapsed = Date.now() - lastOutlineFlushAt;
+      if (elapsed >= OUTLINE_STREAM_FLUSH_INTERVAL_MS) {
+        flushStreamingOutline();
+        return;
+      }
+      if (!outlineFlushTimer) {
+        outlineFlushTimer = setTimeout(flushStreamingOutline, OUTLINE_STREAM_FLUSH_INTERVAL_MS - elapsed);
+      }
+    };
+
     try {
       const result = await aiApi.strategistStream(
         {
@@ -2031,18 +2143,12 @@ export const useAgentStore = defineStore('agent', () => {
           },
           onContent: (content) => {
             if (!isRunContextActive(ctx)) return;
-            streamingText.value += content;
-            const draftOutline = parseStreamingStrategistOutline(streamingText.value);
-            if (draftOutline.length > outline.value.length) {
-              outline.value = draftOutline;
-            } else if (draftOutline.length && outline.value.length === draftOutline.length) {
-              outline.value = draftOutline;
-            }
-            const progress = Math.min(90, 20 + streamingText.value.length / 100);
-            setStepStatus('outline', 'running', progress);
+            streamedOutlineText += content;
+            scheduleStreamingOutlineFlush();
           },
           onComplete: (data) => {
             if (!isRunContextActive(ctx)) return;
+            flushStreamingOutline();
             const parsed = data as any;
             designSpec.value = parsed.spec || null;
             specLock.value = parsed.lock || null;
@@ -2081,6 +2187,8 @@ export const useAgentStore = defineStore('agent', () => {
       pushLog('大纲生成失败，请检查 API Key 配置。');
       await syncToProjectNow();
       throw error;
+    } finally {
+      clearOutlineFlushTimer();
     }
   }
 
@@ -2219,18 +2327,16 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  async function retrySlideImage(slideId: string, ctx: RunContext = createRunContext()) {
-    if (!checkActivePpt() || !checkApiKeys()) return;
-    if (!isRunContextActive(ctx)) return;
-
-    const sourceSlide = (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === slideId) as any;
-    if (!sourceSlide) return;
-    const shouldResumeWorkflowWhenReady = waitingForImageRetry.value && activeStep.value === 'images';
-    waitingForImageRetry.value = shouldResumeWorkflowWhenReady;
-
-    activeStep.value = 'images';
-    currentGeneratingSlide.value = slideId;
-    pushLog(`重新生成图片：${sourceSlide.title}`);
+  async function generateSingleSlideImageForWorkflow(
+    sourceSlide: { id: string; title: string; bullets?: string[]; speakerNotes?: string; visualPrompt?: string },
+    ctx: RunContext,
+    options: { announce?: boolean } = {}
+  ): Promise<GeneratedImage | null> {
+    if (!isRunContextActive(ctx)) return null;
+    currentGeneratingSlide.value = sourceSlide.id;
+    if (options.announce) {
+      pushLog(`重新生成图片：${sourceSlide.title}`);
+    }
 
     try {
       const result = await generateSlideImages(
@@ -2265,9 +2371,28 @@ export const useAgentStore = defineStore('agent', () => {
         },
         1
       );
+      if (!isRunContextActive(ctx)) return null;
+      return result[0] || null;
+    } finally {
+      if (isRunContextActive(ctx)) currentGeneratingSlide.value = null;
+    }
+  }
+
+  async function retrySlideImage(slideId: string, ctx: RunContext = createRunContext()) {
+    if (!checkActivePpt() || !checkApiKeys()) return;
+    if (!isRunContextActive(ctx)) return;
+
+    const sourceSlide = (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === slideId) as any;
+    if (!sourceSlide) return;
+    const shouldResumeWorkflowWhenReady = waitingForImageRetry.value && activeStep.value === 'images';
+    waitingForImageRetry.value = shouldResumeWorkflowWhenReady;
+
+    activeStep.value = 'images';
+
+    try {
+      const image = await generateSingleSlideImageForWorkflow(sourceSlide, ctx, { announce: true });
       if (!isRunContextActive(ctx)) return;
 
-      const image = result[0];
       if (image?.error || !image?.url) {
         pushLog(`图片仍未生成：${sourceSlide.title}`);
       } else {
@@ -2288,8 +2413,6 @@ export const useAgentStore = defineStore('agent', () => {
       pushLog(`图片重试失败：${errMsg}`);
       syncToProject();
       throw error;
-    } finally {
-      if (isRunContextActive(ctx)) currentGeneratingSlide.value = null;
     }
   }
 
@@ -2311,13 +2434,41 @@ export const useAgentStore = defineStore('agent', () => {
     return undefined;
   }
 
-  async function generateSlideSvg(slide: SpecSlide, ctx: RunContext): Promise<string> {
-    const imageForSlide = images.value.find(img =>
-      img.slideId === slide.id &&
+  function findReadySlideImage(slideId: string) {
+    return images.value.find(img =>
+      img.slideId === slideId &&
       img.selected &&
-      img.url
+      !img.error &&
+      Boolean(img.url)
     );
-    const imageUrl = await ensureExecutorImageUrl(imageForSlide);
+  }
+
+  async function ensureSlideImageForLayout(slide: SpecSlide, ctx: RunContext): Promise<string | undefined> {
+    if (!slideNeedsImage(slide)) return undefined;
+
+    const existingUrl = await ensureExecutorImageUrl(findReadySlideImage(slide.id));
+    if (existingUrl) return existingUrl;
+    if (!isRunContextActive(ctx)) return undefined;
+
+    pushLog(`第 ${slide.pageNumber} 页缺少可用图片，正在自动重试图片生成。`);
+    const image = await generateSingleSlideImageForWorkflow(slide, ctx);
+    if (!isRunContextActive(ctx)) return undefined;
+
+    const retryUrl = await ensureExecutorImageUrl(image || findReadySlideImage(slide.id));
+    if (retryUrl) {
+      pushLog(`第 ${slide.pageNumber} 页图片自动重试成功，继续生成页面。`);
+      return retryUrl;
+    }
+
+    activeStep.value = 'images';
+    waitingForImageRetry.value = true;
+    updateImageStepFromGate('idle');
+    await syncToProjectNow();
+    throw new MissingSlideImageError(slide.pageNumber, slide.title);
+  }
+
+  async function generateSlideSvg(slide: SpecSlide, ctx: RunContext): Promise<string> {
+    const imageUrl = await ensureSlideImageForLayout(slide, ctx);
     if (!isRunContextActive(ctx)) return '';
 
     const spec = designSpec.value!;
@@ -2447,6 +2598,17 @@ export const useAgentStore = defineStore('agent', () => {
 
           pushLog(`第 ${slide.pageNumber} 页生成完成。`);
         } catch (pageError) {
+          if (isMissingSlideImageError(pageError)) {
+            stopLayoutWorkers = true;
+            activeStep.value = 'images';
+            waitingForImageRetry.value = true;
+            currentGeneratingSlide.value = null;
+            updateImageStepFromGate('idle');
+            pushLog(pageError.message);
+            await syncWorkflowProgress(true);
+            throw pageError;
+          }
+
           const errMsg = pageError instanceof Error ? pageError.message : '未知错误';
           pushLog(`第 ${slide.pageNumber} 页生成失败（${errMsg}），已标记待重试。`);
           upsertSvgPage({
@@ -2481,6 +2643,18 @@ export const useAgentStore = defineStore('agent', () => {
       await syncWorkflowProgress(true);
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
+      if (isMissingSlideImageError(error)) {
+        activeStep.value = 'images';
+        waitingForImageRetry.value = true;
+        currentGeneratingSlide.value = null;
+        updateImageStepFromGate('idle');
+        pushLog('页面生成已暂停，请先完成缺失图片后再继续。');
+        const toastStore = useToastStore();
+        toastStore.warning('等待图片生成', error.message);
+        await syncToProjectNow();
+        return;
+      }
+
       setStepStatus('layout', 'idle', 0);
       const errMsg = error instanceof Error ? error.message : '页面生成失败';
       pushLog(`页面生成失败：${errMsg}`);
@@ -2704,88 +2878,92 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     try {
-      await startGenerationJob(options);
-      toastStore.info('开始生成 PPT', '正在处理，请稍候。');
+      resetDownstreamSteps('outline');
+      activeStep.value = 'outline';
+      setStepStatus('outline', 'running', 5);
+      toastStore.info('开始生成 PPT', '服务端任务已提交，正在排队处理。');
+      pushLog('服务端生成任务已提交。');
 
-      const imagesStep = steps.value.find(s => s.id === 'images');
-      const shouldRunOutline = !options.resume || !designSpec.value || !specLock.value || outline.value.length === 0;
-      if (shouldRunOutline) {
-        activeStep.value = 'outline';
-        await reportGenerationJob('outline', 10, 'running');
-        await runStrategist(ctx);
+      const response = await aiApi.createGenerateJob({
+        projectId: activePpt.value!.id,
+        title: activePpt.value!.title,
+        input: {
+          topic: input.value.topic,
+          content: input.value.content,
+          tone: parameters.value.tone,
+          summaryLength: parameters.value.summaryLength,
+          slideCount: parameters.value.slideCount,
+          imageStyle: parameters.value.imageStyle,
+          template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
+          templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
+          promptContent: selectedPromptContent(),
+          skills: [],
+        },
+        projectState: snapshotProjectState({ persistable: true }),
+        includeImages: true,
+      });
+
+      if (!response.success || !response.data) {
+        throw new Error(response.message || '创建服务端生成任务失败');
+      }
+
+      activeGenerationJobId.value = response.data.dbJobId || null;
+      const finalJob = await aiApi.waitForQueueJob(response.data.id, (job) => {
         if (!isRunContextActive(ctx)) return;
-        if (shouldPauseAt('images')) return;
-      }
-
-      if (!isRunContextActive(ctx)) return;
-      activeStep.value = 'images';
-      await reportGenerationJob('images', 35, 'running');
-
-      if (!needsImageGeneration()) {
-        pushLog('本次不需要图片。');
-        setStepStatus('images', 'done', 100);
-      } else if (imagesStep && imagesStep.status !== 'done') {
-        const apiKeyStore = useApiKeyStore();
-        if (apiKeyStore.isImageModelConfigured) {
-          try {
-            const imageReady = await runImages(ctx);
-            if (!isRunContextActive(ctx)) return;
-            if (!imageReady) {
-              waitingForImageRetry.value = true;
-              releaseWorkflowForImageRetry();
-              await reportGenerationJob('images-waiting-retry', steps.value.find((step) => step.id === 'images')?.progress || 0, 'running');
-              return;
+        pushLog(job.message || `任务进度：${job.phase}`);
+        if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') {
+          activeStep.value = 'outline';
+          setStepStatus('outline', 'running', Math.min(99, job.progress));
+        } else if (job.phase === 'images') {
+          activeStep.value = 'images';
+          setStepStatus('outline', 'done', 100);
+          setStepStatus('images', 'running', Math.min(99, job.progress));
+          if (job.result) {
+            try {
+              applyQueuedGenerationResult(job.result, { phase: 'images', progress: job.progress });
+            } catch {
+              // 图片阶段可能只有消息，没有完整结果。
             }
-            if (shouldPauseAt('layout')) return;
-          } catch (imgError) {
-            if (!isRunContextActive(ctx)) return;
-            waitingForImageRetry.value = true;
-            activeStep.value = 'images';
-            updateImageStepFromGate('idle');
-            pushLog(`图片生成失败（${imgError instanceof Error ? imgError.message : '未知错误'}），请手动重试成功后继续。`);
-            releaseWorkflowForImageRetry();
-            await reportGenerationJob('images-waiting-retry', steps.value.find((step) => step.id === 'images')?.progress || 0, 'running');
-            return;
           }
-        } else {
-          waitingForImageRetry.value = true;
-          activeStep.value = 'images';
-          setStepStatus('images', 'idle', 0);
-          pushLog('图像模型未配置，无法生成所需图片。请先配置图像模型后重试。');
-          releaseWorkflowForImageRetry();
-          await reportGenerationJob('images-waiting-config', 0, 'running');
-          return;
+        } else if (job.phase === 'layout') {
+          activeStep.value = 'layout';
+          setStepStatus('outline', 'done', 100);
+          setStepStatus('images', 'done', 100);
+          setStepStatus('layout', 'running', Math.min(99, job.progress));
+          if (job.result) {
+            try {
+              applyQueuedGenerationResult(job.result, { phase: 'layout', progress: job.progress });
+              setStepStatus('layout', 'running', Math.min(99, job.progress));
+            } catch {
+              // Partial results may be incomplete while the job is running.
+            }
+          }
         }
-      } else {
-        const imageGate = updateImageStepFromGate('idle');
-        if (imageGate.complete) {
-          waitingForImageRetry.value = false;
-          pushLog('图片已完成，跳过图片生成。');
-        } else {
-          waitingForImageRetry.value = true;
-          activeStep.value = 'images';
-          pushLog('仍有图片未生成成功，请手动重试成功后继续。');
-          releaseWorkflowForImageRetry();
-          await reportGenerationJob('images-waiting-retry', imageGate.total ? Math.round((imageGate.readyCount / imageGate.total) * 100) : 0, 'running');
-          return;
-        }
-      }
+      });
 
       if (!isRunContextActive(ctx)) return;
-      activeStep.value = 'layout';
-      await reportGenerationJob('layout', 65, 'running');
-      await runExecutor({ resume: options.resume || resumeStage.value === 'layout', embedded: true, ctx });
-      if (!isRunContextActive(ctx)) return;
-      if (isPaused.value) return;
-
+      applyQueuedGenerationResult(finalJob.result, { final: true });
       activeStep.value = 'preview';
       clearPauseState();
-      await finishGenerationJob();
+      activeGenerationJobId.value = null;
+      await syncToProjectNow();
 
       toastStore.success('PPT 生成完成', '可以在预览区查看结果');
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
+      if (isBlockingImageGenerationError(error)) {
+        activeStep.value = 'images';
+        waitingForImageRetry.value = true;
+        currentGeneratingSlide.value = null;
+        updateImageStepFromGate('idle');
+        pushLog(`图片未全部生成：${errMsg}`);
+        await failGenerationJob(error);
+        await syncToProjectNow();
+        toastStore.warning('等待图片生成', errMsg);
+        return;
+      }
+
       pushLog(`PPT 生成失败：${errMsg}`);
       await failGenerationJob(error);
       syncToProject();
@@ -2820,15 +2998,26 @@ export const useAgentStore = defineStore('agent', () => {
       let artifact: ExportArtifact;
 
       if (format === 'pptx') {
-        if (svgPages.value.length === 0 || !designSpec.value) {
+        const currentProject = activePpt.value;
+        if (!currentProject || svgPages.value.length === 0 || !designSpec.value) {
           throw new Error('请先生成 PPT 页面后再导出可编辑 PPTX');
         }
 
-        const fileName = await aiApi.exportPptx(
-          svgPages.value.map(p => ({ svg: p.svg, speakerNotes: p.speakerNotes })),
-          designSpec.value,
-          specLock.value || undefined
-        );
+        const response = await aiApi.createExportPptxJob({
+          projectId: currentProject.id,
+          title: currentProject.title,
+          pages: svgPages.value.map(p => ({ pageNumber: p.pageNumber, svg: p.svg, speakerNotes: p.speakerNotes })),
+          spec: designSpec.value,
+          lock: specLock.value || undefined
+        });
+        if (!response.success || !response.data) {
+          throw new Error(response.message || '创建导出任务失败');
+        }
+        const finalJob = await aiApi.waitForQueueJob(response.data.id, (job) => {
+          pushLog(job.message || `导出进度：${job.progress}%`);
+          setStepStatus('preview', 'running', Math.max(40, Math.min(99, job.progress)));
+        });
+        const fileName = await aiApi.downloadExportJob(finalJob.id);
         artifact = {
           format,
           name: fileName,
