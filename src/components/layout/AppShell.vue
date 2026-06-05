@@ -31,6 +31,10 @@
     "main";
 }
 
+.app-shell--workflow-focus :slotted(.side-nav) {
+  display: none;
+}
+
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 1fr;

@@ -61,6 +61,7 @@ const {
   images,
   isPaused,
   pauseRequested,
+  resumeStage,
   input,
   isRunning,
   outline,
@@ -72,7 +73,9 @@ const {
   isDataLoaded,
   configOptions,
   prompts,
+  skills,
   selectedPromptId,
+  inputProcessSteps,
   templates,
   selectedTemplate,
   designSpec,
@@ -166,7 +169,7 @@ const stepTitles: Record<string, string> = {
 
 const currentStepTitle = computed(() => stepTitles[activeStep.value] || '工作区');
 const isPageView = computed(() => ['my-ppt', 'prompts', 'skills', 'models', 'templates', 'config', 'profile'].includes(activeStep.value));
-const isProjectRoute = computed(() => route.path.startsWith('/project/'));
+const isProjectRoute = computed(() => route.name === 'project-edit' || route.path.startsWith('/project/'));
 const routeProjectId = computed(() => {
   const id = route.params.id;
   return Array.isArray(id) ? id[0] || '' : String(id || '');
@@ -213,8 +216,16 @@ const activeProjectTitle = computed(() => activePpt.value?.title || input.value.
 const inputReadyLabel = computed(() => hasInputContent() ? '已完成' : '待输入');
 const outlineBulletCount = computed(() => outline.value.reduce((sum, slide) => sum + slide.bullets.length, 0));
 const outlineStepStatus = computed(() => workflowDisplaySteps.value.find((step) => step.id === 'outline')?.status || 'idle');
+const pausedStageId = computed<WorkflowStepId | null>(() => {
+  if (!isPaused.value) return null;
+  const stage = resumeStage.value || activeStep.value;
+  return isWorkflowTab(stage) ? stage : null;
+});
+const isOutlinePaused = computed(() => pausedStageId.value === 'outline');
+const isOutlineRunning = computed(() => outlineStepStatus.value === 'running' && !isOutlinePaused.value);
 const outlineStatusText = computed(() => {
-  if (outlineStepStatus.value === 'running') return '生成中';
+  if (isOutlinePaused.value) return '已暂停';
+  if (isOutlineRunning.value) return '生成中';
   if (outline.value.length > 0 || designSpec.value) return '已生成';
   return '待生成';
 });
@@ -301,10 +312,15 @@ const pipelineStages = computed(() => {
     }
   ];
 
-  return stages.map((stage) => ({
-    ...stage,
-    disabled: !canOpenWorkflowStep(stage.id)
-  }));
+  return stages.map((stage) => {
+    const paused = pausedStageId.value === stage.id;
+    return {
+      ...stage,
+      description: paused ? '已暂停，可继续' : stage.description,
+      paused,
+      disabled: !canOpenWorkflowStep(stage.id)
+    };
+  });
 });
 
 const workflowTabs = ['input', 'outline', 'images', 'layout', 'preview'] as const;
@@ -476,24 +492,28 @@ function returnToMyPpt() {
 }
 
 async function runFromCurrentStep() {
-  switch (activeStep.value) {
-    case 'input':
-      await store.runInputStage();
-      break;
-    case 'outline':
-      await store.runOutline();
-      break;
-    case 'images':
-      await store.runImages();
-      break;
-    case 'layout':
-      await store.runLayout();
-      break;
-    case 'preview':
-      await handleExport('pptx', { filename: 'presentation', pageRange: 'all' });
-      break;
-    default:
-      await store.runInputStage();
+  try {
+    switch (activeStep.value) {
+      case 'input':
+        await store.runInputStage();
+        break;
+      case 'outline':
+        await store.runOutline();
+        break;
+      case 'images':
+        await store.runImages();
+        break;
+      case 'layout':
+        await store.runLayout();
+        break;
+      case 'preview':
+        await handleExport('pptx', { filename: 'presentation', pageRange: 'all' });
+        break;
+      default:
+        await store.runInputStage();
+    }
+  } catch {
+    // Store actions already surface the actionable message.
   }
 }
 
@@ -537,8 +557,8 @@ function stageTone(status: WorkflowStep['status'], skipped?: boolean) {
   return 'neutral';
 }
 
-function stageLabel(status: WorkflowStep['status'], skipped?: boolean) {
-  if (isPaused.value && status === 'running') return '已暂停';
+function stageLabel(status: WorkflowStep['status'], skipped?: boolean, paused?: boolean) {
+  if (paused) return '已暂停';
   if (skipped) return '已完成';
   if (status === 'done') return '已完成';
   if (status === 'running') return '运行中';
@@ -590,7 +610,7 @@ async function retryImage(slideId: string) {
       <template v-else-if="isPageView">
         <MyPptPage v-if="activeStep === 'my-ppt'" />
         <PromptManagePage v-else-if="activeStep === 'prompts'" />
-        <SkillManagePage v-else-if="activeStep === 'skills'" />
+        <SkillManagePage v-else-if="activeStep === 'skills'" @changed="store.fetchSkills" />
         <ModelManagePage v-else-if="activeStep === 'models'" />
         <TemplateGalleryPage v-else-if="activeStep === 'templates'" />
         <RunConfigPage v-else-if="activeStep === 'config'" />
@@ -615,7 +635,7 @@ async function retryImage(slideId: string) {
               <Save :size="14" />
               保存
             </UiButton>
-            <UiButton v-if="isRunning" variant="secondary" :disabled="pauseRequested" @click="store.requestPauseWorkflow">
+            <UiButton v-if="isRunning" variant="secondary" :disabled="pauseRequested" @click="void store.requestPauseWorkflow()">
               <Pause :size="14" />
               {{ pauseRequested ? '暂停中' : '暂停' }}
             </UiButton>
@@ -646,7 +666,8 @@ async function retryImage(slideId: string) {
                   :aria-disabled="stage.disabled"
                   :class="{
                     'pipeline-stage--active': activeStep === stage.id,
-                    'pipeline-stage--running': stage.status === 'running',
+                    'pipeline-stage--running': stage.status === 'running' && !stage.paused,
+                    'pipeline-stage--paused': stage.paused,
                     'pipeline-stage--done': stage.status === 'done',
                     'pipeline-stage--skipped': stage.skipped,
                     'pipeline-stage--disabled': stage.disabled
@@ -654,12 +675,12 @@ async function retryImage(slideId: string) {
                   @click="goToWorkflowStep(stage.id)"
                 >
                   <span class="pipeline-stage__icon">
-                    <component :is="stage.status === 'running' ? Loader2 : stage.icon" :size="18" :class="{ 'pipeline-stage__spin': stage.status === 'running' }" />
+                    <component :is="stage.status === 'running' && !stage.paused ? Loader2 : stage.icon" :size="18" :class="{ 'pipeline-stage__spin': stage.status === 'running' && !stage.paused }" />
                   </span>
                   <span class="pipeline-stage__body">
                     <span class="pipeline-stage__head">
                       <strong>{{ stage.title }}</strong>
-                      <UiBadge :tone="stageTone(stage.status, stage.skipped)" size="sm">{{ stageLabel(stage.status, stage.skipped) }}</UiBadge>
+                      <UiBadge :tone="stage.paused ? 'danger' : stageTone(stage.status, stage.skipped)" size="sm">{{ stageLabel(stage.status, stage.skipped, stage.paused) }}</UiBadge>
                     </span>
                     <span class="pipeline-stage__desc">{{ stage.description }}</span>
                     <span class="pipeline-stage__foot">
@@ -686,10 +707,13 @@ async function retryImage(slideId: string) {
                     :config-options="configOptions"
                     :prompts="prompts"
                     :selected-prompt-id="selectedPromptId"
+                    :skills="skills"
+                    :input-process-steps="inputProcessSteps"
                     :templates="templates"
                     :selected-template="selectedTemplate"
                     @update:parameters="parameters = $event"
                     @select-prompt="store.selectPrompt"
+                    @toggle-skill="store.toggleSkill"
                     @select-template="selectInputTemplate"
                     @clear-template="store.clearGalleryTemplate()"
                     @attach="store.attachFiles"
@@ -730,7 +754,7 @@ async function retryImage(slideId: string) {
 
                     <div class="outline-control__actions">
                       <UiButton variant="primary" size="sm" :disabled="isRunning || !canOpenWorkflowStep('outline')" @click="store.runOutline">
-                        <Loader2 v-if="outlineStepStatus === 'running'" :size="13" class="spin" />
+                        <Loader2 v-if="isOutlineRunning" :size="13" class="spin" />
                         <RefreshCw v-else :size="13" />
                         {{ outline.length ? '重新生成' : '生成大纲' }}
                       </UiButton>
@@ -740,7 +764,7 @@ async function retryImage(slideId: string) {
 
                   <OutlineEditor
                     :outline="outline"
-                    :is-running="outlineStepStatus === 'running'"
+                    :is-running="isOutlineRunning"
                     :show-run-action="false"
                     @update-title="store.updateSlideTitle"
                     @update-bullet="store.updateSlideBullet"
@@ -1286,6 +1310,17 @@ async function retryImage(slideId: string) {
 .pipeline-stage--running .pipeline-stage__icon {
   color: var(--color-accent);
   border-color: var(--color-accent);
+}
+
+.pipeline-stage--paused {
+  border-color: var(--color-danger);
+  background: var(--color-danger-soft);
+}
+
+.pipeline-stage--paused .pipeline-stage__icon {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  background: var(--color-surface);
 }
 
 .pipeline-stage--skipped {

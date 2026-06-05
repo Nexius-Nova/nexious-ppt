@@ -17,6 +17,7 @@ import { exportWithNexiousPpt } from '../engine/ppt-exporter.js';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { streamText, type Message } from '../services/textModel.js';
 import {
+  cancelQueuedJob,
   enqueueExportJob,
   enqueueGenerateJob,
   getExportArtifact,
@@ -351,6 +352,18 @@ router.get('/jobs/:id/events', authMiddleware, async (req: AuthRequest, res: Res
   const ok = subscribeQueuedJob(req.params.id, req.userId!, res);
   if (!ok) {
     return res.status(404).json({ success: false, message: '任务不存在' });
+  }
+});
+
+router.post('/jobs/:id/cancel', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const job = await cancelQueuedJob(req.params.id, req.userId!);
+    if (!job) {
+      return res.status(404).json({ success: false, message: '任务不存在' });
+    }
+    res.json({ success: true, data: job, message: '任务已暂停' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '暂停任务失败' });
   }
 });
 

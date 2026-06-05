@@ -103,13 +103,48 @@ CREATE TABLE IF NOT EXISTS `skills` (
   `category` VARCHAR(100) DEFAULT NULL,
   `parameters` JSON DEFAULT NULL,
   `is_enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `type` VARCHAR(50) NOT NULL DEFAULT 'prompt-only',
+  `runtime` VARCHAR(50) NOT NULL DEFAULT 'prompt-only',
+  `entry` VARCHAR(500) DEFAULT NULL,
+  `package_path` VARCHAR(1000) DEFAULT NULL,
+  `manifest` JSON DEFAULT NULL,
+  `dependency_file` VARCHAR(500) DEFAULT NULL,
+  `install_status` VARCHAR(50) NOT NULL DEFAULT 'not_required',
+  `install_log` MEDIUMTEXT DEFAULT NULL,
+  `last_installed_at` TIMESTAMP NULL DEFAULT NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_user_id` (`user_id`),
   KEY `idx_is_enabled` (`is_enabled`),
+  KEY `idx_skills_user_runtime` (`user_id`, `runtime`),
+  KEY `idx_skills_install_status` (`install_status`),
   CONSTRAINT `fk_skills_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='技能表';
+
+CREATE TABLE IF NOT EXISTS `skill_runs` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT UNSIGNED NOT NULL,
+  `skill_id` BIGINT UNSIGNED NOT NULL,
+  `project_id` VARCHAR(100) DEFAULT NULL,
+  `phase` VARCHAR(50) NOT NULL DEFAULT 'input',
+  `status` VARCHAR(50) NOT NULL DEFAULT 'queued',
+  `progress` INT UNSIGNED NOT NULL DEFAULT 0,
+  `input` JSON DEFAULT NULL,
+  `output` JSON DEFAULT NULL,
+  `error_message` TEXT DEFAULT NULL,
+  `logs` MEDIUMTEXT DEFAULT NULL,
+  `started_at` TIMESTAMP NULL DEFAULT NULL,
+  `completed_at` TIMESTAMP NULL DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_skill_runs_user_project` (`user_id`, `project_id`),
+  KEY `idx_skill_runs_skill_status` (`skill_id`, `status`),
+  KEY `idx_skill_runs_created_at` (`created_at`),
+  CONSTRAINT `fk_skill_runs_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_skill_runs_skill_id` FOREIGN KEY (`skill_id`) REFERENCES `skills`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Skill运行记录表';
 
 -- ============================================
 -- 6. 模版表

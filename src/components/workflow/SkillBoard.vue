@@ -185,7 +185,7 @@ function saveEdit() {
             </div>
             <div class="skill-card__actions">
               <UiButton size="sm" :variant="skill.enabled ? 'secondary' : 'ghost'" @click="$emit('toggle', skill.id)">
-                {{ skill.enabled ? '停用' : '启用' }}
+                {{ skill.enabled ? '取消选择' : '本次选择' }}
               </UiButton>
               <button class="icon-button" title="预览 Skill" @click="previewId = skill.id">
                 <Eye :size="14" />

@@ -7,6 +7,7 @@ import { applyTemplateLayoutParams, getTemplateColors } from '@/composables/temp
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import { useApiKeyStore } from './apiKeyStore';
 import { useToastStore } from './toastStore';
+import { normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
 import type {
   AgentParameters,
   ChatMessage,
@@ -31,14 +32,16 @@ import type {
   TemplateStyle,
   VersionSnapshot,
   WorkflowStep,
-  WorkflowStepId
+  WorkflowStepId,
+  InputProcessStep,
+  UploadedFileContent
 } from '@/types/agent';
 
 const workflowSteps: WorkflowStep[] = [
   {
     id: 'input',
     title: '资料',
-    description: '准备主题和内容',
+    description: '准备资料和需求',
     status: 'idle',
     progress: 0
   },
@@ -155,6 +158,76 @@ const exampleTemplates: PptTemplate[] = [
 const cloneSteps = (): WorkflowStep[] => workflowSteps.map((step) => ({ ...step }));
 const cloneSkills = (): SkillDefinition[] => defaultSkills.map((skill) => ({ ...skill, params: { ...skill.params } }));
 const clonePrompts = (): PromptDefinition[] => defaultPrompts.map((prompt) => ({ ...prompt }));
+const createInputProcessSteps = (): InputProcessStep[] => [
+  {
+    id: 'collect',
+    title: '资料收集',
+    description: '读取输入内容、上传文件和资料收集类 Skill。',
+    status: 'idle',
+    progress: 0,
+    detail: '等待输入资料'
+  },
+  {
+    id: 'file-parse',
+    title: '文件解析',
+    description: '当存在上传文件时解析文件内容并合并上下文。',
+    status: 'idle',
+    progress: 0,
+    detail: '未上传文件'
+  },
+  {
+    id: 'topic',
+    title: '主题提炼',
+    description: '从资料中识别主题、受众和表达目标。',
+    status: 'idle',
+    progress: 0,
+    detail: '等待资料'
+  },
+  {
+    id: 'constraints',
+    title: '生成约束',
+    description: '整理提示词、参考模板和配置参数。',
+    status: 'idle',
+    progress: 0,
+    detail: '使用默认生成偏好'
+  },
+  {
+    id: 'ready',
+    title: '生成就绪',
+    description: '输入阶段处理完成，准备进入大纲生成。',
+    status: 'idle',
+    progress: 0,
+    detail: '等待处理完成'
+  }
+];
+const inputProcessStepIds = new Set(createInputProcessSteps().map((step) => step.id));
+const cloneInputProcessSteps = (steps?: InputProcessStep[]) => {
+  const defaults = createInputProcessSteps();
+  if (!steps?.length) return defaults.map((step) => ({ ...step }));
+
+  const savedSteps = new Map(
+    (steps as Array<InputProcessStep | Record<string, any>>)
+      .filter((step) => inputProcessStepIds.has(step.id))
+      .map((step) => [step.id, step])
+  );
+
+  return defaults.map((defaultStep) => {
+    const saved = savedSteps.get(defaultStep.id);
+    if (!saved) return { ...defaultStep };
+    return {
+      ...defaultStep,
+      status: saved.status || defaultStep.status,
+      progress: Number.isFinite(Number(saved.progress)) ? Number(saved.progress) : defaultStep.progress,
+      detail: saved.detail || defaultStep.detail,
+      skillId: typeof saved.skillId === 'string' ? saved.skillId : undefined,
+      skillName: typeof saved.skillName === 'string' ? saved.skillName : undefined,
+      logs: typeof saved.logs === 'string' ? saved.logs : undefined,
+      output: typeof saved.output === 'string' ? saved.output : undefined,
+      processedText: typeof saved.processedText === 'string' ? saved.processedText : undefined,
+      error: typeof saved.error === 'string' ? saved.error : undefined,
+    };
+  });
+};
 const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => ({
   ...template,
   settings: template.settings ? structuredClone(template.settings) : undefined,
@@ -273,7 +346,18 @@ const PROJECT_STATE_SYNC_PAGE_BATCH = 2;
 const TEXT_FILE_PATTERN = /\.(txt|md|markdown|csv|json|log)$/i;
 const DOCX_FILE_PATTERN = /\.docx$/i;
 const MAX_FILE_TEXT_CHARS = 120_000;
+const SKILL_CONTEXT_START = '【Skill 处理结果（自动生成，可重新运行刷新）】';
+const SKILL_CONTEXT_END = '【Skill 处理结果结束】';
 const normalizeProjectText = (value: unknown) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const stripFileExtension = (fileName: string) => fileName.replace(/\.[^.]+$/, '');
+const inferInputTitle = (content: string, files: string[]) => {
+  const normalized = content.trim().replace(/\s+/g, ' ');
+  const explicit = normalized.match(/(?:PPT\s*)?(?:主题|标题)\s*[：:]\s*([^。；;\n]{2,60})/i)?.[1]?.trim();
+  if (explicit) return explicit.slice(0, 60);
+  if (normalized) return normalized.slice(0, 28);
+  const firstFileName = files[0] ? stripFileExtension(files[0]).trim() : '';
+  return firstFileName.slice(0, 28) || '未命名 PPT';
+};
 const projectIdentityKey = (project: Pick<PptProject, 'title' | 'topic'>) =>
   `${normalizeProjectText(project.title)}::${normalizeProjectText(project.topic)}`;
 
@@ -415,6 +499,9 @@ export const useAgentStore = defineStore('agent', () => {
   const activePptId = ref<string | null>(null);
   const exportArtifacts = ref<ExportArtifact[]>([]);
   const activityLog = ref<string[]>(['系统就绪，等待添加 PPT 项目。']);
+  const inputProcessSteps = ref<InputProcessStep[]>(cloneInputProcessSteps());
+  const uploadedFileContents = ref<UploadedFileContent[]>([]);
+  const processedInputContent = ref('');
   const isRunning = ref(false);
   const isPaused = ref(false);
   const pauseRequested = ref(false);
@@ -436,6 +523,7 @@ export const useAgentStore = defineStore('agent', () => {
   const workflowRunToken = ref(0);
   const runningProjectId = ref<string | null>(null);
   const activeGenerationJobId = ref<number | null>(null);
+  const activeQueueJobId = ref<string | null>(null);
 
   const enabledSkills = computed(() => skills.value.filter((skill) => skill.enabled).sort((a, b) => a.order - b.order));
   const selectedImages = computed(() => images.value.filter((image) => image.selected));
@@ -458,11 +546,46 @@ export const useAgentStore = defineStore('agent', () => {
     return workflowRunToken.value === ctx.token && activePptId.value === ctx.projectId;
   }
 
+  function freezeWorkflowStepsForPause(stage: WorkflowStepId) {
+    steps.value = steps.value.map((step) => {
+      if (step.status !== 'running') return step;
+      return {
+        ...step,
+        status: 'idle',
+        progress: Math.max(0, Math.min(99, Math.round(step.progress || (step.id === stage ? 1 : 0)))),
+      };
+    });
+  }
+
+  function applyGeneratedProjectInfo(spec?: DesignSpec | null) {
+    if (!activePpt.value || !spec?.projectInfo) return;
+
+    const nextTitle = String(spec.projectInfo.title || '').trim();
+    const nextTopic = String(spec.projectInfo.topic || '').trim();
+    let changed = false;
+
+    if (nextTitle && nextTitle !== activePpt.value.title) {
+      activePpt.value.title = nextTitle;
+      changed = true;
+    }
+
+    if (nextTopic && nextTopic !== activePpt.value.topic) {
+      activePpt.value.topic = nextTopic;
+      input.value.topic = nextTopic;
+      changed = true;
+    }
+
+    if (changed) {
+      activePpt.value.updatedAt = Date.now();
+    }
+  }
+
   function cancelActiveRunForProjectSwitch() {
     if (!isRunning.value || !activePpt.value) return;
     const previousProject = activePpt.value;
     const previousJobId = activeGenerationJobId.value;
     pushLog('已切换项目，当前工作流已保存，可稍后继续。');
+    freezeWorkflowStepsForPause(activeStep.value);
     previousProject.state = {
       ...snapshotProjectState(),
       paused: true,
@@ -547,6 +670,8 @@ export const useAgentStore = defineStore('agent', () => {
   function makeDefaultProjectState(): PptProjectState {
     return {
       input: { topic: '', content: '', files: [] },
+      uploadedFileContents: [],
+      processedInputContent: '',
       parameters: normalizeAgentParameters(),
       selectedTemplate: null,
       outline: [],
@@ -554,6 +679,7 @@ export const useAgentStore = defineStore('agent', () => {
       exportArtifacts: [],
       enabledSkillIds: [],
       selectedPromptId: '',
+      inputProcessSteps: cloneInputProcessSteps(),
       activityLog: [],
       steps: workflowSteps.map(s => ({ ...s })),
       designSpec: null,
@@ -576,6 +702,11 @@ export const useAgentStore = defineStore('agent', () => {
       ...fallback,
       ...state,
       input: { ...fallback.input, ...(state.input || {}), files: [...(state.input?.files || [])] },
+      uploadedFileContents: (state.uploadedFileContents || []).map((file) => ({
+        name: String(file.name || ''),
+        text: String(file.text || ''),
+      })).filter((file) => file.name && file.text),
+      processedInputContent: String(state.processedInputContent || ''),
       parameters: normalizeAgentParameters(state.parameters || fallback.parameters),
       selectedTemplate: state.selectedTemplate ? snapshotTemplateAsset(state.selectedTemplate) : null,
       outline: (state.outline || []).map(s => ({ ...s, bullets: [...(s.bullets || [])] })),
@@ -583,6 +714,7 @@ export const useAgentStore = defineStore('agent', () => {
       exportArtifacts: (state.exportArtifacts || []).map(item => ({ ...item })),
       enabledSkillIds: [...(state.enabledSkillIds || [])],
       selectedPromptId: state.selectedPromptId || '',
+      inputProcessSteps: cloneInputProcessSteps(state.inputProcessSteps),
       activityLog: [...(state.activityLog || [])],
       steps: (state.steps || fallback.steps).map(s => ({ ...s })),
       svgPages: (state.svgPages || []).map(page => ({ ...page })),
@@ -687,6 +819,8 @@ export const useAgentStore = defineStore('agent', () => {
     const persistable = options.persistable ?? false;
     return {
       input: { ...input.value, files: [...input.value.files] },
+      uploadedFileContents: uploadedFileContents.value.map((file) => ({ ...file })),
+      processedInputContent: processedInputContent.value,
       parameters: { ...parameters.value },
       selectedTemplate: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
       outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
@@ -696,6 +830,7 @@ export const useAgentStore = defineStore('agent', () => {
       exportArtifacts: [...exportArtifacts.value],
       enabledSkillIds: skills.value.filter(s => s.enabled).map(s => s.id),
       selectedPromptId: selectedPromptId.value,
+      inputProcessSteps: cloneInputProcessSteps(inputProcessSteps.value),
       activityLog: [...activityLog.value],
       steps: steps.value.map(s => ({ ...s })),
       designSpec: designSpec.value,
@@ -726,6 +861,8 @@ export const useAgentStore = defineStore('agent', () => {
   function restoreProjectState(state: PptProjectState) {
     const normalizedState = normalizeProjectState(state);
     input.value = { ...normalizedState.input, files: [...normalizedState.input.files] };
+    uploadedFileContents.value = normalizedState.uploadedFileContents?.map((file) => ({ ...file })) || [];
+    processedInputContent.value = normalizedState.processedInputContent || '';
     parameters.value = normalizeAgentParameters(normalizedState.parameters);
     selectedTemplate.value = normalizedState.selectedTemplate
       ? snapshotTemplateAsset(normalizedState.selectedTemplate!)
@@ -742,13 +879,15 @@ export const useAgentStore = defineStore('agent', () => {
     }));
 
     selectedPromptId.value = normalizedState.selectedPromptId || '';
+    inputProcessSteps.value = cloneInputProcessSteps(normalizedState.inputProcessSteps);
 
     designSpec.value = normalizedState.designSpec || null;
     specLock.value = normalizedState.specLock || null;
     svgPages.value = normalizedState.svgPages || [];
     normalizeParametersAgainstConfig();
     retryingPageNumbers.value = new Set();
-    const hadActiveWorkflow = Boolean(normalizedState.workflowActive || normalizedState.steps?.some(step => step.status === 'running'));
+    const hasRunningSteps = Boolean(normalizedState.steps?.some(step => step.status === 'running'));
+    const hadActiveWorkflow = !normalizedState.paused && Boolean(normalizedState.workflowActive || hasRunningSteps);
     recoveredActiveWorkflow.value = hadActiveWorkflow && !normalizedState.paused;
     isPaused.value = Boolean(normalizedState.paused || hadActiveWorkflow);
     waitingForImageRetry.value = Boolean(normalizedState.waitingForImageRetry);
@@ -769,7 +908,7 @@ export const useAgentStore = defineStore('agent', () => {
       const restoredSteps = normalizedState.steps.map(s => ({
         ...s,
         status: (s.status === 'running' ? (hadActiveWorkflow ? 'running' : 'idle') : s.status) as WorkflowStep['status'],
-        progress: s.status === 'running' && !hadActiveWorkflow ? 0 : s.progress,
+        progress: s.status === 'running' && !hadActiveWorkflow && !normalizedState.paused ? 0 : s.progress,
       }));
       const currentStepIds = new Set(workflowSteps.map(s => s.id));
       const restoredStepIds = new Set(restoredSteps.map(s => s.id));
@@ -997,7 +1136,10 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function pushLog(message: string) {
-    activityLog.value = [`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${message}`, ...activityLog.value].slice(0, MAX_ACTIVITY_LOGS);
+    activityLog.value = [
+      `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${compactMultiline(message, 420)}`,
+      ...activityLog.value
+    ].slice(0, MAX_ACTIVITY_LOGS);
     scheduleLogSync();
   }
 
@@ -1054,6 +1196,7 @@ export const useAgentStore = defineStore('agent', () => {
     }
     designSpec.value = result.spec;
     specLock.value = result.lock;
+    applyGeneratedProjectInfo(designSpec.value);
     outline.value = (result.outline || result.spec.outline || []).map((s: any) => ({
       id: s.id,
       title: s.title,
@@ -1257,22 +1400,44 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
-  function requestPauseWorkflow() {
+  async function requestPauseWorkflow() {
     if (!isRunning.value) return;
     recoveredActiveWorkflow.value = false;
     pauseRequested.value = true;
-    pushLog('已请求暂停，当前步骤完成后会停下。');
+    pushLog('已请求暂停，正在停止当前服务端任务。');
+
+    const queueJobId = activeQueueJobId.value;
+    if (queueJobId) {
+      try {
+        await aiApi.cancelQueueJob(queueJobId);
+      } catch (error) {
+        console.warn('取消队列任务失败', error);
+      }
+    }
+
+    if (activeGenerationJobId.value) {
+      try {
+        await generationJobApi.cancel(activeGenerationJobId.value);
+      } catch (error) {
+        console.warn('取消生成任务记录失败', error);
+      }
+    }
+
+    markPaused(activeStep.value);
   }
 
   function markPaused(stage: WorkflowStepId) {
+    workflowRunToken.value += 1;
+    freezeWorkflowStepsForPause(stage);
     isPaused.value = true;
     recoveredActiveWorkflow.value = false;
     pauseRequested.value = false;
     resumeStage.value = stage;
     isRunning.value = false;
     currentGeneratingSlide.value = null;
+    activeQueueJobId.value = null;
+    activeGenerationJobId.value = null;
     pushLog('工作流已暂停。');
-    void reportGenerationJob(`paused-${stage}`, steps.value.find((step) => step.id === stage)?.progress || 0, 'running');
     syncToProject();
   }
 
@@ -1309,6 +1474,7 @@ export const useAgentStore = defineStore('agent', () => {
     pauseRequested.value = false;
     runningProjectId.value = null;
     currentGeneratingSlide.value = null;
+    activeQueueJobId.value = null;
   }
 
   function releaseWorkflowForImageRetry() {
@@ -1316,6 +1482,7 @@ export const useAgentStore = defineStore('agent', () => {
     pauseRequested.value = false;
     runningProjectId.value = null;
     currentGeneratingSlide.value = null;
+    activeQueueJobId.value = null;
     recoveredActiveWorkflow.value = false;
   }
 
@@ -1456,24 +1623,295 @@ export const useAgentStore = defineStore('agent', () => {
     return true;
   }
 
+  function setInputProcessStep(
+    id: InputProcessStep['id'],
+    patch: Partial<Omit<InputProcessStep, 'id'>>
+  ) {
+    inputProcessSteps.value = inputProcessSteps.value.map((step) =>
+      step.id === id ? { ...step, ...patch } : step
+    );
+  }
+
+  function resetInputProcessSteps() {
+    inputProcessSteps.value = createInputProcessSteps();
+  }
+
+  function isSearchSkill(skill: SkillDefinition) {
+    const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
+    return /web|search|google|bing|搜索|联网|资料收集/.test(text);
+  }
+
+  function isFileParseSkill(skill: SkillDefinition) {
+    const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
+    return /file|parse|docx|pdf|文件|解析|读取/.test(text);
+  }
+
+  function isTopicSkill(skill: SkillDefinition) {
+    const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
+    return /topic|title|主题|提炼|标题/.test(text);
+  }
+
+  function isConstraintSkill(skill: SkillDefinition) {
+    const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
+    return /constraint|config|rule|约束|配置|规则|提示词/.test(text);
+  }
+
+  function stripSkillContextBlock(content: string) {
+    const pattern = new RegExp(`\\n*${SKILL_CONTEXT_START}[\\s\\S]*?${SKILL_CONTEXT_END}\\n*`, 'g');
+    return content.replace(pattern, '\n\n').trim();
+  }
+
+  function stripGeneratedInputArtifacts(content: string) {
+    return stripSkillContextBlock(content)
+      .replace(/\n*【上传资料：[^】]+】[\s\S]*?(?=\n\n【上传资料：|\n\n【Skill 处理结果|$)/g, '\n\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function buildSkillContextContent(baseContent: string, chunks: string[]) {
+    const cleanBase = stripSkillContextBlock(baseContent);
+    if (!chunks.length) return cleanBase;
+    return [
+      cleanBase,
+      `${SKILL_CONTEXT_START}\n${chunks.join('\n\n')}\n${SKILL_CONTEXT_END}`,
+    ].filter(Boolean).join('\n\n');
+  }
+
+  function compactMultiline(value: string, maxLength = 900) {
+    const normalized = value.trim().replace(/\n{3,}/g, '\n\n');
+    return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+  }
+
+  function buildUploadedFileContext() {
+    return uploadedFileContents.value
+      .filter((file) => file.name && file.text.trim())
+      .map((file) => `【上传文件：${file.name}】\n${file.text.trim()}`)
+      .join('\n\n');
+  }
+
+  function buildInputSourceContext(userContent = stripGeneratedInputArtifacts(input.value.content.trim())) {
+    return [
+      userContent.trim(),
+      buildUploadedFileContext(),
+    ].filter(Boolean).join('\n\n');
+  }
+
+  function generationInputContent() {
+    return processedInputContent.value.trim() || buildInputSourceContext();
+  }
+
+  function extractSkillOutputText(output: unknown) {
+    if (!output) return '';
+    if (typeof output === 'string') {
+      try {
+        const parsed = JSON.parse(output);
+        return extractSkillOutputText(parsed);
+      } catch {
+        return output;
+      }
+    }
+    if (typeof output === 'object') {
+      const record = output as Record<string, any>;
+      return String(record.text || record.summary || record.instruction || '').trim();
+    }
+    return String(output || '').trim();
+  }
+
+  function hasSkillRunFailureSignal(logs: string) {
+    if (!logs.trim()) return false;
+    return [
+      /Traceback \(most recent call last\)/i,
+      /\bException\b/i,
+      /\bError\b/i,
+      /Error performing/i,
+      /Missing required dependency/i,
+      /ModuleNotFoundError/i,
+      /ImportError/i,
+      /Process timeout/i,
+    ].some((pattern) => pattern.test(logs));
+  }
+
+  function isEmptySkillRunOutput(outputText: string, logs: string, searchLike: boolean) {
+    const normalized = outputText.trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!normalized) return true;
+    if (/^no results found\.?$/.test(normalized)) return true;
+    if (/^none$|^null$|^\[\]$|^\{\}$/.test(normalized)) return true;
+    if (searchLike && /found\s+0\s+result/i.test(`${outputText}\n${logs}`)) return true;
+    return false;
+  }
+
+  function validateSkillRunResult(skill: SkillDefinition, stepId: InputProcessStep['id'], outputText: string, logs: string) {
+    if (hasSkillRunFailureSignal(logs)) {
+      return `Skill 执行异常：${compactMultiline(logs, 180)}`;
+    }
+    if (isEmptySkillRunOutput(outputText, logs, stepId === 'collect' || isSearchSkill(skill))) {
+      return outputText ? `Skill 未返回有效内容：${compactMultiline(outputText, 240)}` : 'Skill 未返回有效内容。';
+    }
+    return '';
+  }
+
+  function countSearchResults(outputText: string) {
+    const markdownMatches = outputText.match(/^##\s+\d+\./gm)?.length || 0;
+    if (markdownMatches) return markdownMatches;
+    const urlMatches = outputText.match(/\bhttps?:\/\/\S+/g)?.length || 0;
+    return urlMatches;
+  }
+
+  function extractSearchTitles(outputText: string) {
+    return Array.from(outputText.matchAll(/^##\s+\d+\.\s+(.+)$/gm))
+      .map((match) => match[1].trim())
+      .filter(Boolean)
+      .slice(0, 3);
+  }
+
+  function buildSkillProcessedText(
+    skill: SkillDefinition,
+    stepId: InputProcessStep['id'],
+    outputText: string,
+    inputPayload: Record<string, any>
+  ) {
+    const query = String(inputPayload.query || inputPayload.topic || inputPayload.content || '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 80);
+    if (stepId === 'collect' || isSearchSkill(skill)) {
+      const count = countSearchResults(outputText);
+      const titles = extractSearchTitles(outputText);
+      return [
+        query ? `已围绕“${query}”完成资料收集。` : '已完成资料收集。',
+        count ? `返回 ${count} 条结果，已合并到资料上下文。` : '已合并返回内容到资料上下文。',
+        titles.length ? `重点结果：${titles.join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (stepId === 'file-parse') return '已解析上传文件，并将可用内容合并到资料上下文。';
+    if (stepId === 'topic') return outputText ? `已提炼主题线索：${compactMultiline(outputText, 220)}` : '已完成主题提炼。';
+    if (stepId === 'constraints') return outputText ? `已整理生成约束：${compactMultiline(outputText, 220)}` : '已完成生成约束整理。';
+    return outputText ? compactMultiline(outputText, 220) : `${skill.name} 已完成。`;
+  }
+
+  function buildSkillContextChunk(
+    skill: SkillDefinition,
+    stepId: InputProcessStep['id'],
+    outputText: string,
+    processedText: string
+  ) {
+    if (!outputText && !processedText) return '';
+    const titleByStep: Record<InputProcessStep['id'], string> = {
+      collect: '资料收集结果',
+      'file-parse': '文件解析结果',
+      topic: '主题提炼结果',
+      constraints: '生成约束结果',
+      ready: '输入处理结果',
+    };
+    return compactMultiline([
+      `### ${titleByStep[stepId]} - ${skill.name}`,
+      processedText,
+      outputText ? `\n原始输出：\n${outputText}` : '',
+    ].filter(Boolean).join('\n'), 6000);
+  }
+
+  async function runInputSkill(
+    skill: SkillDefinition,
+    stepId: InputProcessStep['id'],
+    inputPayload: Record<string, any>
+  ) {
+    setInputProcessStep(stepId, {
+      status: 'running',
+      progress: 18,
+      detail: `准备 ${skill.name} 的输入`,
+      skillId: skill.id,
+      skillName: skill.name,
+      logs: '',
+      output: '',
+      processedText: '',
+      error: undefined,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+
+    setInputProcessStep(stepId, {
+      progress: 38,
+      detail: `正在启动 ${skill.name}`,
+      logs: `输入已整理：${compactMultiline(JSON.stringify(inputPayload), 180)}`,
+    });
+
+    const response = await skillApi.run(Number(skill.id), {
+      projectId: activePpt.value?.id,
+      phase: 'input',
+      input: inputPayload,
+    });
+
+    setInputProcessStep(stepId, {
+      progress: 76,
+      detail: `正在处理 ${skill.name} 返回内容`,
+    });
+
+    if (!response.success || !response.data) {
+      throw new Error(response.message || `${skill.name} 执行失败`);
+    }
+
+    const outputText = extractSkillOutputText(response.data.output);
+    const runLogs = response.data.logs || '';
+
+    if (response.data.status === 'failed') {
+      const message = compactMultiline(response.data.error_message || `${skill.name} 执行失败`, 220);
+      setInputProcessStep(stepId, {
+        progress: 100,
+        detail: message,
+        error: message,
+        logs: runLogs,
+        output: outputText ? compactMultiline(outputText, 800) : '',
+      });
+      throw new Error(message);
+    }
+
+    const validationError = validateSkillRunResult(skill, stepId, outputText, runLogs);
+    if (validationError) {
+      setInputProcessStep(stepId, {
+        progress: 100,
+        detail: validationError,
+        error: validationError,
+        logs: runLogs,
+        output: outputText ? compactMultiline(outputText, 800) : '',
+      });
+      throw new Error(validationError);
+    }
+
+    const outputPreview = compactMultiline(outputText || 'Skill 执行完成，但没有返回正文。', 1200);
+    const processedText = buildSkillProcessedText(skill, stepId, outputText, inputPayload);
+    const context = buildSkillContextChunk(skill, stepId, outputText, processedText);
+
+    setInputProcessStep(stepId, {
+      status: 'done',
+      progress: 100,
+      detail: `${skill.name} 已完成，结果已处理`,
+      logs: runLogs,
+      output: outputPreview,
+      processedText,
+    });
+
+    return { context, output: outputText, processedText, logs: runLogs };
+  }
+
   async function ensureInputProject(): Promise<boolean> {
     const toastStore = useToastStore();
+    const content = input.value.content.trim();
     const topic = input.value.topic.trim();
+    const hasInput = Boolean(content || topic || input.value.files.length > 0);
 
-    if (!topic) {
+    if (!hasInput) {
       activeStep.value = 'input';
-      toastStore.warning('请填写主题', '请先填写 PPT 主题，再开始生成');
+      toastStore.warning('请填写资料', '请先输入资料内容或上传文件后再开始生成');
       return false;
     }
 
     if (!activePpt.value) {
+      const inferredTitle = topic || inferInputTitle(content, input.value.files);
       await addPptProjectPersisted({
-        title: topic,
+        title: inferredTitle,
         topic,
-        description: input.value.content.trim() || '自动创建的 PPT 项目',
+        description: content || '自动创建的 PPT 项目',
         templateId: 'auto'
       });
-      toastStore.info('已创建 PPT 项目', `已自动创建项目：${topic}`);
+      toastStore.info('已创建 PPT 项目', `已自动创建项目：${inferredTitle}`);
     }
 
     setStepStatus('input', 'done', 100);
@@ -1483,9 +1921,233 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function runInputStage() {
+    const toastStore = useToastStore();
+    resetInputProcessSteps();
+    activeStep.value = 'input';
+    setStepStatus('input', 'running', 5);
+
     const ready = await ensureInputProject();
-    if (ready) {
+    if (!ready) {
+      setStepStatus('input', 'idle', 0);
+      return;
+    }
+
+    const userContent = stripGeneratedInputArtifacts(input.value.content.trim());
+    if (input.value.content !== userContent) {
+      input.value.content = userContent;
+    }
+    const content = buildInputSourceContext(userContent);
+    processedInputContent.value = '';
+    const files = [...input.value.files];
+    const activeSkills = enabledSkills.value.filter((skill) => Number.isFinite(Number(skill.id)));
+    const collectSkills = activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '资料收集' || isSearchSkill(skill));
+    const fileParseSkills = files.length
+      ? activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '文件解析' || isFileParseSkill(skill))
+      : [];
+    const topicSkills = activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '主题提炼' || isTopicSkill(skill));
+    const constraintSkills = activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '生成约束' || isConstraintSkill(skill));
+    const skillContextChunks: string[] = [];
+
+    try {
+      setInputProcessStep('collect', {
+        status: 'running',
+        progress: 45,
+        detail: collectSkills.length ? `正在执行 ${collectSkills.length} 个资料收集 Skill` : files.length ? `已接收 ${files.length} 个文件，正在整理资料` : '正在整理输入资料',
+      });
+
+      if (collectSkills.length) {
+        for (const skill of collectSkills) {
+          try {
+            const result = await runInputSkill(skill, 'collect', {
+              content,
+              query: input.value.topic || inferInputTitle(userContent || content, files),
+              files,
+              purpose: 'collect and enrich source materials before PPT generation',
+            });
+            if (result.context) skillContextChunks.push(result.context);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '资料收集 Skill 执行失败';
+            setInputProcessStep('collect', {
+              status: 'failed',
+              progress: 100,
+              detail: message,
+              error: message,
+            });
+            pushLog(`资料收集增强失败：${message}`);
+            throw new Error(message);
+          }
+        }
+      } else {
+        await new Promise((resolve) => window.setTimeout(resolve, 120));
+      }
+
+      setInputProcessStep('collect', {
+        status: inputProcessSteps.value.find(step => step.id === 'collect')?.status === 'failed' ? 'failed' : 'done',
+        progress: 100,
+        detail: inputProcessSteps.value.find(step => step.id === 'collect')?.status === 'failed'
+          ? inputProcessSteps.value.find(step => step.id === 'collect')?.detail
+          : collectSkills.length
+            ? `${collectSkills.length} 个资料收集 Skill 已完成`
+            : content
+              ? `${content.length} 字资料已进入上下文`
+              : `${files.length} 个文件已记录`,
+      });
+      setStepStatus('input', 'running', 20);
+
+      if (files.length && fileParseSkills.length) {
+        for (const skill of fileParseSkills) {
+          try {
+            const result = await runInputSkill(skill, 'file-parse', {
+              content,
+              fileContents: uploadedFileContents.value,
+              files,
+              purpose: 'parse uploaded files before PPT generation',
+            });
+            if (result.context) skillContextChunks.push(result.context);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '文件解析 Skill 执行失败';
+            setInputProcessStep('file-parse', {
+              status: 'failed',
+              progress: 100,
+              detail: message,
+              error: message,
+            });
+            pushLog(`文件解析增强失败：${message}`);
+            throw new Error(message);
+          }
+        }
+      } else {
+        setInputProcessStep('file-parse', {
+          status: files.length ? 'done' : 'skipped',
+          progress: 100,
+          detail: files.length ? '上传文件已通过内置读取流程合并到资料' : '未上传文件，跳过',
+        });
+      }
+      setStepStatus('input', 'running', 48);
+
+      setInputProcessStep('topic', {
+        status: 'running',
+        progress: 60,
+        detail: topicSkills.length ? `正在执行 ${topicSkills.length} 个主题提炼 Skill` : '正在提炼主题、受众和表达目标',
+      });
+      if (topicSkills.length) {
+        for (const skill of topicSkills) {
+          try {
+            const result = await runInputSkill(skill, 'topic', {
+              content: buildSkillContextContent(content, skillContextChunks),
+              files,
+              purpose: 'extract topic and audience before PPT generation',
+            });
+            if (result.context) skillContextChunks.push(result.context);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '主题提炼 Skill 执行失败';
+            setInputProcessStep('topic', {
+              status: 'failed',
+              progress: 100,
+              detail: message,
+              error: message,
+            });
+            pushLog(`主题提炼增强失败：${message}`);
+            throw new Error(message);
+          }
+        }
+      }
+      const explicitTopic = userContent.match(/(?:主题|题目|标题)\s*[：:]\s*([^\n。；;]+)/)?.[1]?.trim();
+      if (explicitTopic && !input.value.topic.trim()) {
+        input.value.topic = explicitTopic.slice(0, 80);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+      setInputProcessStep('topic', {
+        status: inputProcessSteps.value.find(step => step.id === 'topic')?.status === 'failed' ? 'failed' : 'done',
+        progress: 100,
+        detail: inputProcessSteps.value.find(step => step.id === 'topic')?.status === 'failed'
+          ? inputProcessSteps.value.find(step => step.id === 'topic')?.detail
+          : input.value.topic.trim() ? `主题：${input.value.topic.trim()}` : '主题将在大纲生成时由 AI 自动确定',
+      });
+      setStepStatus('input', 'running', 72);
+
+      setInputProcessStep('constraints', {
+        status: 'running',
+        progress: 70,
+        detail: constraintSkills.length ? `正在执行 ${constraintSkills.length} 个生成约束 Skill` : '正在整理提示词、参考模板和配置参数',
+      });
+      if (constraintSkills.length) {
+        for (const skill of constraintSkills) {
+          try {
+            const result = await runInputSkill(skill, 'constraints', {
+              content: buildSkillContextContent(content, skillContextChunks),
+              files,
+              promptId: selectedPromptId.value,
+              templateName: selectedTemplate.value?.name || '',
+              parameters: { ...parameters.value },
+              purpose: 'prepare generation constraints before PPT generation',
+            });
+            if (result.context) skillContextChunks.push(result.context);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '生成约束 Skill 执行失败';
+            setInputProcessStep('constraints', {
+              status: 'failed',
+              progress: 100,
+              detail: message,
+              error: message,
+            });
+            pushLog(`生成约束增强失败：${message}`);
+            throw new Error(message);
+          }
+        }
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+      setInputProcessStep('constraints', {
+        status: inputProcessSteps.value.find(step => step.id === 'constraints')?.status === 'failed' ? 'failed' : 'done',
+        progress: 100,
+        detail: inputProcessSteps.value.find(step => step.id === 'constraints')?.status === 'failed'
+          ? inputProcessSteps.value.find(step => step.id === 'constraints')?.detail
+          : [
+              selectedPromptId.value ? '已选择提示词' : '使用默认提示词策略',
+              selectedTemplate.value ? `参考模板：${selectedTemplate.value.name}` : '不使用参考模板',
+              parameters.value.slideCount > 0 ? `${parameters.value.slideCount} 页` : '页数 AI 自动',
+            ].join(' / '),
+      });
+      setStepStatus('input', 'running', 90);
+
+      processedInputContent.value = buildSkillContextContent(content, skillContextChunks);
+      setInputProcessStep('ready', {
+        status: 'running',
+        progress: 92,
+        detail: skillContextChunks.length
+          ? `已整理用户输入、上传文件和 ${skillContextChunks.length} 段 Skill 处理结果`
+          : uploadedFileContents.value.length
+            ? `已整理用户输入和 ${uploadedFileContents.value.length} 个上传文件`
+            : '已整理用户输入内容',
+        processedText: compactMultiline(processedInputContent.value, 1200),
+      });
+      if (skillContextChunks.length) {
+        pushLog(`已将 ${skillContextChunks.length} 段 Skill 处理结果整理到生成就绪文案。`);
+      }
+
+      setInputProcessStep('ready', {
+        status: 'done',
+        progress: 100,
+        detail: skillContextChunks.length
+          ? '输入阶段已完成，Skill 结果将参与大纲生成'
+          : '输入阶段已完成，准备生成大纲',
+      });
+      setStepStatus('input', 'done', 100);
+      pushLog('输入阶段处理完成。');
+      await syncToProjectNow();
       activeStep.value = 'outline';
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '输入阶段处理失败';
+      setInputProcessStep('ready', {
+        status: 'failed',
+        progress: 100,
+        detail: message,
+        error: message,
+      });
+      setStepStatus('input', 'idle', 0);
+      syncToProject();
+      toastStore.error('输入阶段处理失败', message);
+      throw error;
     }
   }
 
@@ -2071,11 +2733,9 @@ export const useAgentStore = defineStore('agent', () => {
     const prompt = prompts.value.find((item) => item.id === id);
     if (!prompt) return;
 
-    input.value = {
-      ...input.value,
-      content: [input.value.content, prompt.content].filter(Boolean).join('\n\n')
-    };
-      pushLog(`已应用提示词：${prompt.title}`);
+    selectedPromptId.value = id;
+    persistCurrentSelectionToActiveProject();
+    pushLog(`已选择提示词：${prompt.title}，提示词将参与生成但不会写入输入框。`);
     syncToProject();
   }
 
@@ -2137,7 +2797,7 @@ export const useAgentStore = defineStore('agent', () => {
       const result = await aiApi.strategistStream(
         {
           topic: input.value.topic,
-          content: input.value.content,
+          content: generationInputContent(),
           tone: parameters.value.tone,
           summaryLength: parameters.value.summaryLength,
           slideCount: parameters.value.slideCount,
@@ -2179,6 +2839,7 @@ export const useAgentStore = defineStore('agent', () => {
             const parsed = data as any;
             designSpec.value = parsed.spec || null;
             specLock.value = parsed.lock || null;
+            applyGeneratedProjectInfo(designSpec.value);
 
             if (designSpec.value) {
               outline.value = designSpec.value.outline.map((slide, index) => specSlideToOutlineSlide(slide, index));
@@ -2781,13 +3442,13 @@ export const useAgentStore = defineStore('agent', () => {
 
     const activeSkills = enabledSkills.value;
     if (activeSkills.length === 0) {
-      pushLog('没有启用的 Skill，跳过。');
+      pushLog('本次未选择 Skill，跳过。');
       return;
     }
 
     const effectiveSkillIntensity = parameters.value.skillIntensity > 0 ? parameters.value.skillIntensity : 70;
     const intensityLabel = parameters.value.skillIntensity > 0 ? `${effectiveSkillIntensity}%` : 'AI 自动';
-    pushLog(`开始执行 ${activeSkills.length} 个 Skill（强度 ${intensityLabel}）。`);
+    pushLog(`开始执行本次选择的 ${activeSkills.length} 个 Skill（强度 ${intensityLabel}）。`);
 
     for (const skill of activeSkills) {
       pushLog(`执行 Skill：${skill.name}`);
@@ -2875,8 +3536,14 @@ export const useAgentStore = defineStore('agent', () => {
     const toastStore = useToastStore();
 
     if (!options.resume) {
-      const ready = await ensureInputProject();
-      if (!ready) return;
+      try {
+        await runInputStage();
+      } catch {
+        activeStep.value = 'input';
+        return;
+      }
+      const inputFailed = inputProcessSteps.value.some((step) => step.status === 'failed');
+      if (!activePpt.value || inputFailed || activeStep.value !== 'outline') return;
     } else if (!activePpt.value) {
       const ready = await ensureInputProject();
       if (!ready) return;
@@ -2908,7 +3575,7 @@ export const useAgentStore = defineStore('agent', () => {
         title: activePpt.value!.title,
         input: {
           topic: input.value.topic,
-          content: input.value.content,
+          content: generationInputContent(),
           tone: parameters.value.tone,
           summaryLength: parameters.value.summaryLength,
           slideCount: parameters.value.slideCount,
@@ -2926,9 +3593,20 @@ export const useAgentStore = defineStore('agent', () => {
         throw new Error(response.message || '创建服务端生成任务失败');
       }
 
+      if (pauseRequested.value || isPaused.value || !isRunContextActive(ctx)) {
+        await aiApi.cancelQueueJob(response.data.id).catch((error) => console.warn('取消队列任务失败', error));
+        if (response.data.dbJobId) {
+          await generationJobApi.cancel(response.data.dbJobId).catch((error) => console.warn('取消生成任务记录失败', error));
+        }
+        if (!isPaused.value) markPaused(activeStep.value);
+        return;
+      }
+
+      activeQueueJobId.value = response.data.id;
       activeGenerationJobId.value = response.data.dbJobId || null;
       const finalJob = await aiApi.waitForQueueJob(response.data.id, (job) => {
         if (!isRunContextActive(ctx)) return;
+        if (job.status === 'cancelled') return;
         pushLog(job.message || `任务进度：${job.phase}`);
         if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') {
           activeStep.value = 'outline';
@@ -2964,6 +3642,7 @@ export const useAgentStore = defineStore('agent', () => {
       applyQueuedGenerationResult(finalJob.result, { final: true });
       activeStep.value = 'preview';
       clearPauseState();
+      activeQueueJobId.value = null;
       activeGenerationJobId.value = null;
       await syncToProjectNow();
 
@@ -2971,6 +3650,10 @@ export const useAgentStore = defineStore('agent', () => {
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
+      if (pauseRequested.value || errMsg === '任务已取消') {
+        markPaused(activeStep.value);
+        return;
+      }
       if (isBlockingImageGenerationError(error)) {
         activeStep.value = 'images';
         waitingForImageRetry.value = true;
@@ -2991,6 +3674,7 @@ export const useAgentStore = defineStore('agent', () => {
       if (isRunContextActive(ctx) && !isPaused.value) {
         isRunning.value = false;
         runningProjectId.value = null;
+        activeQueueJobId.value = null;
       }
       if (isRunContextActive(ctx)) {
         streamingText.value = '';
@@ -3063,7 +3747,7 @@ export const useAgentStore = defineStore('agent', () => {
     const skill = skills.value.find((item) => item.id === id);
     if (skill) {
       skill.enabled = !skill.enabled;
-      pushLog(`${skill.name} 已${skill.enabled ? '启用' : '停用'}。`);
+      pushLog(`${skill.name} 已${skill.enabled ? '加入本次输入处理' : '从本次输入处理移除'}。`);
       syncToProject();
     }
   }
@@ -3083,7 +3767,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     const fileList = Array.from(files);
     input.value.files = fileList.map((file) => file.name);
-    const importedChunks: string[] = [];
+    const parsedFiles: UploadedFileContent[] = [];
     const skippedFiles: string[] = [];
 
     for (const file of fileList) {
@@ -3100,21 +3784,18 @@ export const useAgentStore = defineStore('agent', () => {
           ? `${text.slice(0, MAX_FILE_TEXT_CHARS)}\n\n[文件内容较长，已截取前 ${MAX_FILE_TEXT_CHARS} 字符]`
           : text;
         if (clippedText.trim()) {
-          importedChunks.push(`【上传资料：${file.name}】\n${clippedText.trim()}`);
+          parsedFiles.push({ name: file.name, text: clippedText.trim() });
         }
       } catch {
         skippedFiles.push(file.name);
       }
     }
 
-    if (importedChunks.length > 0) {
-      input.value.content = [input.value.content.trim(), importedChunks.join('\n\n')]
-        .filter(Boolean)
-        .join('\n\n');
-    }
+    uploadedFileContents.value = parsedFiles;
+    processedInputContent.value = '';
 
-    pushLog(importedChunks.length > 0
-      ? `已读取 ${importedChunks.length} 个资料文件。`
+    pushLog(parsedFiles.length > 0
+      ? `已读取 ${parsedFiles.length} 个资料文件，文件正文将进入输入阶段处理流。`
       : `已记录 ${input.value.files.length} 个资料文件。`);
 
     if (skippedFiles.length > 0) {
@@ -3152,14 +3833,23 @@ export const useAgentStore = defineStore('agent', () => {
   async function fetchSkills() {
     try {
       const response = await skillApi.getAll();
-      if (response.success && response.data && response.data.length > 0) {
+      if (response.success && response.data) {
+        const selectedSkillIds = new Set(skills.value.filter((skill) => skill.enabled).map((skill) => skill.id));
         skills.value = response.data.map((s: any, index: number) => ({
           id: String(s.id),
           name: s.name,
           description: s.description || '',
-          enabled: Boolean(s.is_enabled),
+          enabled: selectedSkillIds.has(String(s.id)),
           order: index + 1,
-          params: s.parameters || {}
+          params: s.parameters || {},
+          instruction: s.parameters?.instruction || '',
+          category: normalizeInputSkillCategory(s.category),
+          type: s.type || 'prompt-only',
+          runtime: s.runtime || 'prompt-only',
+          entry: s.entry || null,
+          installStatus: s.install_status || 'not_required',
+          installLog: s.install_log || '',
+          dependencyFile: s.dependency_file || null
         }));
       }
     } catch (error) {
@@ -3412,6 +4102,7 @@ export const useAgentStore = defineStore('agent', () => {
     skills,
     enabledSkills,
     prompts,
+    inputProcessSteps,
     pptProjects,
     templates,
     selectedTemplate,

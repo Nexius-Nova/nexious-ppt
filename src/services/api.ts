@@ -13,6 +13,10 @@ interface ApiResponse<T = any> {
   details?: unknown;
 }
 
+type ApiRequestOptions = RequestInit & {
+  timeoutMs?: number;
+};
+
 class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
@@ -38,11 +42,11 @@ class ApiClient {
 
   private async request<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: ApiRequestOptions = {}
   ): Promise<ApiResponse<T>> {
     const url = `${this.baseUrl}${endpoint}`;
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeoutId = window.setTimeout(() => controller.abort(), options.timeoutMs ?? this.timeoutMs);
     const requestId = this.createRequestId();
 
     const headers: Record<string, string> = {
@@ -104,8 +108,9 @@ class ApiClient {
     return this.request<T>(endpoint, { method: 'GET' });
   }
 
-  async post<T>(endpoint: string, body?: any): Promise<ApiResponse<T>> {
+  async post<T>(endpoint: string, body?: any, options: ApiRequestOptions = {}): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, {
+      ...options,
       method: 'POST',
       body: body ? JSON.stringify(body) : undefined,
     });
@@ -682,6 +687,8 @@ export const aiApi = {
 
   getQueueJob: (id: string) => api.get<QueueJobSnapshot>(`/api/generate/jobs/${id}`),
 
+  cancelQueueJob: (id: string) => api.post<QueueJobSnapshot>(`/api/generate/jobs/${id}/cancel`),
+
   subscribeQueueJob: async (
     id: string,
     onJob: (job: QueueJobSnapshot) => void,
@@ -831,6 +838,57 @@ export interface Skill {
   category: string | null;
   parameters: Record<string, any>;
   is_enabled: boolean;
+  type: 'prompt-only' | 'package' | string;
+  runtime: 'prompt-only' | 'python' | 'node' | string;
+  entry: string | null;
+  package_path: string | null;
+  manifest: Record<string, any> | null;
+  dependency_file: string | null;
+  install_status: 'not_required' | 'pending' | 'installing' | 'ready' | 'failed' | string;
+  install_log: string | null;
+  last_installed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SkillPackagePreviewFile {
+  path: string;
+  size: number;
+  role: 'skill-md' | 'manifest' | 'dependency' | 'entry' | 'source' | 'asset' | string;
+}
+
+export interface SkillPackagePreview {
+  name: string;
+  description: string;
+  icon: string;
+  category: string;
+  runtime: 'prompt-only' | 'python' | 'node' | string;
+  entry: string | null;
+  dependencyFile: string | null;
+  inferredDependencies: string[];
+  skillMdPath: string;
+  skillJsonPath: string | null;
+  fileCount: number;
+  totalSize: number;
+  instructionPreview: string;
+  files: SkillPackagePreviewFile[];
+}
+
+export interface SkillRun {
+  id: number;
+  user_id: number;
+  skill_id: number;
+  skill_name?: string;
+  project_id: string | null;
+  phase: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | string;
+  progress: number;
+  input: Record<string, any>;
+  output: Record<string, any> | string | null;
+  error_message: string | null;
+  logs: string | null;
+  started_at: string | null;
+  completed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -902,6 +960,17 @@ export const skillApi = {
 
   getById: (id: number) => api.get<Skill>(`/api/skills/${id}`),
 
+  getRuns: (projectId?: string) => {
+    const params = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+    return api.get<SkillRun[]>(`/api/skills/runs${params}`);
+  },
+
+  uploadPackage: (data: { filename: string; dataBase64: string }) =>
+    api.post<Skill>('/api/skills/upload-package', data),
+
+  previewPackage: (data: { filename: string; dataBase64: string }) =>
+    api.post<SkillPackagePreview>('/api/skills/preview-package', data),
+
   create: (data: {
     name: string;
     description?: string;
@@ -922,7 +991,12 @@ export const skillApi = {
 
   delete: (id: number) => api.delete(`/api/skills/${id}`),
 
-  toggle: (id: number) => api.post(`/api/skills/${id}/toggle`)
+  toggle: (id: number) => api.post(`/api/skills/${id}/toggle`),
+
+  reinstall: (id: number) => api.post(`/api/skills/${id}/reinstall`),
+
+  run: (id: number, data: { projectId?: string; phase?: string; input?: Record<string, any> }) =>
+    api.post<SkillRun>(`/api/skills/${id}/run`, data, { timeoutMs: 150000 })
 };
 
 export const templateApi = {

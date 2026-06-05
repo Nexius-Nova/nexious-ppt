@@ -1,118 +1,263 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { query } from '../db/connection.js';
+import {
+  createSkillFromPackage,
+  initializeSkillEnvironment,
+  previewSkillPackage,
+  removeSkillPackage,
+  runSkillPackage,
+} from '../services/skillPackages.js';
 
 const router = Router();
 
 router.use(authMiddleware);
 
+const SKILL_SELECT = `
+  SELECT
+    id, name, description, icon, category, parameters, is_enabled,
+    type, runtime, entry, package_path, manifest, dependency_file,
+    install_status, install_log, last_installed_at,
+    created_at, updated_at
+  FROM skills
+`;
+
+function normalizeJson(value: unknown, fallback: unknown) {
+  if (!value) return fallback;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return value;
+}
+
+function normalizeSkill(row: any) {
+  return {
+    ...row,
+    is_enabled: Boolean(row.is_enabled),
+    parameters: normalizeJson(row.parameters, {}),
+    manifest: normalizeJson(row.manifest, null),
+  };
+}
+
+async function fetchSkill(id: number, userId: number) {
+  const rows = await query<any>(`${SKILL_SELECT} WHERE id = ? AND user_id = ?`, [id, userId]);
+  return rows[0] ? normalizeSkill(rows[0]) : null;
+}
+
+function normalizeRun(row: any) {
+  return {
+    ...row,
+    input: normalizeJson(row.input, {}),
+    output: normalizeJson(row.output, row.output || null),
+  };
+}
+
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const skills = await query(
-      'SELECT id, name, description, icon, category, parameters, is_enabled, created_at, updated_at FROM skills WHERE user_id = ? ORDER BY created_at DESC',
-      [req.userId]
-    );
-    res.json({ success: true, data: skills });
+    const skills = await query<any>(`${SKILL_SELECT} WHERE user_id = ? ORDER BY created_at DESC`, [req.userId]);
+    res.json({ success: true, data: skills.map(normalizeSkill) });
   } catch (error) {
-    console.error('获取技能列表失败:', error);
-    res.status(500).json({ success: false, message: '获取技能列表失败' });
+    console.error('Failed to fetch skills', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch skills' });
+  }
+});
+
+router.get('/runs', async (req: AuthRequest, res: Response) => {
+  try {
+    const projectId = typeof req.query.projectId === 'string' ? req.query.projectId : '';
+    const params: unknown[] = [req.userId];
+    let where = 'WHERE sr.user_id = ?';
+    if (projectId) {
+      where += ' AND sr.project_id = ?';
+      params.push(projectId);
+    }
+    const runs = await query<any>(
+      `SELECT sr.*, s.name AS skill_name
+       FROM skill_runs sr
+       LEFT JOIN skills s ON s.id = sr.skill_id
+       ${where}
+       ORDER BY sr.created_at DESC
+       LIMIT 50`,
+      params
+    );
+    res.json({ success: true, data: runs.map(normalizeRun) });
+  } catch (error) {
+    console.error('Failed to fetch skill runs', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch skill runs' });
   }
 });
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const skills = await query(
-      'SELECT id, name, description, icon, category, parameters, is_enabled, created_at, updated_at FROM skills WHERE id = ? AND user_id = ?',
-      [req.params.id, req.userId]
-    );
-    if (skills.length === 0) {
-      return res.status(404).json({ success: false, message: '技能不存在' });
-    }
-    res.json({ success: true, data: skills[0] });
+    const skill = await fetchSkill(Number(req.params.id), req.userId!);
+    if (!skill) return res.status(404).json({ success: false, message: 'Skill not found' });
+    res.json({ success: true, data: skill });
   } catch (error) {
-    console.error('获取技能详情失败:', error);
-    res.status(500).json({ success: false, message: '获取技能详情失败' });
+    console.error('Failed to fetch skill', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch skill' });
+  }
+});
+
+router.post('/preview-package', async (req: AuthRequest, res: Response) => {
+  try {
+    const { filename, dataBase64 } = req.body || {};
+    if (!filename || !dataBase64) {
+      return res.status(400).json({ success: false, message: 'Skill package is required' });
+    }
+    const preview = await previewSkillPackage(String(filename), String(dataBase64));
+    res.json({ success: true, data: preview, message: 'Skill package parsed' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to parse skill package';
+    console.error('Failed to parse skill package', error);
+    res.status(400).json({ success: false, message });
+  }
+});
+
+router.post('/upload-package', async (req: AuthRequest, res: Response) => {
+  try {
+    const { filename, dataBase64 } = req.body || {};
+    if (!filename || !dataBase64) {
+      return res.status(400).json({ success: false, message: 'Skill package is required' });
+    }
+    const skillId = await createSkillFromPackage(req.userId!, String(filename), String(dataBase64));
+    const skill = await fetchSkill(skillId, req.userId!);
+    res.status(201).json({ success: true, data: skill, message: 'Skill package uploaded' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to upload skill package';
+    console.error('Failed to upload skill package', error);
+    res.status(400).json({ success: false, message });
   }
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const { name, description, icon, category, parameters, is_enabled } = req.body;
-    if (!name) {
-      return res.status(400).json({ success: false, message: '技能名称不能为空' });
+    if (!String(name || '').trim()) {
+      return res.status(400).json({ success: false, message: 'Skill name is required' });
     }
-    const result = await query(
-      'INSERT INTO skills (user_id, name, description, icon, category, parameters, is_enabled) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [req.userId, name, description || '', icon || 'Zap', category || '其他', JSON.stringify(parameters || {}), is_enabled ? 1 : 0]
+    const result = await query<any>(
+      `INSERT INTO skills
+        (user_id, name, description, icon, category, parameters, is_enabled, type, runtime, install_status, install_log)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'prompt-only', 'prompt-only', 'not_required', ?)`,
+      [
+        req.userId,
+        String(name).trim(),
+        description || '',
+        icon || 'Zap',
+        category || 'prompt',
+        JSON.stringify(parameters || {}),
+        is_enabled === false ? 0 : 1,
+        'No dependency initialization is required.',
+      ]
     );
-    const newSkill = await query(
-      'SELECT id, name, description, icon, category, parameters, is_enabled, created_at, updated_at FROM skills WHERE id = ?',
-      [(result as any).insertId]
-    );
-    res.status(201).json({ success: true, data: newSkill[0], message: '技能创建成功' });
+    const skill = await fetchSkill(Number((result as any).insertId), req.userId!);
+    res.status(201).json({ success: true, data: skill, message: 'Skill created' });
   } catch (error) {
-    console.error('创建技能失败:', error);
-    res.status(500).json({ success: false, message: '创建技能失败' });
+    console.error('Failed to create skill', error);
+    res.status(500).json({ success: false, message: 'Failed to create skill' });
   }
 });
 
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
+    const id = Number(req.params.id);
+    const existing = await fetchSkill(id, req.userId!);
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+
     const { name, description, icon, category, parameters, is_enabled } = req.body;
-    const existing = await query(
-      'SELECT id FROM skills WHERE id = ? AND user_id = ?',
-      [req.params.id, req.userId]
-    );
-    if (existing.length === 0) {
-      return res.status(404).json({ success: false, message: '技能不存在' });
-    }
     await query(
-      'UPDATE skills SET name = ?, description = ?, icon = ?, category = ?, parameters = ?, is_enabled = ? WHERE id = ?',
-      [name, description || '', icon || 'Zap', category || '其他', JSON.stringify(parameters || {}), is_enabled ? 1 : 0, req.params.id]
+      `UPDATE skills
+       SET name = ?, description = ?, icon = ?, category = ?, parameters = ?, is_enabled = ?
+       WHERE id = ? AND user_id = ?`,
+      [
+        String(name || existing.name).trim(),
+        description || '',
+        icon || 'Zap',
+        category || 'prompt',
+        JSON.stringify(parameters || {}),
+        is_enabled === false ? 0 : 1,
+        id,
+        req.userId,
+      ]
     );
-    const updated = await query(
-      'SELECT id, name, description, icon, category, parameters, is_enabled, created_at, updated_at FROM skills WHERE id = ?',
-      [req.params.id]
-    );
-    res.json({ success: true, data: updated[0], message: '技能更新成功' });
+    const skill = await fetchSkill(id, req.userId!);
+    res.json({ success: true, data: skill, message: 'Skill updated' });
   } catch (error) {
-    console.error('更新技能失败:', error);
-    res.status(500).json({ success: false, message: '更新技能失败' });
+    console.error('Failed to update skill', error);
+    res.status(500).json({ success: false, message: 'Failed to update skill' });
+  }
+});
+
+router.post('/:id/reinstall', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const existing = await fetchSkill(id, req.userId!);
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    void initializeSkillEnvironment(id).catch((error) => console.error('Failed to reinstall skill', error));
+    res.json({ success: true, message: 'Skill runtime initialization started' });
+  } catch (error) {
+    console.error('Failed to reinstall skill', error);
+    res.status(500).json({ success: false, message: 'Failed to reinstall skill' });
+  }
+});
+
+router.post('/:id/run', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const runId = await runSkillPackage(req.userId!, id, {
+      projectId: req.body?.projectId ? String(req.body.projectId) : undefined,
+      phase: req.body?.phase ? String(req.body.phase) : 'input',
+      input: req.body?.input || {},
+    });
+    const runs = await query<any>(
+      `SELECT sr.*, s.name AS skill_name
+       FROM skill_runs sr
+       LEFT JOIN skills s ON s.id = sr.skill_id
+       WHERE sr.id = ? AND sr.user_id = ?`,
+      [runId, req.userId]
+    );
+    const run = normalizeRun(runs[0]);
+    res.json({
+      success: true,
+      data: run,
+      message: run.status === 'failed' ? 'Skill run failed' : 'Skill run completed',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to run skill';
+    console.error('Failed to run skill', error);
+    res.status(400).json({ success: false, message });
   }
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const existing = await query(
-      'SELECT id FROM skills WHERE id = ? AND user_id = ?',
-      [req.params.id, req.userId]
-    );
-    if (existing.length === 0) {
-      return res.status(404).json({ success: false, message: '技能不存在' });
-    }
-    await query('DELETE FROM skills WHERE id = ?', [req.params.id]);
-    res.json({ success: true, message: '技能删除成功' });
+    const id = Number(req.params.id);
+    const existing = await fetchSkill(id, req.userId!);
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    await query('DELETE FROM skills WHERE id = ? AND user_id = ?', [id, req.userId]);
+    await removeSkillPackage(req.userId!, id);
+    res.json({ success: true, message: 'Skill deleted' });
   } catch (error) {
-    console.error('删除技能失败:', error);
-    res.status(500).json({ success: false, message: '删除技能失败' });
+    console.error('Failed to delete skill', error);
+    res.status(500).json({ success: false, message: 'Failed to delete skill' });
   }
 });
 
 router.post('/:id/toggle', async (req: AuthRequest, res: Response) => {
   try {
-    const existing = await query(
-      'SELECT id, is_enabled FROM skills WHERE id = ? AND user_id = ?',
-      [req.params.id, req.userId]
-    );
-    if (existing.length === 0) {
-      return res.status(404).json({ success: false, message: '技能不存在' });
-    }
-    const newStatus = (existing[0] as any).is_enabled ? 0 : 1;
-    await query('UPDATE skills SET is_enabled = ? WHERE id = ?', [newStatus, req.params.id]);
-    res.json({ success: true, message: newStatus ? '技能已启用' : '技能已禁用' });
+    const id = Number(req.params.id);
+    const existing = await fetchSkill(id, req.userId!);
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    const newStatus = existing.is_enabled ? 0 : 1;
+    await query('UPDATE skills SET is_enabled = ? WHERE id = ? AND user_id = ?', [newStatus, id, req.userId]);
+    res.json({ success: true, message: newStatus ? 'Skill enabled' : 'Skill disabled' });
   } catch (error) {
-    console.error('切换技能状态失败:', error);
-    res.status(500).json({ success: false, message: '切换技能状态失败' });
+    console.error('Failed to toggle skill', error);
+    res.status(500).json({ success: false, message: 'Failed to toggle skill' });
   }
 });
 

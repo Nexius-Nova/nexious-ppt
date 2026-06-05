@@ -20,6 +20,11 @@ export interface DeckInput {
   files: string[];
 }
 
+export interface UploadedFileContent {
+  name: string;
+  text: string;
+}
+
 export interface AgentParameters {
   summaryLength: string;
   slideCount: number;
@@ -75,8 +80,32 @@ export interface SkillDefinition {
   description: string;
   enabled: boolean;
   order: number;
-  params: Record<string, string | number | boolean>;
+  params: Record<string, any>;
   instruction?: string;
+  category?: string;
+  type?: string;
+  runtime?: string;
+  entry?: string | null;
+  installStatus?: string;
+  installLog?: string | null;
+  dependencyFile?: string | null;
+}
+
+export type InputProcessStepStatus = 'idle' | 'running' | 'done' | 'skipped' | 'failed';
+
+export interface InputProcessStep {
+  id: 'collect' | 'file-parse' | 'topic' | 'constraints' | 'ready';
+  title: string;
+  description: string;
+  status: InputProcessStepStatus;
+  progress: number;
+  detail?: string;
+  skillId?: string;
+  skillName?: string;
+  logs?: string;
+  output?: string;
+  processedText?: string;
+  error?: string;
 }
 
 export interface PromptDefinition {
@@ -90,6 +119,8 @@ export interface PromptDefinition {
 
 export interface PptProjectState {
   input: DeckInput;
+  uploadedFileContents?: UploadedFileContent[];
+  processedInputContent?: string;
   parameters: AgentParameters;
   selectedTemplate: TemplateAsset | null;
   outline: SlideOutline[];
@@ -97,6 +128,7 @@ export interface PptProjectState {
   exportArtifacts: ExportArtifact[];
   enabledSkillIds: string[];
   selectedPromptId: string;
+  inputProcessSteps: InputProcessStep[];
   activityLog: string[];
   steps: WorkflowStep[];
   designSpec: DesignSpec | null;

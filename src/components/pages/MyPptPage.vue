@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { Plus, Search, Trash2, FileText, Clock, Calendar, Check, BookmarkCheck, RefreshCw } from 'lucide-vue-next';
+import { Plus, Search, Trash2, FileText, Clock, Calendar, Check, BookmarkCheck, RefreshCw, Pause } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -27,7 +27,7 @@ const showCreateModal = ref(false);
 const newProjectTitle = ref('');
 const savingTemplateIds = ref<Set<number>>(new Set());
 
-type ProjectDisplayStatus = 'draft' | 'generating' | 'completed';
+type ProjectDisplayStatus = 'draft' | 'paused' | 'generating' | 'completed';
 type TemplateSaveState = 'unsaved' | 'saved' | 'stale';
 type ProjectDisplay = Project & {
   displayStatus: ProjectDisplayStatus;
@@ -207,11 +207,14 @@ function deriveProjectDisplay(project: Project): ProjectDisplay {
     ? 100
     : getStepProgress(state?.steps, 'preview');
   const progress = Math.round((inputProgress + outlineProgress + imageProgress + layoutProgress + previewProgress) / 5);
-  const hasRunningStep = Boolean(state?.workflowActive || state?.steps?.some((step) => step.status === 'running'));
+  const isPausedProject = Boolean(state?.paused);
+  const hasRunningStep = !isPausedProject && Boolean(state?.workflowActive || state?.steps?.some((step) => step.status === 'running'));
   const isComplete = previewProgress === 100 || (pageTotal > 0 && pageReady >= pageTotal && layoutProgress === 100);
 
   let displayStatus: ProjectDisplayStatus = project.status;
-  if (hasRunningStep) {
+  if (isPausedProject) {
+    displayStatus = 'paused';
+  } else if (hasRunningStep) {
     displayStatus = 'generating';
   } else if (isComplete) {
     displayStatus = 'completed';
@@ -220,7 +223,8 @@ function deriveProjectDisplay(project: Project): ProjectDisplay {
   }
 
   let stageLabel = '等待输入';
-  if (isComplete) stageLabel = '已可导出';
+  if (isPausedProject) stageLabel = '已暂停，可继续';
+  else if (isComplete) stageLabel = '已可导出';
   else if (pageReady > 0) stageLabel = `页面 ${pageReady}/${pageTotal || pageReady}`;
   else if (imageTotal > 0) stageLabel = `图片 ${imageReady}/${imageTotal}`;
   else if (state?.designSpec || (state?.outline?.length || 0) > 0) stageLabel = `大纲 ${state?.outline?.length || state?.designSpec?.outline?.length || 0} 页`;
@@ -260,6 +264,7 @@ const filteredProjects = computed(() => {
 const stats = computed(() => ({
   total: projectDisplays.value.length,
   draft: projectDisplays.value.filter(p => p.displayStatus === 'draft').length,
+  paused: projectDisplays.value.filter(p => p.displayStatus === 'paused').length,
   generating: projectDisplays.value.filter(p => p.displayStatus === 'generating').length,
   completed: projectDisplays.value.filter(p => p.displayStatus === 'completed').length
 }));
@@ -422,6 +427,7 @@ async function saveProjectAsTemplate(project: Project) {
 function getStatusBadge(tone: ProjectDisplayStatus) {
   const map = {
     draft: { label: '草稿', tone: 'neutral' as const },
+    paused: { label: '已暂停', tone: 'danger' as const },
     generating: { label: '生成中', tone: 'warning' as const },
     completed: { label: '已完成', tone: 'success' as const }
   };
@@ -481,6 +487,15 @@ onMounted(() => {
         <div class="stat-card__content">
           <span class="stat-card__value">{{ stats.generating }}</span>
           <span class="stat-card__label">生成中</span>
+        </div>
+      </div>
+      <div class="stat-card stat-card--paused">
+        <div class="stat-card__icon">
+          <Pause :size="20" />
+        </div>
+        <div class="stat-card__content">
+          <span class="stat-card__value">{{ stats.paused }}</span>
+          <span class="stat-card__label">已暂停</span>
         </div>
       </div>
       <div class="stat-card stat-card--completed">
@@ -672,7 +687,7 @@ onMounted(() => {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 16px;
 }
 
@@ -713,6 +728,11 @@ onMounted(() => {
 
 .stat-card--generating .stat-card__icon {
   background: var(--color-warning);
+  color: var(--color-inverse);
+}
+
+.stat-card--paused .stat-card__icon {
+  background: var(--color-danger);
   color: var(--color-inverse);
 }
 

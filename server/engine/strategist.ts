@@ -5,6 +5,17 @@ type TemplatePreviewSlide = { title: string; layout: string; description?: strin
 const MAX_TEMPLATE_SVG_SNIPPET_CHARS = 1600;
 const templatePreviewSummaryCache = new Map<string, string>();
 
+function inferTopicFromInput(input: Pick<StrategistInput, 'topic' | 'content'>) {
+  const topic = String(input.topic || '').trim();
+  if (topic) return topic;
+
+  const content = String(input.content || '').trim().replace(/\s+/g, ' ');
+  const explicit = content.match(/(?:PPT\s*)?(?:主题|标题)\s*[：:]\s*([^。；;\n]{2,60})/i)?.[1]?.trim();
+  if (explicit) return explicit.slice(0, 60);
+  if (content) return content.slice(0, 28);
+  return '';
+}
+
 export interface StrategistInput {
   topic: string;
   content: string;
@@ -137,12 +148,13 @@ ${colorGuide}
 14. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、visualPrompt 都要和用户内容强相关。
 15. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。`;
 
-  const user = `主题：${input.topic || '未命名主题'}
+  const user = `主题：${input.topic || '未提供，请从内容资料中自动提炼'}
 内容资料：${input.content || '用户未提供详细资料，请基于主题生成结构完整、信息可信但不过度编造的演示文稿。'}
 
 语言风格：${input.tone}
 目标页数：${getTargetSlideCount(input.slideCount) || '由内容决定'}
 图片风格：${input.imageStyle}
+主题生成要求：如果主题未提供，请优先从内容资料中显式的“主题：xxx / 标题：xxx”提取；否则根据资料核心内容生成 projectInfo.title 和 projectInfo.topic。
 
 ${templateGuide}
 ${input.promptContent ? `\n额外提示词：\n${input.promptContent}` : ''}
@@ -168,11 +180,12 @@ export function parseStrategistOutput(raw: string, input: StrategistInput): Desi
   const typography = normalizeTypography(parsed.typography);
   const rawOutline = Array.isArray(parsed.outline) ? parsed.outline : [];
   const outline = normalizeOutline(rawOutline, input);
+  const fallbackTopic = inferTopicFromInput(input);
 
   return {
     projectInfo: {
-      title: parsed.projectInfo?.title || input.topic || '未命名 PPT',
-      topic: parsed.projectInfo?.topic || input.topic || '未命名主题',
+      title: parsed.projectInfo?.title || fallbackTopic || '未命名 PPT',
+      topic: parsed.projectInfo?.topic || fallbackTopic || '未命名主题',
       audience: parsed.projectInfo?.audience || '通用受众',
       occasion: parsed.projectInfo?.occasion || '通用演示',
     },
@@ -456,11 +469,12 @@ function normalizeRhythm(value: string | undefined, layout: string): SpecSlide['
 function buildFallbackSpec(input: StrategistInput): DesignSpec {
   const colors = normalizeColors(undefined, resolveFallbackTemplate(input));
   const typography = normalizeTypography(undefined);
+  const fallbackTopic = inferTopicFromInput(input);
 
   return {
     projectInfo: {
-      title: input.topic || '未命名 PPT',
-      topic: input.topic || '未命名主题',
+      title: fallbackTopic || '未命名 PPT',
+      topic: fallbackTopic || '未命名主题',
       audience: '通用受众',
       occasion: '通用演示',
     },
@@ -474,7 +488,7 @@ function buildFallbackSpec(input: StrategistInput): DesignSpec {
     iconStyle: 'tabler-outline',
     imageUsage: normalizeImageUsage(undefined, input.imageStyle),
     outline: [
-      { id: 'slide-1', pageNumber: 1, title: input.topic || '项目概览', bullets: [], speakerNotes: '开场介绍本次演示的主题和目标。', visualPrompt: '', layout: 'cover', rhythm: 'anchor' },
+      { id: 'slide-1', pageNumber: 1, title: fallbackTopic || '项目概览', bullets: [], speakerNotes: '开场介绍本次演示的主题和目标。', visualPrompt: '', layout: 'cover', rhythm: 'anchor' },
       { id: 'slide-2', pageNumber: 2, title: '核心背景', bullets: ['问题背景与现状', '关键机会与挑战', '本次汇报的判断框架'], speakerNotes: '说明为什么这个主题值得讨论，并建立听众的共同上下文。', visualPrompt: '', layout: 'content', rhythm: 'dense' },
       { id: 'slide-3', pageNumber: 3, title: '关键方案', bullets: ['明确目标与边界', '拆解执行路径', '建立反馈机制'], speakerNotes: '围绕可执行性展开方案，突出主次关系。', visualPrompt: '', layout: 'content', rhythm: 'dense' },
       { id: 'slide-4', pageNumber: 4, title: '总结与下一步', bullets: ['形成共识', '明确责任', '推进落地'], speakerNotes: '收束观点，并给出下一步行动建议。', visualPrompt: '', layout: 'ending', rhythm: 'anchor' },

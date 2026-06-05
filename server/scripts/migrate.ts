@@ -68,13 +68,13 @@ async function migrate(): Promise<void> {
     await ensureColumn(
       'prompts',
       'preview_url',
-      "ALTER TABLE `prompts` ADD COLUMN `preview_url` VARCHAR(500) DEFAULT NULL COMMENT '提示词效果图URL' AFTER `content`"
+      "ALTER TABLE `prompts` ADD COLUMN `preview_url` VARCHAR(500) DEFAULT NULL COMMENT 'Prompt preview image URL' AFTER `content`"
     );
 
     await ensureColumn(
       'projects',
       'state',
-      "ALTER TABLE `projects` ADD COLUMN `state` JSON DEFAULT NULL COMMENT '项目完整状态快照'"
+      "ALTER TABLE `projects` ADD COLUMN `state` JSON DEFAULT NULL COMMENT 'Full project state snapshot'"
     );
 
     await connection.query(`
@@ -86,6 +86,93 @@ async function migrate(): Promise<void> {
     console.log('projects.content synced from projects.state.input.content');
 
     await dropColumnIfExists('projects', 'settings');
+
+    await ensureColumn(
+      'skills',
+      'type',
+      "ALTER TABLE `skills` ADD COLUMN `type` VARCHAR(50) NOT NULL DEFAULT 'prompt-only' AFTER `is_enabled`"
+    );
+    await ensureColumn(
+      'skills',
+      'runtime',
+      "ALTER TABLE `skills` ADD COLUMN `runtime` VARCHAR(50) NOT NULL DEFAULT 'prompt-only' AFTER `type`"
+    );
+    await ensureColumn(
+      'skills',
+      'entry',
+      'ALTER TABLE `skills` ADD COLUMN `entry` VARCHAR(500) DEFAULT NULL AFTER `runtime`'
+    );
+    await ensureColumn(
+      'skills',
+      'package_path',
+      'ALTER TABLE `skills` ADD COLUMN `package_path` VARCHAR(1000) DEFAULT NULL AFTER `entry`'
+    );
+    await ensureColumn(
+      'skills',
+      'manifest',
+      'ALTER TABLE `skills` ADD COLUMN `manifest` JSON DEFAULT NULL AFTER `package_path`'
+    );
+    await ensureColumn(
+      'skills',
+      'dependency_file',
+      'ALTER TABLE `skills` ADD COLUMN `dependency_file` VARCHAR(500) DEFAULT NULL AFTER `manifest`'
+    );
+    await ensureColumn(
+      'skills',
+      'install_status',
+      "ALTER TABLE `skills` ADD COLUMN `install_status` VARCHAR(50) NOT NULL DEFAULT 'not_required' AFTER `dependency_file`"
+    );
+    await ensureColumn(
+      'skills',
+      'install_log',
+      'ALTER TABLE `skills` ADD COLUMN `install_log` MEDIUMTEXT DEFAULT NULL AFTER `install_status`'
+    );
+    await ensureColumn(
+      'skills',
+      'last_installed_at',
+      'ALTER TABLE `skills` ADD COLUMN `last_installed_at` TIMESTAMP NULL DEFAULT NULL AFTER `install_log`'
+    );
+
+    await connection.query(`
+      UPDATE \`skills\`
+      SET
+        \`type\` = COALESCE(NULLIF(\`type\`, ''), 'prompt-only'),
+        \`runtime\` = COALESCE(NULLIF(\`runtime\`, ''), 'prompt-only'),
+        \`install_status\` = COALESCE(NULLIF(\`install_status\`, ''), 'not_required'),
+        \`install_log\` = COALESCE(\`install_log\`, 'No dependency initialization is required.')
+    `);
+    console.log('skills package fields normalized');
+
+    if (!(await hasTable('skill_runs'))) {
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS \`skill_runs\` (
+          \`id\` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          \`user_id\` BIGINT UNSIGNED NOT NULL,
+          \`skill_id\` BIGINT UNSIGNED NOT NULL,
+          \`project_id\` VARCHAR(100) DEFAULT NULL,
+          \`phase\` VARCHAR(50) NOT NULL DEFAULT 'input',
+          \`status\` VARCHAR(50) NOT NULL DEFAULT 'queued',
+          \`progress\` INT UNSIGNED NOT NULL DEFAULT 0,
+          \`input\` JSON DEFAULT NULL,
+          \`output\` JSON DEFAULT NULL,
+          \`error_message\` TEXT DEFAULT NULL,
+          \`logs\` MEDIUMTEXT DEFAULT NULL,
+          \`started_at\` TIMESTAMP NULL DEFAULT NULL,
+          \`completed_at\` TIMESTAMP NULL DEFAULT NULL,
+          \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          \`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`id\`),
+          KEY \`idx_skill_runs_user_project\` (\`user_id\`, \`project_id\`),
+          KEY \`idx_skill_runs_skill_status\` (\`skill_id\`, \`status\`),
+          KEY \`idx_skill_runs_created_at\` (\`created_at\`),
+          CONSTRAINT \`fk_skill_runs_user_id\` FOREIGN KEY (\`user_id\`) REFERENCES \`users\`(\`id\`) ON DELETE CASCADE ON UPDATE CASCADE,
+          CONSTRAINT \`fk_skill_runs_skill_id\` FOREIGN KEY (\`skill_id\`) REFERENCES \`skills\`(\`id\`) ON DELETE CASCADE ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Skill run records'
+      `);
+      console.log('skill_runs table created');
+    } else {
+      console.log('skill_runs table exists, skipped');
+    }
 
     if (!(await hasTable('version_snapshots'))) {
       await connection.query(`
@@ -99,7 +186,7 @@ async function migrate(): Promise<void> {
           PRIMARY KEY (\`id\`),
           KEY \`idx_user_project\` (\`user_id\`, \`project_id\`),
           KEY \`idx_created_at\` (\`created_at\`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='版本快照表'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Version snapshots'
       `);
       console.log('version_snapshots table created');
     } else {
@@ -193,6 +280,16 @@ async function migrate(): Promise<void> {
       'generation_jobs',
       'idx_generation_jobs_user_project_status_updated',
       'ALTER TABLE `generation_jobs` ADD INDEX `idx_generation_jobs_user_project_status_updated` (`user_id`, `project_id`, `status`, `updated_at`)'
+    );
+    await ensureIndex(
+      'skills',
+      'idx_skills_user_runtime',
+      'ALTER TABLE `skills` ADD INDEX `idx_skills_user_runtime` (`user_id`, `runtime`)'
+    );
+    await ensureIndex(
+      'skills',
+      'idx_skills_install_status',
+      'ALTER TABLE `skills` ADD INDEX `idx_skills_install_status` (`install_status`)'
     );
 
     await connection.query('DROP TABLE IF EXISTS `images`');

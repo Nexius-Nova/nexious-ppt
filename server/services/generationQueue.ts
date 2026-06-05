@@ -69,6 +69,7 @@ interface QueuedJobBase {
   message?: string;
   errorMessage?: string;
   result?: any;
+  cancelRequested?: boolean;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -107,6 +108,13 @@ const exportArtifacts = new Map<string, { buffer: Buffer; fileName: string; cont
 let activeGenerationJobs = 0;
 let activeExportJobs = 0;
 
+class QueueJobCancelledError extends Error {
+  constructor() {
+    super('任务已取消');
+    this.name = 'QueueJobCancelledError';
+  }
+}
+
 function snapshotJob(job: QueuedJob): QueuedJobSnapshot {
   const { payload: _payload, ...rest } = job as any;
   return { ...rest };
@@ -135,6 +143,7 @@ async function updateJob(
   job: QueuedJob,
   patch: Partial<Pick<QueuedJob, 'status' | 'phase' | 'progress' | 'message' | 'errorMessage' | 'result' | 'completedAt'>>
 ) {
+  if (job.status === 'cancelled' && patch.status !== 'cancelled') return;
   Object.assign(job, patch, { updatedAt: Date.now() });
   if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
     job.completedAt = job.completedAt || Date.now();
@@ -157,6 +166,24 @@ async function updateJob(
   }
 
   publishJob(job);
+}
+
+function assertJobActive(job: QueuedJob) {
+  if (job.cancelRequested || job.status === 'cancelled') {
+    throw new QueueJobCancelledError();
+  }
+}
+
+async function cancelJob(job: QueuedJob, message = '任务已取消') {
+  job.cancelRequested = true;
+  const queuedIndex = queue.indexOf(job.id);
+  if (queuedIndex >= 0) queue.splice(queuedIndex, 1);
+  await updateJob(job, {
+    status: 'cancelled',
+    phase: 'cancelled',
+    progress: job.progress,
+    message,
+  });
 }
 
 function toGenerationJobStatus(status: QueuedJobStatus): GenerationJobStatus {
@@ -196,12 +223,22 @@ async function drainQueue() {
 async function runJob(job: QueuedJob) {
   try {
     await updateJob(job, { status: 'running', phase: 'starting', progress: 1, message: '任务已开始' });
+    assertJobActive(job);
     if (job.kind === 'generate') {
       await runGenerateJob(job);
     } else {
       await runExportJob(job);
     }
   } catch (error) {
+    if (error instanceof QueueJobCancelledError) {
+      await updateJob(job, {
+        status: 'cancelled',
+        phase: 'cancelled',
+        progress: job.progress,
+        message: '任务已取消',
+      });
+      return;
+    }
     await updateJob(job, {
       status: 'failed',
       phase: job.phase || 'failed',
@@ -223,11 +260,13 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   const textModel = defaultTextKey.model || 'gpt-4o';
 
   await updateJob(job, { phase: 'outline', progress: 8, message: '正在生成大纲' });
+  assertJobActive(job);
   const { system, user } = buildStrategistPrompt(input);
   const strategistOutput = await streamText(textProvider, textApiKey, textBaseUrl, textModel, [
     { role: 'system', content: system },
     { role: 'user', content: user },
   ]);
+  assertJobActive(job);
   const spec = parseStrategistOutput(strategistOutput, input);
   const lock = buildSpecLock(spec);
   await updateJob(job, {
@@ -236,16 +275,20 @@ async function runGenerateJob(job: GenerateQueuedJob) {
     message: `大纲生成完成，共 ${spec.outline.length} 页`,
     result: { spec, lock, outline: spec.outline, images: [], svgPages: [] },
   });
+  assertJobActive(job);
 
   const images = await maybeGenerateImages(job, spec, lock);
+  assertJobActive(job);
   await updateJob(job, {
     phase: 'images',
     progress: 45,
     message: images.length ? `图片处理完成，共 ${images.filter((img) => img.url && !img.error).length} 张可用` : '本次无需图片',
     result: { spec, lock, outline: spec.outline, images, svgPages: [] },
   });
+  assertJobActive(job);
 
   const svgPages = await generateSvgPages(job, spec, lock, images, textProvider, textApiKey, textBaseUrl, textModel);
+  assertJobActive(job);
   const result = { spec, lock, outline: spec.outline, images, svgPages };
   await updateProject(Number(job.projectId), {
     status: 'completed',
@@ -310,8 +353,10 @@ async function generateSlideImageForQueue(
   config: ImageModelConfig,
   attempt: number
 ) {
+  assertJobActive(job);
   const prompt = imagePromptForSlide(slide);
   const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, job.payload.input.imageStyle, config.baseUrl);
+  assertJobActive(job);
   const url = await persistDataImage(rawImageUrl, slide.id);
 
   return {
@@ -336,6 +381,7 @@ async function generateSlideImageWithAutoRetry(
 
   for (let attempt = 1; attempt <= IMAGE_GENERATION_ATTEMPTS; attempt += 1) {
     try {
+      assertJobActive(job);
       await updateJob(job, {
         phase: 'images',
         progress,
@@ -379,9 +425,11 @@ async function maybeGenerateImages(job: GenerateQueuedJob, spec: DesignSpec, loc
 
   async function worker() {
     while (cursor < slides.length) {
+      assertJobActive(job);
       const slide = slides[cursor++];
       const progress = 30 + Math.round((completed / Math.max(1, slides.length)) * 12);
       const image = await generateSlideImageWithAutoRetry(job, slide, imageConfig, progress);
+      assertJobActive(job);
       upsertServerImage(results, image);
       completed += 1;
     }
@@ -409,6 +457,7 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
 
   const imageConfig = await loadImageModelConfig(job);
   for (const slide of missingSlides) {
+    assertJobActive(job);
     await updateJob(job, {
       phase: 'images',
       progress: 45,
@@ -416,6 +465,7 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
       result: { spec, lock, outline: spec.outline, images, svgPages: [] },
     });
     const image = await generateSlideImageWithAutoRetry(job, slide, imageConfig, 45);
+    assertJobActive(job);
     upsertServerImage(images, image);
   }
 
@@ -446,6 +496,7 @@ async function ensureServerImageForLayout(
   const existingImage = findReadyServerImage(images, slide.id);
   if (existingImage) return existingImage;
 
+  assertJobActive(job);
   const imageConfig = await loadImageModelConfig(job);
   await updateJob(job, {
     phase: 'images',
@@ -455,6 +506,7 @@ async function ensureServerImageForLayout(
   });
 
   const retryImage = await generateSlideImageWithAutoRetry(job, slide, imageConfig, 45);
+  assertJobActive(job);
   upsertServerImage(images, retryImage);
   const readyImage = findReadyServerImage(images, slide.id);
   if (readyImage) return readyImage;
@@ -486,6 +538,7 @@ async function generateSvgPages(
 
   async function worker() {
     while (cursor < spec.outline.length) {
+      assertJobActive(job);
       const slide = spec.outline[cursor++];
       await updateJob(job, {
         phase: 'layout',
@@ -494,7 +547,9 @@ async function generateSvgPages(
       });
 
       const image = await ensureServerImageForLayout(job, spec, lock, slide, images, pages);
+      assertJobActive(job);
       const svg = await generatePageSvg(spec, lock, slide, image?.url, provider, apiKey, baseUrl, model);
+      assertJobActive(job);
       pages.push({ pageNumber: slide.pageNumber, svg, speakerNotes: slide.speakerNotes || '' });
       completed += 1;
       await updateJob(job, {
@@ -569,9 +624,12 @@ async function generatePageSvg(
 
 async function runExportJob(job: ExportQueuedJob) {
   if (!job.payload.pages.length) throw new Error('没有可导出的页面');
+  assertJobActive(job);
   await updateJob(job, { phase: 'exporting', progress: 20, message: '正在导出 PPTX' });
+  assertJobActive(job);
   const lock = job.payload.lock || buildSpecLock(job.payload.spec);
   const result = await exportWithNexiousPpt(job.payload.pages, job.payload.spec, lock);
+  assertJobActive(job);
   exportArtifacts.set(job.id, {
     buffer: result.buffer,
     fileName: result.fileName,
@@ -662,6 +720,13 @@ export function enqueueExportJob(userId: number, payload: ExportJobPayload) {
 export function getQueuedJob(id: string, userId: number) {
   const job = jobs.get(id);
   if (!job || job.userId !== userId) return null;
+  return snapshotJob(job);
+}
+
+export async function cancelQueuedJob(id: string, userId: number) {
+  const job = jobs.get(id);
+  if (!job || job.userId !== userId) return null;
+  await cancelJob(job, '用户已暂停任务');
   return snapshotJob(job);
 }
 
