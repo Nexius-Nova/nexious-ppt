@@ -157,6 +157,7 @@ function getStyleLabel(style: string) {
         <div class="image-tile__info">
           <strong>{{ image.title }}</strong>
           <p>{{ image.prompt }}</p>
+          <p v-if="image.errorMessage" class="image-tile__error-message">{{ image.errorMessage }}</p>
           <UiBadge
             v-if="!image.error"
             :tone="image.selected ? 'success' : 'neutral'"
@@ -432,6 +433,11 @@ function getStyleLabel(style: string) {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.image-tile__error-message {
+  color: var(--color-danger) !important;
+  font-weight: 600;
 }
 
 .image-tile__hint {

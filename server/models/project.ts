@@ -13,7 +13,6 @@ export interface Project {
   topic: string | null;
   content: string | null;
   status: 'draft' | 'generating' | 'completed';
-  settings: any;
   state?: any;
   created_at: Date;
   updated_at: Date;
@@ -26,7 +25,6 @@ export interface CreateProjectData {
   topic?: string;
   content?: string;
   status?: 'draft' | 'generating' | 'completed';
-  settings?: any;
   state?: any;
 }
 
@@ -36,8 +34,19 @@ export interface UpdateProjectData {
   topic?: string;
   content?: string;
   status?: 'draft' | 'generating' | 'completed';
-  settings?: any;
   state?: any;
+}
+
+function getProjectContentFromState(state: any): string | undefined {
+  if (!state || typeof state !== 'object' || !state.input || typeof state.input !== 'object') return undefined;
+  if (!('content' in state.input)) return undefined;
+  return String(state.input.content || '');
+}
+
+function withSyncedContent<T extends CreateProjectData | UpdateProjectData>(data: T): T {
+  const contentFromState = getProjectContentFromState(data.state);
+  if (contentFromState === undefined) return data;
+  return { ...data, content: contentFromState };
 }
 
 /**
@@ -78,18 +87,18 @@ export async function getProjectsByStatus(
  * 创建项目
  */
 export async function createProject(data: CreateProjectData): Promise<number> {
+  const syncedData = withSyncedContent(data);
   const result = await insert(
-    `INSERT INTO projects 
-     (user_id, title, topic, content, status, settings, state) 
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO projects
+     (user_id, title, topic, content, status, state)
+     VALUES (?, ?, ?, ?, ?, ?)`,
     [
-      data.user_id,
-      data.title,
-      data.topic || null,
-      data.content || null,
-      data.status || 'draft',
-      data.settings ? JSON.stringify(data.settings) : null,
-      data.state ? JSON.stringify(data.state) : null,
+      syncedData.user_id,
+      syncedData.title,
+      syncedData.topic || null,
+      syncedData.content ?? null,
+      syncedData.status || 'draft',
+      syncedData.state ? JSON.stringify(syncedData.state) : null,
     ]
   );
   return result.insertId;
@@ -99,32 +108,29 @@ export async function createProject(data: CreateProjectData): Promise<number> {
  * 更新项目
  */
 export async function updateProject(id: number, data: UpdateProjectData): Promise<boolean> {
+  const syncedData = withSyncedContent(data);
   const fields: string[] = [];
   const values: any[] = [];
 
-  if (data.title !== undefined) {
+  if (syncedData.title !== undefined) {
     fields.push('title = ?');
-    values.push(data.title);
+    values.push(syncedData.title);
   }
-  if (data.topic !== undefined) {
+  if (syncedData.topic !== undefined) {
     fields.push('topic = ?');
-    values.push(data.topic);
+    values.push(syncedData.topic);
   }
-  if (data.content !== undefined) {
+  if (syncedData.content !== undefined) {
     fields.push('content = ?');
-    values.push(data.content);
+    values.push(syncedData.content);
   }
-  if (data.status !== undefined) {
+  if (syncedData.status !== undefined) {
     fields.push('status = ?');
-    values.push(data.status);
+    values.push(syncedData.status);
   }
-  if (data.settings !== undefined) {
-    fields.push('settings = ?');
-    values.push(JSON.stringify(data.settings));
-  }
-  if (data.state !== undefined) {
+  if (syncedData.state !== undefined) {
     fields.push('state = ?');
-    values.push(JSON.stringify(data.state));
+    values.push(JSON.stringify(syncedData.state));
   }
 
   if (fields.length === 0) {

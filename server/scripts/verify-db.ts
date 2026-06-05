@@ -22,18 +22,6 @@ import {
   getProjectStats,
 } from '../models/project.js';
 
-import {
-  getSlideById,
-  getSlidesByProjectId,
-  getSlideCount,
-} from '../models/slide.js';
-
-import {
-  getImageById,
-  getImagesBySlideId,
-  getSelectedImage,
-} from '../models/image.js';
-
 import { closePool } from '../db/connection.js';
 
 /**
@@ -89,45 +77,6 @@ async function verifyDatabase() {
       if (projects.length > 0) {
         const project = await getProjectById(projects[0].id);
         console.log(`  ✅ 项目详情: ${project?.title} (${project?.status})`);
-      }
-    }
-
-    // 4. 验证幻灯片表
-    console.log('\n📑 验证幻灯片表:');
-    if (users.length > 0) {
-      const projects = await getProjectsByUserId(users[0].id);
-      if (projects.length > 0) {
-        const slides = await getSlidesByProjectId(projects[0].id);
-        console.log(`  ✅ 项目 ${projects[0].id} 的幻灯片数量: ${slides.length}`);
-
-        const slideCount = await getSlideCount(projects[0].id);
-        console.log(`  ✅ 幻灯片总数: ${slideCount}`);
-
-        if (slides.length > 0) {
-          const slide = await getSlideById(slides[0].id);
-          console.log(`  ✅ 幻灯片详情: ${slide?.title} (顺序: ${slide?.order_index})`);
-        }
-      }
-    }
-
-    // 5. 验证图片表
-    console.log('\n🖼️  验证图片表:');
-    if (users.length > 0) {
-      const projects = await getProjectsByUserId(users[0].id);
-      if (projects.length > 0) {
-        const slides = await getSlidesByProjectId(projects[0].id);
-        if (slides.length > 0) {
-          const images = await getImagesBySlideId(slides[0].id);
-          console.log(`  ✅ 幻灯片 ${slides[0].id} 的图片数量: ${images.length}`);
-
-          if (images.length > 0) {
-            const image = await getImageById(images[0].id);
-            console.log(`  ✅ 图片详情: ${image?.style} 风格`);
-
-            const selectedImage = await getSelectedImage(slides[0].id);
-            console.log(`  ✅ 选中的图片: ${selectedImage?.style || '无'}`);
-          }
-        }
       }
     }
 

@@ -11,7 +11,7 @@ import {
   ensureImageUsedInSvg
 } from '../engine/index.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
-import type { StrategistInput, DesignSpec, SpecLock } from '../engine/index.js';
+import type { StrategistInput, DesignSpec, SpecLock, SpecSlide } from '../engine/index.js';
 import { inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
 import { exportWithNexiousPpt } from '../engine/ppt-exporter.js';
 import { authMiddleware, AuthRequest } from './auth.js';
@@ -49,6 +49,81 @@ function buildAttachmentDisposition(fileName: string): string {
   return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
 }
 
+function extractStreamingOutlineSlides(raw: string): SpecSlide[] {
+  const outlineStart = raw.search(/"outline"\s*:\s*\[/);
+  if (outlineStart < 0) return [];
+
+  const arrayStart = raw.indexOf('[', outlineStart);
+  if (arrayStart < 0) return [];
+
+  const slides: SpecSlide[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let objectStart = -1;
+
+  for (let i = arrayStart + 1; i < raw.length; i += 1) {
+    const char = raw[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) objectStart = i;
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        try {
+          slides.push(normalizeStreamingSpecSlide(JSON.parse(raw.slice(objectStart, i + 1)), slides.length));
+        } catch {
+          // The current slide object may still be streaming.
+        }
+        objectStart = -1;
+      }
+    }
+
+    if (char === ']' && depth === 0) break;
+  }
+
+  return slides;
+}
+
+function normalizeStreamingSpecSlide(item: any, index: number): SpecSlide {
+  const pageNumber = Number(item?.pageNumber || index + 1);
+  return {
+    id: String(item?.id || `slide-${pageNumber}`),
+    pageNumber,
+    title: String(item?.title || `第 ${pageNumber} 页`),
+    bullets: Array.isArray(item?.bullets)
+      ? item.bullets.map((bullet: unknown) => String(bullet || '').trim()).filter(Boolean)
+      : [],
+    speakerNotes: String(item?.speakerNotes || ''),
+    visualPrompt: String(item?.visualPrompt || ''),
+    layout: String(item?.layout || 'content'),
+    rhythm: item?.rhythm === 'anchor' || item?.rhythm === 'dense' || item?.rhythm === 'breathing'
+      ? item.rhythm
+      : 'breathing',
+    chartHint: item?.chartHint ? String(item.chartHint) : undefined,
+  };
+}
+
 router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const input: StrategistInput = req.body;
@@ -78,7 +153,18 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
 
     res.write(`data: ${JSON.stringify({ status: 'start', phase: 'strategist', message: 'Strategist 正在分析内容...' })}\n\n`);
 
-    const fullContent = await streamText(provider, apiKey, baseUrl, model, messages, res);
+    const streamedSlideIds = new Set<string>();
+    const fullContent = await streamText(provider, apiKey, baseUrl, model, messages, res, {
+      onContent: (_content, currentFullContent) => {
+        const slides = extractStreamingOutlineSlides(currentFullContent);
+        for (const slide of slides) {
+          const key = slide.id || String(slide.pageNumber);
+          if (streamedSlideIds.has(key)) continue;
+          streamedSlideIds.add(key);
+          res.write(`data: ${JSON.stringify({ status: 'outline-slide', phase: 'strategist', data: slide })}\n\n`);
+        }
+      },
+    });
 
     const spec = parseStrategistOutput(fullContent, input);
     const lock = buildSpecLock(spec);

@@ -44,7 +44,7 @@ async function initializeDatabase(): Promise<void> {
 
     console.log('✅ 数据库初始化成功！');
     console.log('📊 数据库名称: nexious-ppt');
-    console.log('📋 已创建表: users, api_keys, projects, slides, images');
+    console.log('📋 已创建表: users, api_keys, projects, prompts, skills, templates, run_configs, workflow_snapshots, version_snapshots, generation_jobs');
     console.log('✨ 已插入测试数据');
 
     // 验证表是否创建成功
@@ -60,7 +60,7 @@ async function initializeDatabase(): Promise<void> {
 
     // 显示每个表的行数
     console.log('\n📈 表数据统计:');
-    const tableNames = ['users', 'api_keys', 'projects', 'slides', 'images'];
+    const tableNames = ['users', 'api_keys', 'projects', 'prompts', 'skills', 'templates', 'run_configs', 'workflow_snapshots', 'version_snapshots', 'generation_jobs'];
 
     for (const tableName of tableNames) {
       const [rows] = await connection.query(

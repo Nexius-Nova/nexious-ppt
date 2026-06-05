@@ -800,7 +800,10 @@ async function retryImage(slideId: string) {
                       </button>
                       <div>
                         <strong>{{ slide.title }}</strong>
-                        <p>{{ imageBySlideId.get(slide.id)?.errorMessage || slide.visualPrompt }}</p>
+                        <p class="image-page-item__prompt">{{ slide.visualPrompt || '暂无图片提示词' }}</p>
+                        <p v-if="imageBySlideId.get(slide.id)?.errorMessage" class="image-page-item__error">
+                          {{ imageBySlideId.get(slide.id)?.errorMessage }}
+                        </p>
                       </div>
                       <div class="image-page-item__actions">
                         <UiBadge :tone="imageBySlideId.get(slide.id)?.error ? 'danger' : imageBySlideId.get(slide.id) && !imageBySlideId.get(slide.id)?.error ? 'success' : currentGeneratingSlide === slide.id ? 'accent' : 'neutral'" size="sm">
@@ -1596,6 +1599,18 @@ async function retryImage(slideId: string) {
   color: var(--color-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.image-page-item__prompt {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.image-page-item__error {
+  color: var(--color-danger) !important;
+  font-weight: 600;
 }
 
 .image-page-item__actions {

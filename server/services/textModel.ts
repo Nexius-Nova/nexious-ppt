@@ -25,7 +25,8 @@ export async function streamText(
   baseUrl: string,
   model: string,
   messages: Message[],
-  res?: Response
+  res?: Response,
+  options: { onContent?: (content: string, fullContent: string) => void } = {}
 ): Promise<string> {
   let normalizedBaseUrl = baseUrl || 'https://api.openai.com/v1';
   if (provider !== 'anthropic' && provider !== 'google') {
@@ -113,6 +114,7 @@ export async function streamText(
         if (content) {
           fullContent += content;
           res?.write(`data: ${JSON.stringify({ content })}\n\n`);
+          options.onContent?.(content, fullContent);
         }
       } catch {
         // ignore malformed provider chunks

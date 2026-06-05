@@ -39,7 +39,14 @@ function next() {
   if (currentIndex.value < props.outline.length - 1) currentIndex.value++;
 }
 
+function isEditingElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target.isContentEditable;
+}
+
 function onKeyDown(event: KeyboardEvent) {
+  if (!props.show || isEditingElement(event.target)) return;
   if (event.key === 'Escape') emit('close');
   if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === ' ') {
     event.preventDefault();

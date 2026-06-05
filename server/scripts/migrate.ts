@@ -9,117 +9,136 @@ async function migrate(): Promise<void> {
   try {
     connection = await mysql.createConnection({
       host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '3306'),
+      port: parseInt(process.env.DB_PORT || '3306', 10),
       user: process.env.DB_USER || 'root',
       password: process.env.DB_PASSWORD || '',
       database: process.env.DB_NAME || 'nexious-ppt',
       multipleStatements: true,
     });
 
-    console.log('🔗 已连接到数据库，开始迁移...');
+    console.log('Connected to database, running migrations...');
 
-    const [promptPreviewColumns] = await connection.query(
-      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'prompts' AND COLUMN_NAME = 'preview_url'"
-    );
-
-    if ((promptPreviewColumns as any[]).length === 0) {
-      await connection.query(
-        "ALTER TABLE `prompts` ADD COLUMN `preview_url` VARCHAR(500) DEFAULT NULL COMMENT '提示词效果图URL' AFTER `content`"
+    const hasTable = async (tableName: string) => {
+      const [rows] = await connection!.query(
+        'SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+        [tableName]
       );
-      console.log('prompts.preview_url column added');
-    } else {
-      console.log('prompts.preview_url column exists, skipped');
-    }
+      return (rows as any[]).length > 0;
+    };
 
-    const [columns] = await connection.query(
-      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'projects' AND COLUMN_NAME = 'state'"
-    );
-
-    if ((columns as any[]).length === 0) {
-      await connection.query(
-        "ALTER TABLE `projects` ADD COLUMN `state` JSON DEFAULT NULL COMMENT '项目完整状态快照'"
+    const hasColumn = async (tableName: string, columnName: string) => {
+      const [rows] = await connection!.query(
+        'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+        [tableName, columnName]
       );
-      console.log('✅ projects 表已添加 state 列');
-    } else {
-      console.log('⏭️ projects.state 列已存在，跳过');
-    }
+      return (rows as any[]).length > 0;
+    };
 
-    const [projectTitleIndex] = await connection.query(
-      "SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'projects' AND INDEX_NAME = 'uk_projects_user_title'"
-    );
-
-    if ((projectTitleIndex as any[]).length === 0) {
-      try {
-        await connection.query(
-          "ALTER TABLE `projects` ADD UNIQUE KEY `uk_projects_user_title` (`user_id`, `title`)"
-        );
-        console.log('✅ projects 表已添加用户项目名称唯一索引');
-      } catch (error) {
-        console.warn('⚠️ projects 名称唯一索引添加失败，请先清理同用户下的重复项目名称后重试。');
+    const ensureColumn = async (tableName: string, columnName: string, ddl: string) => {
+      if (await hasColumn(tableName, columnName)) {
+        console.log(`${tableName}.${columnName} column exists, skipped`);
+        return;
       }
-    } else {
-      console.log('⏭️ projects 用户项目名称唯一索引已存在，跳过');
-    }
+      await connection!.query(ddl);
+      console.log(`${tableName}.${columnName} column added`);
+    };
 
-    const [templateNameIndex] = await connection.query(
-      "SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'templates' AND INDEX_NAME = 'uk_templates_user_name'"
-    );
-
-    if ((templateNameIndex as any[]).length === 0) {
-      try {
-        await connection.query(
-          "ALTER TABLE `templates` ADD UNIQUE KEY `uk_templates_user_name` (`user_id`, `name`)"
-        );
-        console.log('✅ templates 表已添加用户模板名称唯一索引');
-      } catch (error) {
-        console.warn('⚠️ templates 名称唯一索引添加失败，请先清理同用户下的重复模板名称后重试。');
+    const dropColumnIfExists = async (tableName: string, columnName: string) => {
+      if (!(await hasColumn(tableName, columnName))) {
+        console.log(`${tableName}.${columnName} column does not exist, skipped`);
+        return;
       }
-    } else {
-      console.log('⏭️ templates 用户模板名称唯一索引已存在，跳过');
-    }
+      await connection!.query(`ALTER TABLE \`${tableName}\` DROP COLUMN \`${columnName}\``);
+      console.log(`${tableName}.${columnName} column dropped`);
+    };
 
-    const [tables] = await connection.query(
-      "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'version_snapshots'"
+    const ensureIndex = async (tableName: string, indexName: string, ddl: string) => {
+      const [rows] = await connection!.query(
+        'SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?',
+        [tableName, indexName]
+      );
+      if ((rows as any[]).length > 0) {
+        console.log(`${tableName}.${indexName} index exists, skipped`);
+        return;
+      }
+      await connection!.query(ddl);
+      console.log(`${tableName}.${indexName} index added`);
+    };
+
+    await ensureColumn(
+      'prompts',
+      'preview_url',
+      "ALTER TABLE `prompts` ADD COLUMN `preview_url` VARCHAR(500) DEFAULT NULL COMMENT '提示词效果图URL' AFTER `content`"
     );
 
-    if ((tables as any[]).length === 0) {
+    await ensureColumn(
+      'projects',
+      'state',
+      "ALTER TABLE `projects` ADD COLUMN `state` JSON DEFAULT NULL COMMENT '项目完整状态快照'"
+    );
+
+    await connection.query(`
+      UPDATE \`projects\`
+      SET \`content\` = JSON_UNQUOTE(JSON_EXTRACT(\`state\`, '$.input.content'))
+      WHERE \`state\` IS NOT NULL
+        AND JSON_EXTRACT(\`state\`, '$.input.content') IS NOT NULL
+    `);
+    console.log('projects.content synced from projects.state.input.content');
+
+    await dropColumnIfExists('projects', 'settings');
+
+    if (!(await hasTable('version_snapshots'))) {
       await connection.query(`
         CREATE TABLE IF NOT EXISTS \`version_snapshots\` (
           \`id\` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
           \`user_id\` BIGINT UNSIGNED NOT NULL,
           \`project_id\` VARCHAR(100) NOT NULL,
           \`label\` VARCHAR(255) DEFAULT NULL,
-          \`outline\` JSON DEFAULT NULL,
-          \`parameters\` JSON DEFAULT NULL,
           \`state\` JSON DEFAULT NULL,
-          \`slide_count\` INT UNSIGNED DEFAULT 0,
           \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY (\`id\`),
           KEY \`idx_user_project\` (\`user_id\`, \`project_id\`),
           KEY \`idx_created_at\` (\`created_at\`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='版本快照表'
       `);
-      console.log('✅ version_snapshots 表已创建');
+      console.log('version_snapshots table created');
     } else {
-      console.log('⏭️ version_snapshots 表已存在，跳过');
+      console.log('version_snapshots table exists, skipped');
     }
 
-    const [versionStateColumns] = await connection.query(
-      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'version_snapshots' AND COLUMN_NAME = 'state'"
+    await ensureColumn(
+      'version_snapshots',
+      'state',
+      'ALTER TABLE `version_snapshots` ADD COLUMN `state` JSON DEFAULT NULL AFTER `label`'
     );
 
-    if ((versionStateColumns as any[]).length === 0) {
-      await connection.query('ALTER TABLE `version_snapshots` ADD COLUMN `state` JSON DEFAULT NULL AFTER `parameters`');
-      console.log('✅ version_snapshots.state 字段已添加');
-    } else {
-      console.log('⏭️ version_snapshots.state 字段已存在，跳过');
+    const hasVersionOutline = await hasColumn('version_snapshots', 'outline');
+    const hasVersionParameters = await hasColumn('version_snapshots', 'parameters');
+    const hasVersionSlideCount = await hasColumn('version_snapshots', 'slide_count');
+
+    if (hasVersionOutline || hasVersionParameters || hasVersionSlideCount) {
+      const outlineExpression = hasVersionOutline ? '`outline`' : 'JSON_ARRAY()';
+      const parametersExpression = hasVersionParameters ? '`parameters`' : 'JSON_OBJECT()';
+      const slideCountExpression = hasVersionSlideCount ? '`slide_count`' : '0';
+      await connection.query(`
+        UPDATE \`version_snapshots\`
+        SET \`state\` = CASE
+          WHEN \`state\` IS NOT NULL THEN \`state\`
+          ELSE JSON_OBJECT(
+            'outline', COALESCE(${outlineExpression}, JSON_ARRAY()),
+            'parameters', COALESCE(${parametersExpression}, JSON_OBJECT()),
+            'slideCount', ${slideCountExpression}
+          )
+        END
+      `);
+      console.log('version_snapshots legacy fields merged into state');
     }
 
-    const [generationJobTables] = await connection.query(
-      "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'generation_jobs'"
-    );
+    await dropColumnIfExists('version_snapshots', 'outline');
+    await dropColumnIfExists('version_snapshots', 'parameters');
+    await dropColumnIfExists('version_snapshots', 'slide_count');
 
-    if ((generationJobTables as any[]).length === 0) {
+    if (!(await hasTable('generation_jobs'))) {
       await connection.query(`
         CREATE TABLE IF NOT EXISTS \`generation_jobs\` (
           \`id\` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -145,18 +164,25 @@ async function migrate(): Promise<void> {
       console.log('generation_jobs table exists, skipped');
     }
 
-    const ensureIndex = async (tableName: string, indexName: string, ddl: string) => {
-      const [indexes] = await connection!.query(
-        'SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?',
-        [tableName, indexName]
+    try {
+      await ensureIndex(
+        'projects',
+        'uk_projects_user_title',
+        'ALTER TABLE `projects` ADD UNIQUE KEY `uk_projects_user_title` (`user_id`, `title`)'
       );
-      if ((indexes as any[]).length > 0) {
-        console.log(`${tableName}.${indexName} index exists, skipped`);
-        return;
-      }
-      await connection!.query(ddl);
-      console.log(`${tableName}.${indexName} index added`);
-    };
+    } catch {
+      console.warn('projects unique title index was not added. Please clean duplicate project names and rerun migration.');
+    }
+
+    try {
+      await ensureIndex(
+        'templates',
+        'uk_templates_user_name',
+        'ALTER TABLE `templates` ADD UNIQUE KEY `uk_templates_user_name` (`user_id`, `name`)'
+      );
+    } catch {
+      console.warn('templates unique name index was not added. Please clean duplicate template names and rerun migration.');
+    }
 
     await ensureIndex(
       'projects',
@@ -164,24 +190,18 @@ async function migrate(): Promise<void> {
       'ALTER TABLE `projects` ADD INDEX `idx_projects_user_status_updated` (`user_id`, `status`, `updated_at`)'
     );
     await ensureIndex(
-      'slides',
-      'idx_slides_project_order_updated',
-      'ALTER TABLE `slides` ADD INDEX `idx_slides_project_order_updated` (`project_id`, `order_index`, `updated_at`)'
-    );
-    await ensureIndex(
-      'images',
-      'idx_images_slide_selected_created',
-      'ALTER TABLE `images` ADD INDEX `idx_images_slide_selected_created` (`slide_id`, `is_selected`, `created_at`)'
-    );
-    await ensureIndex(
       'generation_jobs',
       'idx_generation_jobs_user_project_status_updated',
       'ALTER TABLE `generation_jobs` ADD INDEX `idx_generation_jobs_user_project_status_updated` (`user_id`, `project_id`, `status`, `updated_at`)'
     );
 
-    console.log('🎉 数据库迁移完成！');
+    await connection.query('DROP TABLE IF EXISTS `images`');
+    await connection.query('DROP TABLE IF EXISTS `slides`');
+    console.log('deprecated slides/images tables dropped');
+
+    console.log('Database migration completed.');
   } catch (error) {
-    console.error('❌ 数据库迁移失败:', error);
+    console.error('Database migration failed:', error);
     process.exit(1);
   } finally {
     if (connection) {

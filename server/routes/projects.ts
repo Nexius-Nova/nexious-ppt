@@ -9,20 +9,6 @@ import {
   deleteProject,
   getProjectStats
 } from '../models/project.js';
-import {
-  getSlidesByProjectId,
-  createSlide,
-  updateSlide,
-  deleteSlide,
-  updateSlideOrder
-} from '../models/slide.js';
-import {
-  getImagesBySlideId,
-  createImage,
-  updateImage,
-  deleteImage,
-  selectImage
-} from '../models/image.js';
 
 const router = Router();
 
@@ -181,14 +167,9 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const slides = await getSlidesByProjectId(projectId);
-
     res.json({
       success: true,
-      data: {
-        ...project,
-        slides
-      }
+      data: project
     });
   } catch (error) {
     console.error('获取项目详情错误:', error);
@@ -208,7 +189,9 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { title, topic, content, status, settings, state } = req.body;
+    const { title, topic, content, status, state } = req.body;
+    const compactState = state !== undefined ? compactProjectState(state) : undefined;
+    const syncedContent = getProjectContentFromState(compactState) ?? content;
 
     if (!String(title || '').trim()) {
       return res.status(400).json({
@@ -226,10 +209,9 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       user_id: req.userId,
       title,
       topic,
-      content,
+      content: syncedContent,
       status: status || 'draft',
-      settings,
-      state: state !== undefined ? compactProjectState(state) : undefined
+      state: compactState
     });
 
     res.status(201).json({
@@ -263,7 +245,9 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const existingProject = await getProjectById(projectId);
     if (!existingProject || existingProject.user_id !== req.userId) {
-      const { title, topic, content, status, settings, state } = req.body;
+      const { title, topic, content, status, state } = req.body;
+      const compactState = state !== undefined ? compactProjectState(state) : undefined;
+      const syncedContent = getProjectContentFromState(compactState) ?? content;
       const fallbackTitle = title || state?.input?.topic || topic || '未命名 PPT';
       const fallbackTopic = topic || state?.input?.topic || '';
       const reusableProjectId = await findReusableProjectId(req.userId, fallbackTitle, fallbackTopic);
@@ -280,10 +264,9 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
         user_id: req.userId,
         title: fallbackTitle,
         topic: fallbackTopic,
-        content: content || state?.input?.content || '',
+        content: syncedContent || '',
         status: status || 'draft',
-        settings,
-        state: state !== undefined ? compactProjectState(state) : undefined
+        state: compactState
       });
 
       return res.status(201).json({
@@ -293,15 +276,17 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { title, topic, content, status, settings, state } = req.body;
+    const { title, topic, content, status, state } = req.body;
+    const compactState = state !== undefined ? compactProjectState(state) : undefined;
+    const syncedContent = getProjectContentFromState(compactState);
     const updateData: any = {};
 
     if (title !== undefined) updateData.title = title;
     if (topic !== undefined) updateData.topic = topic;
     if (content !== undefined) updateData.content = content;
+    if (syncedContent !== undefined) updateData.content = syncedContent;
     if (status !== undefined) updateData.status = status;
-    if (settings !== undefined) updateData.settings = settings;
-    if (state !== undefined) updateData.state = compactProjectState(state);
+    if (state !== undefined) updateData.state = compactState;
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({
@@ -388,351 +373,13 @@ router.delete('/:id', authMiddleware, async (req: AuthRequest, res: Response) =>
   }
 });
 
-router.get('/:id/slides', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { id } = req.params;
-    const projectId = parseInt(id, 10);
-
-    const project = await getProjectById(projectId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const slides = await getSlidesByProjectId(projectId);
-
-    res.json({
-      success: true,
-      data: slides
-    });
-  } catch (error) {
-    console.error('获取幻灯片列表错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '获取幻灯片列表失败'
-    });
-  }
-});
-
-router.post('/:id/slides', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { id } = req.params;
-    const projectId = parseInt(id, 10);
-
-    const project = await getProjectById(projectId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const { title, bullets, speaker_notes, visual_prompt, order_index } = req.body;
-
-    const slideId = await createSlide({
-      project_id: projectId,
-      title,
-      bullets,
-      speaker_notes,
-      visual_prompt,
-      order_index
-    });
-
-    res.status(201).json({
-      success: true,
-      data: { id: slideId },
-      message: '幻灯片创建成功'
-    });
-  } catch (error) {
-    console.error('创建幻灯片错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '创建幻灯片失败'
-    });
-  }
-});
-
-router.put('/:projectId/slides/:slideId', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { projectId, slideId } = req.params;
-    const projId = parseInt(projectId, 10);
-    const slId = parseInt(slideId, 10);
-
-    const project = await getProjectById(projId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const { title, bullets, speaker_notes, visual_prompt, image_url, order_index } = req.body;
-
-    const success = await updateSlide(slId, {
-      title,
-      bullets,
-      speaker_notes,
-      visual_prompt,
-      image_url,
-      order_index
-    });
-
-    if (!success) {
-      return res.status(400).json({
-        success: false,
-        message: '更新失败'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: '幻灯片更新成功'
-    });
-  } catch (error) {
-    console.error('更新幻灯片错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '更新幻灯片失败'
-    });
-  }
-});
-
-router.delete('/:projectId/slides/:slideId', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { projectId, slideId } = req.params;
-    const projId = parseInt(projectId, 10);
-    const slId = parseInt(slideId, 10);
-
-    const project = await getProjectById(projId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const success = await deleteSlide(slId);
-    if (!success) {
-      return res.status(400).json({
-        success: false,
-        message: '删除失败'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: '幻灯片已删除'
-    });
-  } catch (error) {
-    console.error('删除幻灯片错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '删除幻灯片失败'
-    });
-  }
-});
-
-router.get('/:projectId/slides/:slideId/images', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { projectId, slideId } = req.params;
-    const projId = parseInt(projectId, 10);
-    const slId = parseInt(slideId, 10);
-
-    const project = await getProjectById(projId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const images = await getImagesBySlideId(slId);
-
-    res.json({
-      success: true,
-      data: images
-    });
-  } catch (error) {
-    console.error('获取图片列表错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '获取图片列表失败'
-    });
-  }
-});
-
-router.post('/:projectId/slides/:slideId/images', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { projectId, slideId } = req.params;
-    const projId = parseInt(projectId, 10);
-    const slId = parseInt(slideId, 10);
-
-    const project = await getProjectById(projId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const { prompt, style, url, is_selected } = req.body;
-
-    const imageId = await createImage({
-      slide_id: slId,
-      prompt,
-      style,
-      url,
-      is_selected
-    });
-
-    res.status(201).json({
-      success: true,
-      data: { id: imageId },
-      message: '图片创建成功'
-    });
-  } catch (error) {
-    console.error('创建图片错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '创建图片失败'
-    });
-  }
-});
-
-router.put('/:projectId/slides/:slideId/images/:imageId', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { projectId, imageId } = req.params;
-    const projId = parseInt(projectId, 10);
-    const imgId = parseInt(imageId, 10);
-
-    const project = await getProjectById(projId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const { url, is_selected } = req.body;
-
-    const success = await updateImage(imgId, { url, is_selected });
-
-    if (!success) {
-      return res.status(400).json({
-        success: false,
-        message: '更新失败'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: '图片更新成功'
-    });
-  } catch (error) {
-    console.error('更新图片错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '更新图片失败'
-    });
-  }
-});
-
-router.post('/:projectId/slides/:slideId/images/:imageId/select', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.userId) {
-      return res.status(401).json({
-        success: false,
-        message: '未授权'
-      });
-    }
-
-    const { projectId, slideId, imageId } = req.params;
-    const projId = parseInt(projectId, 10);
-    const slId = parseInt(slideId, 10);
-    const imgId = parseInt(imageId, 10);
-
-    const project = await getProjectById(projId);
-    if (!project || project.user_id !== req.userId) {
-      return res.status(404).json({
-        success: false,
-        message: '项目不存在'
-      });
-    }
-
-    const success = await selectImage(slId, imgId);
-
-    if (!success) {
-      return res.status(400).json({
-        success: false,
-        message: '设置选中失败'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: '已选为当前图片'
-    });
-  } catch (error) {
-    console.error('设置选中图片错误:', error);
-    res.status(500).json({
-      success: false,
-      message: '设置选中图片失败'
-    });
-  }
-});
-
 export default router;
+
+function getProjectContentFromState(state: any): string | undefined {
+  if (!state || typeof state !== 'object' || !state.input || typeof state.input !== 'object') return undefined;
+  if (!('content' in state.input)) return undefined;
+  return String(state.input.content || '');
+}
 
 function compactProjectState(state: any) {
   if (!state || typeof state !== 'object') return state;

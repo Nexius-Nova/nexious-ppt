@@ -255,34 +255,9 @@ export interface Project {
   topic: string | null;
   content: string | null;
   status: 'draft' | 'generating' | 'completed';
-  settings: any;
   state?: any;
   created_at: string;
   updated_at: string;
-  slides?: Slide[];
-}
-
-export interface Slide {
-  id: number;
-  project_id: number;
-  order_index: number;
-  title: string | null;
-  bullets: string[] | null;
-  speaker_notes: string | null;
-  visual_prompt: string | null;
-  image_url: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface Image {
-  id: number;
-  slide_id: number;
-  prompt: string;
-  style: string | null;
-  url: string;
-  is_selected: boolean;
-  created_at: string;
 }
 
 export const authApi = {
@@ -379,7 +354,6 @@ export const projectApi = {
     topic?: string;
     content?: string;
     status?: 'draft' | 'generating' | 'completed';
-    settings?: any;
     state?: any;
   }) => api.post<{ id: number }>('/api/projects', data),
 
@@ -388,51 +362,10 @@ export const projectApi = {
     topic?: string;
     content?: string;
     status?: 'draft' | 'generating' | 'completed';
-    settings?: any;
     state?: any;
   }) => api.put<{ id?: number; replacedMissingId?: number }>(`/api/projects/${id}`, data),
 
   delete: (id: number) => api.delete(`/api/projects/${id}`),
-
-  getSlides: (projectId: number) => api.get<Slide[]>(`/api/projects/${projectId}/slides`),
-
-  createSlide: (projectId: number, data: {
-    title?: string;
-    bullets?: string[];
-    speaker_notes?: string;
-    visual_prompt?: string;
-    order_index?: number;
-  }) => api.post<{ id: number }>(`/api/projects/${projectId}/slides`, data),
-
-  updateSlide: (projectId: number, slideId: number, data: {
-    title?: string;
-    bullets?: string[];
-    speaker_notes?: string;
-    visual_prompt?: string;
-    image_url?: string;
-    order_index?: number;
-  }) => api.put(`/api/projects/${projectId}/slides/${slideId}`, data),
-
-  deleteSlide: (projectId: number, slideId: number) =>
-    api.delete(`/api/projects/${projectId}/slides/${slideId}`),
-
-  getImages: (projectId: number, slideId: number) =>
-    api.get<Image[]>(`/api/projects/${projectId}/slides/${slideId}/images`),
-
-  createImage: (projectId: number, slideId: number, data: {
-    prompt: string;
-    style?: string;
-    url: string;
-    is_selected?: boolean;
-  }) => api.post<{ id: number }>(`/api/projects/${projectId}/slides/${slideId}/images`, data),
-
-  updateImage: (projectId: number, slideId: number, imageId: number, data: {
-    url?: string;
-    is_selected?: boolean;
-  }) => api.put(`/api/projects/${projectId}/slides/${slideId}/images/${imageId}`, data),
-
-  selectImage: (projectId: number, slideId: number, imageId: number) =>
-    api.post(`/api/projects/${projectId}/slides/${slideId}/images/${imageId}/select`),
 };
 
 export interface GeneratedOutline {
@@ -460,6 +393,7 @@ export interface GeneratedImage {
 export interface StreamCallbacks {
   onStart?: (message: string) => void;
   onContent?: (content: string) => void;
+  onOutlineSlide?: (slide: SpecSlide) => void;
   onComplete?: (data: any) => void;
   onError?: (message: string) => void;
 }
@@ -631,6 +565,8 @@ export const aiApi = {
             callbacks.onStart?.(parsed.message);
           } else if (parsed.content) {
             callbacks.onContent?.(parsed.content);
+          } else if (parsed.status === 'outline-slide') {
+            callbacks.onOutlineSlide?.(parsed.data);
           } else if (parsed.status === 'complete') {
             callbacks.onComplete?.(parsed.data);
             resolve(parsed.data);

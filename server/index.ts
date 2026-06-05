@@ -102,19 +102,7 @@ app.get('/api', (req, res) => {
         get: 'GET /api/projects/:id',
         create: 'POST /api/projects',
         update: 'PUT /api/projects/:id',
-        delete: 'DELETE /api/projects/:id',
-        slides: {
-          list: 'GET /api/projects/:id/slides',
-          create: 'POST /api/projects/:id/slides',
-          update: 'PUT /api/projects/:projectId/slides/:slideId',
-          delete: 'DELETE /api/projects/:projectId/slides/:slideId',
-          images: {
-            list: 'GET /api/projects/:projectId/slides/:slideId/images',
-            create: 'POST /api/projects/:projectId/slides/:slideId/images',
-            update: 'PUT /api/projects/:projectId/slides/:slideId/images/:imageId',
-            select: 'POST /api/projects/:projectId/slides/:slideId/images/:imageId/select'
-          }
-        }
+        delete: 'DELETE /api/projects/:id'
       }
     },
   });

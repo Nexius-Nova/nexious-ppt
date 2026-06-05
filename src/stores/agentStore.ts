@@ -377,6 +377,18 @@ function normalizeStreamingOutlineSlide(item: any, index: number): SlideOutline 
   };
 }
 
+function specSlideToOutlineSlide(slide: SpecSlide, fallbackIndex: number): SlideOutline {
+  return {
+    id: String(slide.id || `slide-${fallbackIndex + 1}`),
+    title: String(slide.title || `第 ${slide.pageNumber || fallbackIndex + 1} 页`),
+    bullets: Array.isArray(slide.bullets) ? slide.bullets.map(item => String(item || '').trim()).filter(Boolean) : [],
+    speakerNotes: String(slide.speakerNotes || ''),
+    visualPrompt: String(slide.visualPrompt || ''),
+    chartHint: slide.chartHint ? String(slide.chartHint) : undefined,
+    layout: slide.layout as SlideLayout | undefined,
+  };
+}
+
 export const useAgentStore = defineStore('agent', () => {
   const activeStep = ref<WorkflowStepId>('input');
   const input = ref<DeckInput>({
@@ -2146,6 +2158,21 @@ export const useAgentStore = defineStore('agent', () => {
             streamedOutlineText += content;
             scheduleStreamingOutlineFlush();
           },
+          onOutlineSlide: (slide) => {
+            if (!isRunContextActive(ctx)) return;
+            const nextSlide = specSlideToOutlineSlide(slide, Math.max(0, outline.value.length));
+            const existingIndex = outline.value.findIndex(item => item.id === nextSlide.id);
+            if (existingIndex >= 0) {
+              const nextOutline = outline.value.slice();
+              nextOutline[existingIndex] = nextSlide;
+              outline.value = nextOutline;
+            } else {
+              outline.value = [...outline.value, nextSlide];
+            }
+            const targetCount = parameters.value.slideCount > 0 ? parameters.value.slideCount : Math.max(outline.value.length + 1, 6);
+            const progress = Math.min(90, 20 + Math.round((outline.value.length / Math.max(1, targetCount)) * 65));
+            setStepStatus('outline', 'running', progress);
+          },
           onComplete: (data) => {
             if (!isRunContextActive(ctx)) return;
             flushStreamingOutline();
@@ -2154,15 +2181,7 @@ export const useAgentStore = defineStore('agent', () => {
             specLock.value = parsed.lock || null;
 
             if (designSpec.value) {
-              outline.value = designSpec.value.outline.map(s => ({
-                id: s.id,
-                title: s.title,
-                bullets: s.bullets,
-                speakerNotes: s.speakerNotes,
-                visualPrompt: s.visualPrompt,
-                chartHint: s.chartHint,
-                layout: s.layout as SlideLayout,
-              }));
+              outline.value = designSpec.value.outline.map((slide, index) => specSlideToOutlineSlide(slide, index));
             }
 
             pushLog(`大纲生成完成，共 ${outline.value.length} 页。`);
