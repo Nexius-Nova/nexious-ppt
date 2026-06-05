@@ -109,6 +109,10 @@ export async function withTransaction<T>(
 
 let activeTransactionConnection: PoolConnection | null = null;
 
+/**
+ * @deprecated Use withTransaction instead. A process-wide transaction handle is
+ * unsafe when concurrent requests are active.
+ */
 export async function beginTransaction(): Promise<PoolConnection> {
   if (activeTransactionConnection) {
     throw new Error('A transaction is already active. Use withTransaction for nested work.');
@@ -118,6 +122,9 @@ export async function beginTransaction(): Promise<PoolConnection> {
   return activeTransactionConnection;
 }
 
+/**
+ * @deprecated Use withTransaction instead.
+ */
 export async function commit(): Promise<void> {
   if (!activeTransactionConnection) return;
   const connection = activeTransactionConnection;
@@ -126,6 +133,9 @@ export async function commit(): Promise<void> {
   connection.release();
 }
 
+/**
+ * @deprecated Use withTransaction instead.
+ */
 export async function rollback(): Promise<void> {
   if (!activeTransactionConnection) return;
   const connection = activeTransactionConnection;

@@ -365,6 +365,20 @@ async function deleteOption(key: ConfigOptionKey, value: string) {
 }
 
 @media (max-width: 760px) {
+  .config-page {
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .page-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .param-card__header {
+    flex-direction: column;
+  }
+
   .add-option {
     grid-template-columns: minmax(0, 1fr) 34px;
   }

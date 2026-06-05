@@ -250,15 +250,15 @@ function clearHistory() {
   border: none;
   border-radius: 50%;
   background: var(--color-accent);
-  color: white;
+  color: var(--color-inverse);
   cursor: pointer;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-panel);
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 .chat-fab:hover {
   transform: scale(1.06);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-lg);
 }
 
 /* ---- Panel ---- */
@@ -274,7 +274,7 @@ function clearHistory() {
   border: 1px solid var(--color-border);
   border-radius: 14px;
   background: var(--color-surface);
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
@@ -396,7 +396,7 @@ function clearHistory() {
 
 .chat-msg--user .chat-msg__bubble {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-inverse);
   border-bottom-right-radius: 4px;
 }
 
@@ -499,12 +499,12 @@ function clearHistory() {
 
 .chat-send-btn--active {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-inverse);
 }
 
 .chat-send-btn:hover:not(:disabled) {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-inverse);
 }
 
 .chat-send-btn:disabled {
@@ -537,5 +537,20 @@ function clearHistory() {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@media (max-width: 640px) {
+  .chat-fab {
+    right: 16px;
+    bottom: 80px;
+  }
+
+  .chat-panel {
+    right: 12px;
+    bottom: 76px;
+    left: 12px;
+    width: auto;
+    height: min(560px, calc(100dvh - 104px));
+  }
 }
 </style>

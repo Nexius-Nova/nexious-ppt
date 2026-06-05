@@ -23,6 +23,7 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
+import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import { useApiKeyStore } from '@/stores/apiKeyStore';
 import { useToastStore } from '@/stores/toastStore';
 import { aiApi } from '@/services/api';
@@ -45,7 +46,9 @@ const {
 
 const activeTab = ref<ModelType>('text');
 const showModal = ref(false);
+const showDeleteModal = ref(false);
 const editingModel = ref<(ManagedModel & { type: ModelType }) | null>(null);
+const modelToDelete = ref<(ManagedModel & { type: ModelType }) | null>(null);
 const formData = ref({
   name: '',
   model: '',
@@ -136,12 +139,29 @@ async function saveModel() {
   closeModal();
 }
 
-async function deleteModel(model: ManagedModel) {
-  if (activeTab.value === 'text') {
-    await apiKeyStore.deleteTextModel(model.id);
+function deleteModel(model: ManagedModel) {
+  modelToDelete.value = { ...model, type: activeTab.value };
+  showDeleteModal.value = true;
+}
+
+function closeDeleteModal() {
+  if (loading.value) return;
+  showDeleteModal.value = false;
+  modelToDelete.value = null;
+}
+
+async function confirmDeleteModel() {
+  if (!modelToDelete.value) return;
+
+  const target = modelToDelete.value;
+  if (target.type === 'text') {
+    await apiKeyStore.deleteTextModel(target.id);
   } else {
-    await apiKeyStore.deleteImageModel(model.id);
+    await apiKeyStore.deleteImageModel(target.id);
   }
+
+  showDeleteModal.value = false;
+  modelToDelete.value = null;
 }
 
 async function setActiveModel(model: ManagedModel) {
@@ -383,6 +403,14 @@ function getProviderLabel(model: ManagedModel) {
         </div>
       </div>
     </Teleport>
+
+    <DeleteConfirmModal
+      :open="showDeleteModal"
+      :item-name="modelToDelete?.name || ''"
+      :loading="loading"
+      @close="closeDeleteModal"
+      @confirm="confirmDeleteModel"
+    />
   </div>
 </template>
 
@@ -738,7 +766,7 @@ function getProviderLabel(model: ManagedModel) {
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
 }
 

@@ -87,7 +87,7 @@ withDefaults(
 .ui-button--primary {
   border-color: var(--color-accent);
   background: var(--color-accent);
-  color: #ffffff;
+  color: var(--color-inverse);
   font-weight: 600;
 }
 

@@ -2,6 +2,8 @@ import type { DesignSpec, SpecSlide, SkillExtension } from './spec.js';
 import { CANVAS_FORMATS, normalizeColors, normalizeTypography } from './spec.js';
 
 type TemplatePreviewSlide = { title: string; layout: string; description?: string; svg?: string; pageNumber?: number };
+const MAX_TEMPLATE_SVG_SNIPPET_CHARS = 1600;
+const templatePreviewSummaryCache = new Map<string, string>();
 
 export interface StrategistInput {
   topic: string;
@@ -250,10 +252,43 @@ function formatTemplatePreviewSlides(previewSlides?: TemplatePreviewSlide[]) {
     .slice(0, 3)
     .map((slide: any, index) => {
       const meta = `${slide.title || `示例页 ${index + 1}`}（${slide.layout || 'content'}${slide.description ? `：${slide.description}` : ''}）`;
-      const svg = typeof slide.svg === 'string' && slide.svg.trim() ? `\nSVG:\n${slide.svg.trim()}` : '';
-      return `${meta}${svg}`;
+      const svgSummary = summarizeTemplateSvg(slide.svg);
+      return `${meta}${svgSummary ? `\n视觉摘要：${svgSummary}` : ''}`;
     })
     .join('\n\n');
+}
+
+function summarizeTemplateSvg(svg?: string) {
+  if (typeof svg !== 'string' || !svg.trim()) return '';
+  const source = svg.trim();
+  const cacheKey = source.slice(0, 4096);
+  const cached = templatePreviewSummaryCache.get(cacheKey);
+  if (cached) return cached;
+
+  const tags = ['rect', 'circle', 'ellipse', 'line', 'path', 'text', 'image', 'g']
+    .map((tag) => `${tag}:${(source.match(new RegExp(`<${tag}\\b`, 'gi')) || []).length}`)
+    .join(', ');
+  const colors = Array.from(new Set(source.match(/#[0-9a-fA-F]{3,8}\b/g) || [])).slice(0, 10);
+  const fontSizes = Array.from(new Set(source.match(/font-size=["']?[\d.]+/gi) || [])).slice(0, 8);
+  const viewBox = source.match(/viewBox=["']([^"']+)["']/i)?.[1] || '';
+  const compactSnippet = source
+    .replace(/>[\s\r\n]+</g, '><')
+    .replace(/\s{2,}/g, ' ')
+    .slice(0, MAX_TEMPLATE_SVG_SNIPPET_CHARS);
+  const summary = [
+    viewBox ? `viewBox=${viewBox}` : '',
+    `元素统计=${tags}`,
+    colors.length ? `主要颜色=${colors.join(', ')}` : '',
+    fontSizes.length ? `字号线索=${fontSizes.join(', ')}` : '',
+    `短片段=${compactSnippet}`,
+  ].filter(Boolean).join('；');
+
+  if (templatePreviewSummaryCache.size > 80) {
+    const firstKey = templatePreviewSummaryCache.keys().next().value;
+    if (firstKey) templatePreviewSummaryCache.delete(firstKey);
+  }
+  templatePreviewSummaryCache.set(cacheKey, summary);
+  return summary;
 }
 
 function sanitizeTemplateAsset(template: StrategistInput['templateAsset']): StrategistInput['templateAsset'] {

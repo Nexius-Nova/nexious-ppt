@@ -91,6 +91,7 @@ async function migrate(): Promise<void> {
           \`label\` VARCHAR(255) DEFAULT NULL,
           \`outline\` JSON DEFAULT NULL,
           \`parameters\` JSON DEFAULT NULL,
+          \`state\` JSON DEFAULT NULL,
           \`slide_count\` INT UNSIGNED DEFAULT 0,
           \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY (\`id\`),
@@ -101,6 +102,17 @@ async function migrate(): Promise<void> {
       console.log('✅ version_snapshots 表已创建');
     } else {
       console.log('⏭️ version_snapshots 表已存在，跳过');
+    }
+
+    const [versionStateColumns] = await connection.query(
+      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'version_snapshots' AND COLUMN_NAME = 'state'"
+    );
+
+    if ((versionStateColumns as any[]).length === 0) {
+      await connection.query('ALTER TABLE `version_snapshots` ADD COLUMN `state` JSON DEFAULT NULL AFTER `parameters`');
+      console.log('✅ version_snapshots.state 字段已添加');
+    } else {
+      console.log('⏭️ version_snapshots.state 字段已存在，跳过');
     }
 
     const [generationJobTables] = await connection.query(
@@ -132,6 +144,40 @@ async function migrate(): Promise<void> {
     } else {
       console.log('generation_jobs table exists, skipped');
     }
+
+    const ensureIndex = async (tableName: string, indexName: string, ddl: string) => {
+      const [indexes] = await connection!.query(
+        'SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?',
+        [tableName, indexName]
+      );
+      if ((indexes as any[]).length > 0) {
+        console.log(`${tableName}.${indexName} index exists, skipped`);
+        return;
+      }
+      await connection!.query(ddl);
+      console.log(`${tableName}.${indexName} index added`);
+    };
+
+    await ensureIndex(
+      'projects',
+      'idx_projects_user_status_updated',
+      'ALTER TABLE `projects` ADD INDEX `idx_projects_user_status_updated` (`user_id`, `status`, `updated_at`)'
+    );
+    await ensureIndex(
+      'slides',
+      'idx_slides_project_order_updated',
+      'ALTER TABLE `slides` ADD INDEX `idx_slides_project_order_updated` (`project_id`, `order_index`, `updated_at`)'
+    );
+    await ensureIndex(
+      'images',
+      'idx_images_slide_selected_created',
+      'ALTER TABLE `images` ADD INDEX `idx_images_slide_selected_created` (`slide_id`, `is_selected`, `created_at`)'
+    );
+    await ensureIndex(
+      'generation_jobs',
+      'idx_generation_jobs_user_project_status_updated',
+      'ALTER TABLE `generation_jobs` ADD INDEX `idx_generation_jobs_user_project_status_updated` (`user_id`, `project_id`, `status`, `updated_at`)'
+    );
 
     console.log('🎉 数据库迁移完成！');
   } catch (error) {

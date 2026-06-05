@@ -57,11 +57,11 @@ async function doRestore(versionId: string) {
   if (!activePpt.value) return;
   const success = await store.restoreVersion(activePpt.value.id, versionId);
   if (success) {
-    toastStore.success('已回滚', '大纲和参数已恢复到所选版本');
+    toastStore.success('已切换版本', '当前 PPT 已切换到所选历史版本');
     confirmRestoreId.value = null;
-    loadVersions();
+    await loadVersions();
   } else {
-    toastStore.error('回滚失败', '未找到该版本');
+    toastStore.error('切换失败', '未找到该版本或版本数据不可用');
   }
 }
 
@@ -112,7 +112,7 @@ function hasProject(): boolean {
               <button
                 v-if="confirmRestoreId !== version.id"
                 class="version-action-btn"
-                title="回滚到此版本"
+                title="切换到此版本"
                 @click="confirmRestoreId = version.id"
               >
                 <RotateCcw :size="12" />
@@ -130,9 +130,9 @@ function hasProject(): boolean {
             <Transition name="slide-fade">
               <div v-if="confirmRestoreId === version.id" class="version-confirm">
                 <AlertTriangle :size="12" />
-                <span>确认回滚到此版本？当前编辑内容将丢失。</span>
+                <span>确认切换到此版本？当前内容会自动保存为一个新版本。</span>
                 <div class="version-confirm__actions">
-                  <UiButton size="sm" variant="danger" @click="doRestore(version.id)">确认</UiButton>
+                  <UiButton size="sm" variant="danger" @click="doRestore(version.id)">切换</UiButton>
                   <UiButton size="sm" variant="ghost" @click="confirmRestoreId = null">取消</UiButton>
                 </div>
               </div>
@@ -198,7 +198,7 @@ function hasProject(): boolean {
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-surface);
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-panel);
   overflow: hidden;
 }
 
@@ -358,5 +358,30 @@ function hasProject(): boolean {
 .slide-fade-leave-to {
   opacity: 0;
   transform: translateY(-4px);
+}
+
+@media (max-width: 520px) {
+  .version-panel {
+    position: fixed;
+    top: auto;
+    right: 12px;
+    bottom: 76px;
+    left: 12px;
+    width: auto;
+    max-height: min(420px, calc(100dvh - 104px));
+  }
+
+  .version-item__actions {
+    opacity: 1;
+  }
+
+  .version-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .version-confirm__actions {
+    margin-left: 0;
+  }
 }
 </style>

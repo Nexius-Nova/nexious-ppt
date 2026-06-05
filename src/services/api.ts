@@ -919,7 +919,7 @@ export const workflowApi = {
 export const versionApi = {
   getAll: (projectId: string) => api.get<any[]>(`/api/versions/${projectId}`),
 
-  save: (projectId: string, data: { label?: string; outline: any[]; parameters: any; slideCount: number }) =>
+  save: (projectId: string, data: { label?: string; outline: any[]; parameters: any; slideCount: number; state?: any }) =>
     api.post(`/api/versions/${projectId}`, data),
 
   delete: (projectId: string, versionId: string) =>

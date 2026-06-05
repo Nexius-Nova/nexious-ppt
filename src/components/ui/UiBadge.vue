@@ -41,37 +41,37 @@ withDefaults(
 
 .ui-badge--neutral {
   color: var(--color-muted);
-  background: #f7f7f8;
+  background: var(--color-panel);
   border-color: var(--color-border);
 }
 
 .ui-badge--accent {
   color: var(--color-accent-strong);
-  border-color: #ffc7c7;
+  border-color: color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
   background: var(--color-accent-soft);
 }
 
 .ui-badge--success {
   color: var(--color-success);
-  border-color: #ccebd6;
+  border-color: color-mix(in srgb, var(--color-success) 32%, var(--color-border));
   background: var(--color-success-soft);
 }
 
 .ui-badge--warning {
   color: var(--color-warning);
-  border-color: #fde7b5;
+  border-color: color-mix(in srgb, var(--color-warning) 32%, var(--color-border));
   background: var(--color-warning-soft);
 }
 
 .ui-badge--danger {
   color: var(--color-danger);
-  border-color: #ffc7c7;
+  border-color: color-mix(in srgb, var(--color-danger) 32%, var(--color-border));
   background: var(--color-danger-soft);
 }
 
 .ui-badge--info {
   color: var(--color-info);
-  border-color: #d9dee7;
+  border-color: color-mix(in srgb, var(--color-info) 26%, var(--color-border));
   background: var(--color-info-soft);
 }
 </style>

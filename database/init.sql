@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS `projects` (
   UNIQUE KEY `uk_projects_user_title` (`user_id`, `title`),
   KEY `idx_status` (`status`),
   KEY `idx_created_at` (`created_at`),
+  KEY `idx_projects_user_status_updated` (`user_id`, `status`, `updated_at`),
   CONSTRAINT `fk_projects_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='PPT项目表';
 
@@ -90,6 +91,7 @@ CREATE TABLE IF NOT EXISTS `slides` (
   PRIMARY KEY (`id`),
   KEY `idx_project_id` (`project_id`),
   KEY `idx_order_index` (`order_index`),
+  KEY `idx_slides_project_order_updated` (`project_id`, `order_index`, `updated_at`),
   CONSTRAINT `fk_slides_project_id` FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='幻灯片表';
 
@@ -107,6 +109,7 @@ CREATE TABLE IF NOT EXISTS `images` (
   PRIMARY KEY (`id`),
   KEY `idx_slide_id` (`slide_id`),
   KEY `idx_is_selected` (`is_selected`),
+  KEY `idx_images_slide_selected_created` (`slide_id`, `is_selected`, `created_at`),
   CONSTRAINT `fk_images_slide_id` FOREIGN KEY (`slide_id`) REFERENCES `slides`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='生成的图片表';
 
@@ -228,7 +231,8 @@ CREATE TABLE IF NOT EXISTS `generation_jobs` (
   PRIMARY KEY (`id`),
   KEY `idx_generation_jobs_user_project` (`user_id`, `project_id`),
   KEY `idx_generation_jobs_user_status` (`user_id`, `status`),
-  KEY `idx_generation_jobs_updated_at` (`updated_at`)
+  KEY `idx_generation_jobs_updated_at` (`updated_at`),
+  KEY `idx_generation_jobs_user_project_status_updated` (`user_id`, `project_id`, `status`, `updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO `users` (`email`, `password_hash`, `name`, `avatar`) VALUES

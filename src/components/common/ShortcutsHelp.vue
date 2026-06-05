@@ -84,7 +84,8 @@ function keyLabel(keys: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  padding: 16px;
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
 }
 
@@ -177,5 +178,28 @@ function keyLabel(keys: string): string {
 .shortcut-desc {
   font-size: 13px;
   color: var(--color-muted);
+}
+
+@media (max-width: 520px) {
+  .shortcuts-overlay {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .shortcuts-modal {
+    align-self: center;
+    max-width: none;
+  }
+
+  .shortcut-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .shortcut-key {
+    min-width: 0;
+    width: 100%;
+  }
 }
 </style>

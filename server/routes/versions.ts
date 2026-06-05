@@ -7,13 +7,23 @@ const MAX_VERSIONS = 30;
 
 router.use(authMiddleware);
 
+function parseJsonValue(value: unknown, fallback: any) {
+  if (value == null) return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 router.get('/:projectId', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId!;
     const { projectId } = req.params;
 
     const rows = await query(
-      `SELECT id, project_id, label, outline, parameters, slide_count, created_at FROM version_snapshots WHERE user_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ${MAX_VERSIONS}`,
+      `SELECT id, project_id, label, outline, parameters, state, slide_count, created_at FROM version_snapshots WHERE user_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ${MAX_VERSIONS}`,
       [userId, projectId]
     );
 
@@ -21,8 +31,9 @@ router.get('/:projectId', async (req: AuthRequest, res: Response) => {
       id: `v-${row.id}`,
       projectId: row.project_id,
       label: row.label || `版本 ${row.id}`,
-      outline: typeof row.outline === 'string' ? JSON.parse(row.outline) : row.outline,
-      parameters: typeof row.parameters === 'string' ? JSON.parse(row.parameters) : row.parameters,
+      outline: parseJsonValue(row.outline, []),
+      parameters: parseJsonValue(row.parameters, {}),
+      state: parseJsonValue(row.state, null),
       slideCount: row.slide_count,
       timestamp: new Date(row.created_at).getTime()
     }));
@@ -38,7 +49,7 @@ router.post('/:projectId', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId!;
     const { projectId } = req.params;
-    const { label, outline, parameters, slideCount } = req.body;
+    const { label, outline, parameters, slideCount, state } = req.body;
 
     const countResult = await query(
       'SELECT COUNT(*) as cnt FROM version_snapshots WHERE user_id = ? AND project_id = ?',
@@ -55,8 +66,16 @@ router.post('/:projectId', async (req: AuthRequest, res: Response) => {
     }
 
     await insert(
-      'INSERT INTO version_snapshots (user_id, project_id, label, outline, parameters, slide_count) VALUES (?, ?, ?, ?, ?, ?)',
-      [userId, projectId, label || null, JSON.stringify(outline), JSON.stringify(parameters), slideCount || 0]
+      'INSERT INTO version_snapshots (user_id, project_id, label, outline, parameters, state, slide_count) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [
+        userId,
+        projectId,
+        label || null,
+        JSON.stringify(outline || state?.outline || []),
+        JSON.stringify(parameters || state?.parameters || {}),
+        state ? JSON.stringify(state) : null,
+        slideCount || state?.designSpec?.outline?.length || state?.outline?.length || 0
+      ]
     );
 
     res.json({ success: true, message: '版本快照已保存' });

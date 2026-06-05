@@ -19,6 +19,7 @@ import UiEmpty from '@/components/ui/UiEmpty.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
+import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import { templateApi, type Template } from '@/services/api';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
@@ -61,8 +62,10 @@ const searchQuery = ref('');
 const selectedCategory = ref('全部');
 const previewTemplate = ref<Template | null>(null);
 const editingTemplate = ref<Template | null>(null);
+const templateToDelete = ref<Template | null>(null);
 const showPreviewModal = ref(false);
 const showEditor = ref(false);
+const showDeleteModal = ref(false);
 const zoomPreviewSlide = ref<NonNullable<TemplateAssetSettings['previewSlides']>[number] | null>(null);
 const activeEditorSection = ref<EditorSectionId>('basic');
 const focusedTemplateId = ref<string | null>(null);
@@ -298,6 +301,41 @@ function normalizePreviewSvg(svg: string) {
     .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])generated-images\//gi, `$1${baseUrl}/generated-images/`);
 }
 
+const LAYOUT_LABELS: Record<string, string> = {
+  cover: '封面页',
+  toc: '目录页',
+  chapter: '章节页',
+  section: '章节页',
+  content: '内容页',
+  'content-image': '图文页',
+  'content-chart': '图表页',
+  ending: '收束页',
+  summary: '总结页',
+  'text-only': '纯文本页',
+  'text-image': '左文右图',
+  'image-text': '左图右文',
+  'full-image': '全图页',
+  'title-center': '居中标题页',
+  'two-column': '双栏页',
+  comparison: '对比页',
+  process: '流程页',
+  timeline: '时间轴',
+  matrix: '矩阵页',
+  matrix_2x2: '四象限矩阵',
+  bar_chart: '柱状图',
+  line_chart: '折线图',
+  pie_chart: '饼图',
+  indicator_cards: '指标卡',
+  data_table: '数据表格',
+};
+
+function formatLayoutLabel(value?: unknown) {
+  const raw = String(value || '').trim();
+  if (!raw) return '内容页';
+  const normalized = raw.toLowerCase();
+  return LAYOUT_LABELS[normalized] || raw.replace(/[-_]+/g, ' ');
+}
+
 function openZoomPreview(slide: NonNullable<TemplateAssetSettings['previewSlides']>[number]) {
   zoomPreviewSlide.value = slide;
 }
@@ -462,12 +500,26 @@ function resetEditorDefaults() {
   };
 }
 
-async function deleteTemplate(template: Template) {
-  if (!confirm(`确定删除「${template.name}」吗？`)) return;
+function deleteTemplate(template: Template) {
+  templateToDelete.value = template;
+  showDeleteModal.value = true;
+}
+
+function closeDeleteModal(force = false) {
+  if (loading.value && !force) return;
+  showDeleteModal.value = false;
+  templateToDelete.value = null;
+}
+
+async function confirmDeleteTemplate() {
+  if (!templateToDelete.value) return;
+
+  loading.value = true;
   try {
-    const response = await templateApi.delete(template.id);
+    const response = await templateApi.delete(templateToDelete.value.id);
     if (response.success) {
       toastStore.success('模板方案已删除');
+      closeDeleteModal(true);
       await fetchTemplates();
       await agentStore.fetchTemplates();
     } else {
@@ -475,6 +527,8 @@ async function deleteTemplate(template: Template) {
     }
   } catch (error: any) {
     toastStore.error('删除失败', error.message);
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -622,40 +676,7 @@ onMounted(fetchTemplates);
             </div>
 
             <div class="detail-grid">
-              <section class="detail-block">
-                <h4><Palette :size="15" /> 主题风格</h4>
-                <p>{{ normalizeSettings(previewTemplate).styleGuide?.visualTone }}</p>
-                <div class="swatches">
-                  <span
-                    v-for="color in normalizeSettings(previewTemplate).styleGuide?.colorPalette"
-                    :key="color"
-                    class="swatch"
-                    :style="{ background: color }"
-                    :title="color"
-                  ></span>
-                </div>
-                <p>{{ normalizeSettings(previewTemplate).styleGuide?.typography }}</p>
-                <p>{{ normalizeSettings(previewTemplate).styleGuide?.iconStyle }}</p>
-              </section>
-
-              <section class="detail-block">
-                <h4><Layers :size="15" /> 排版布局</h4>
-                <p>封面：{{ normalizeSettings(previewTemplate).layoutGuide?.cover }}</p>
-                <p>章节：{{ normalizeSettings(previewTemplate).layoutGuide?.section }}</p>
-                <div class="tag-list">
-                  <span v-for="layout in normalizeSettings(previewTemplate).layoutGuide?.contentLayouts" :key="layout">{{ layout }}</span>
-                  <span v-for="layout in normalizeSettings(previewTemplate).layoutGuide?.dataLayouts" :key="layout">{{ layout }}</span>
-                </div>
-              </section>
-
-              <section class="detail-block">
-                <h4><ListTree :size="15" /> 大纲结构</h4>
-                <ol class="outline-list">
-                  <li v-for="item in normalizeSettings(previewTemplate).outlinePattern" :key="item">{{ item }}</li>
-                </ol>
-              </section>
-
-              <section class="detail-block">
+              <section class="detail-block detail-block--preview">
                 <h4><FileText :size="15" /> 示例 PPT 预览</h4>
                 <div class="ppt-preview-grid" :style="{ '--accent': previewTemplate.accent || '#334155' }">
                   <div
@@ -683,10 +704,44 @@ onMounted(fetchTemplates);
                       <p v-if="slide.description">{{ slide.description }}</p>
                       </template>
                     </button>
-                    <div class="ppt-preview-slide__meta">{{ slide.layout }}</div>
+                    <div class="ppt-preview-slide__meta">{{ formatLayoutLabel(slide.layout) }}</div>
                   </div>
                 </div>
               </section>
+
+              <section class="detail-block">
+                <h4><Palette :size="15" /> 主题风格</h4>
+                <p>{{ normalizeSettings(previewTemplate).styleGuide?.visualTone }}</p>
+                <div class="swatches">
+                  <span
+                    v-for="color in normalizeSettings(previewTemplate).styleGuide?.colorPalette"
+                    :key="color"
+                    class="swatch"
+                    :style="{ background: color }"
+                    :title="color"
+                  ></span>
+                </div>
+                <p>{{ normalizeSettings(previewTemplate).styleGuide?.typography }}</p>
+                <p>{{ normalizeSettings(previewTemplate).styleGuide?.iconStyle }}</p>
+              </section>
+
+              <section class="detail-block">
+                <h4><Layers :size="15" /> 排版布局</h4>
+                <p>封面：{{ normalizeSettings(previewTemplate).layoutGuide?.cover }}</p>
+                <p>章节：{{ normalizeSettings(previewTemplate).layoutGuide?.section }}</p>
+                <div class="tag-list">
+                  <span v-for="layout in normalizeSettings(previewTemplate).layoutGuide?.contentLayouts" :key="layout">{{ formatLayoutLabel(layout) }}</span>
+                  <span v-for="layout in normalizeSettings(previewTemplate).layoutGuide?.dataLayouts" :key="layout">{{ formatLayoutLabel(layout) }}</span>
+                </div>
+              </section>
+
+              <section class="detail-block">
+                <h4><ListTree :size="15" /> 大纲结构</h4>
+                <ol class="outline-list">
+                  <li v-for="item in normalizeSettings(previewTemplate).outlinePattern" :key="item">{{ item }}</li>
+                </ol>
+              </section>
+
             </div>
           </div>
 
@@ -702,7 +757,7 @@ onMounted(fetchTemplates);
             <div>
               <p class="modal-kicker">示例预览</p>
               <h3>{{ zoomPreviewSlide.title }}</h3>
-              <span>{{ zoomPreviewSlide.layout }}</span>
+              <span>{{ formatLayoutLabel(zoomPreviewSlide.layout) }}</span>
             </div>
             <button class="modal-close" title="关闭预览" @click="zoomPreviewSlide = null">
               <X :size="18" />
@@ -736,6 +791,14 @@ onMounted(fetchTemplates);
           </footer>
         </div>
       </div>
+
+      <DeleteConfirmModal
+        :open="showDeleteModal"
+        :item-name="templateToDelete?.name || ''"
+        :loading="loading"
+        @close="closeDeleteModal"
+        @confirm="confirmDeleteTemplate"
+      />
 
       <div v-if="showEditor" class="modal-overlay" @click.self="showEditor = false">
         <div class="modal modal--editor">
@@ -900,7 +963,7 @@ onMounted(fetchTemplates);
               <div class="editor-preview__block">
                 <span>布局</span>
                 <div class="editor-chip-list">
-                  <i v-for="layout in [...editorContentLayouts, ...editorDataLayouts].slice(0, 6)" :key="layout">{{ layout }}</i>
+                  <i v-for="layout in [...editorContentLayouts, ...editorDataLayouts].slice(0, 6)" :key="layout">{{ formatLayoutLabel(layout) }}</i>
                 </div>
               </div>
 
@@ -920,7 +983,7 @@ onMounted(fetchTemplates);
                     type="button"
                   >
                     <strong>{{ slide.title }}</strong>
-                    <small>{{ slide.layout }}</small>
+                    <small>{{ formatLayoutLabel(slide.layout) }}</small>
                   </button>
                 </div>
               </div>
@@ -1056,16 +1119,16 @@ onMounted(fetchTemplates);
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  min-height: 150px;
-  padding: 18px;
+  height: 174px;
+  padding: 18px 22px;
   background: color-mix(in srgb, var(--accent) 10%, var(--color-panel));
   border-bottom: 1px solid var(--color-border);
 }
 
 .preview-deck {
   position: relative;
-  width: min(100%, 238px);
-  min-height: 122px;
+  width: min(100%, 272px);
+  min-height: 136px;
 }
 
 .preview-deck__slide {
@@ -1073,7 +1136,7 @@ onMounted(fetchTemplates);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 178px;
+  width: 214px;
   aspect-ratio: 16 / 9;
   padding: 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--color-border));
@@ -1110,13 +1173,13 @@ onMounted(fetchTemplates);
 }
 
 .preview-deck__slide:nth-child(2) {
-  left: 28px;
+  left: 32px;
   top: 12px;
   z-index: 2;
 }
 
 .preview-deck__slide:nth-child(3) {
-  left: 56px;
+  left: 58px;
   top: 24px;
   z-index: 1;
 }
@@ -1179,8 +1242,8 @@ onMounted(fetchTemplates);
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px;
+  gap: 9px;
+  padding: 14px 16px 12px;
 }
 
 .template-title-row {
@@ -1194,13 +1257,22 @@ onMounted(fetchTemplates);
   margin: 0;
   color: var(--color-text);
   font-size: 16px;
+  line-height: 1.35;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .template-body p {
   margin: 0;
   color: var(--color-subtle);
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.45;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .style-summary,
@@ -1214,21 +1286,29 @@ onMounted(fetchTemplates);
 
 .style-summary {
   align-items: flex-start;
-  padding: 10px;
+  padding: 8px 10px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-panel);
 }
 
+.style-summary span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.45;
+}
+
 .metric-row {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  gap: 6px;
 }
 
 .metric {
   justify-content: center;
-  min-height: 34px;
+  min-height: 30px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-surface);
@@ -1238,7 +1318,7 @@ onMounted(fetchTemplates);
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 10px 16px 12px;
   border-top: 1px solid var(--color-border);
 }
 
@@ -1275,7 +1355,7 @@ onMounted(fetchTemplates);
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(17, 24, 39, 0.52);
+  background: var(--color-overlay);
 }
 
 .modal {
@@ -1334,7 +1414,7 @@ onMounted(fetchTemplates);
   align-items: center;
   justify-content: center;
   padding: 22px;
-  background: rgba(17, 24, 39, 0.58);
+  background: var(--color-overlay);
 }
 
 .svg-preview-zoom__panel {
@@ -1451,6 +1531,10 @@ onMounted(fetchTemplates);
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-panel);
+}
+
+.detail-block--preview {
+  grid-column: 1 / -1;
 }
 
 .detail-block h4,
@@ -1944,6 +2028,11 @@ onMounted(fetchTemplates);
 }
 
 @media (max-width: 860px) {
+  .template-page {
+    gap: 14px;
+    padding: 14px;
+  }
+
   .page-header {
     align-items: stretch;
     flex-direction: column;
@@ -1981,6 +2070,48 @@ onMounted(fetchTemplates);
 
   .template-actions {
     flex-wrap: wrap;
+  }
+
+  .modal-overlay,
+  .svg-preview-zoom {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .modal,
+  .modal--editor,
+  .svg-preview-zoom__panel {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+  }
+
+  .modal-header,
+  .svg-preview-zoom__header {
+    align-items: flex-start;
+  }
+
+  .modal-footer,
+  .svg-preview-zoom__footer {
+    flex-direction: column-reverse;
+  }
+
+  .modal-footer :deep(.ui-button),
+  .svg-preview-zoom__footer :deep(.ui-button) {
+    width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .template-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .editor-nav {
+    grid-template-columns: 1fr;
   }
 }
 </style>

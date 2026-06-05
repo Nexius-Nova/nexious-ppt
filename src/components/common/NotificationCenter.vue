@@ -149,7 +149,7 @@ onUnmounted(() => {
   padding: 0 4px;
   border-radius: 999px;
   background: var(--color-accent);
-  color: white;
+  color: var(--color-inverse);
   font-size: 9px;
   font-weight: 700;
   display: grid;
@@ -169,7 +169,7 @@ onUnmounted(() => {
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-surface);
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-panel);
   overflow: hidden;
 }
 
@@ -290,5 +290,16 @@ onUnmounted(() => {
 .dropdown-leave-to {
   opacity: 0;
   transform: translateY(-6px);
+}
+
+@media (max-width: 520px) {
+  .notification-panel {
+    position: fixed;
+    top: 64px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: min(420px, calc(100dvh - 88px));
+  }
 }
 </style>

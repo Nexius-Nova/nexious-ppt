@@ -1275,9 +1275,9 @@ async function retryImage(slideId: string) {
 }
 
 .pipeline-stage--done .pipeline-stage__icon {
-  color: #ffffff;
-  border-color: var(--color-success);
-  background: var(--color-success);
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
 }
 
 .pipeline-stage--running .pipeline-stage__icon {
@@ -1582,8 +1582,8 @@ async function retryImage(slideId: string) {
   bottom: 5px;
   padding: 2px;
   border-radius: 5px;
-  color: #ffffff;
-  background: rgba(0, 0, 0, 0.48);
+  color: var(--color-inverse);
+  background: var(--color-overlay);
 }
 
 .image-page-item strong {
@@ -1846,7 +1846,7 @@ async function retryImage(slideId: string) {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(8, 12, 18, 0.72);
+  background: var(--color-overlay);
 }
 
 .image-preview-modal__panel {
@@ -1994,6 +1994,25 @@ async function retryImage(slideId: string) {
 }
 
 @media (max-width: 640px) {
+  .workspace-main {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .workspace-step-header,
+  .workspace-status-bar,
+  .workspace-status-bar__right,
+  .stage-actions,
+  .pause-notice,
+  .image-preview-modal__header,
+  .image-preview-modal__footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workspace-step-header {
+    padding: 10px 12px;
+  }
+
   .workspace-content-main {
     padding: 10px;
   }
@@ -2016,6 +2035,34 @@ async function retryImage(slideId: string) {
 
   .image-page-item {
     grid-template-columns: 1fr;
+  }
+
+  .image-page-item__actions {
+    justify-content: stretch;
+    min-width: 0;
+  }
+
+  .image-page-item__actions :deep(.ui-button),
+  .stage-actions :deep(.ui-button),
+  .pause-notice :deep(.ui-button),
+  .image-preview-modal__footer :deep(.ui-button) {
+    width: 100%;
+  }
+
+  .executor-board,
+  .quality-strip,
+  .image-gate,
+  .outline-control {
+    padding: 12px;
+  }
+
+  .image-preview-modal {
+    padding: 12px;
+  }
+
+  .image-preview-modal__panel {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
   }
 }
 </style>

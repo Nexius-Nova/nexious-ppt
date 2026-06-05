@@ -266,6 +266,9 @@ function normalizeAgentParameters(value?: Partial<AgentParameters> | null): Agen
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 const MAX_ACTIVITY_LOGS = 5000;
+const LAYOUT_GENERATION_CONCURRENCY = 3;
+const PROJECT_STATE_SYNC_INTERVAL_MS = 1800;
+const PROJECT_STATE_SYNC_PAGE_BATCH = 2;
 const TEXT_FILE_PATTERN = /\.(txt|md|markdown|csv|json|log)$/i;
 const DOCX_FILE_PATTERN = /\.docx$/i;
 const MAX_FILE_TEXT_CHARS = 120_000;
@@ -398,6 +401,7 @@ export const useAgentStore = defineStore('agent', () => {
   const configRecords = ref<Partial<Record<ConfigOptionKey, RunConfig>>>({});
   const isDataLoaded = ref(false);
   const recoveredActiveWorkflow = ref(false);
+  const waitingForImageRetry = ref(false);
   const workflowRunToken = ref(0);
   const runningProjectId = ref<string | null>(null);
   const activeGenerationJobId = ref<number | null>(null);
@@ -530,6 +534,7 @@ export const useAgentStore = defineStore('agent', () => {
       executorCursor: 0,
       workflowActive: false,
       lastActiveStep: null,
+      waitingForImageRetry: false,
     };
   }
 
@@ -574,6 +579,58 @@ export const useAgentStore = defineStore('agent', () => {
 
   function syncGeneratedSlidesFromImages() {
     generatedSlides.value = new Set(getReadyImageSlideIds());
+  }
+
+  function slidesRequiringGeneratedImages() {
+    const slides = designSpec.value
+      ? designSpec.value.outline
+      : outline.value.map((s, i) => ({
+          ...s,
+          pageNumber: i + 1,
+          visualPrompt: s.visualPrompt,
+          layout: s.layout || 'text-only',
+          rhythm: 'breathing' as const,
+        }));
+
+    return slides.filter((slide) => slideNeedsImage(slide));
+  }
+
+  function upsertGeneratedImage(image: GeneratedImage) {
+    const existingIdx = images.value.findIndex(img => img.slideId === image.slideId);
+    if (existingIdx >= 0) {
+      images.value[existingIdx] = image;
+    } else {
+      images.value = [...images.value, image];
+    }
+  }
+
+  function imageGenerationGate() {
+    const requiredSlides = slidesRequiringGeneratedImages();
+    const readySlideIds = new Set(getReadyImageSlideIds());
+    const missingSlides = requiredSlides.filter((slide) => !readySlideIds.has(slide.id));
+
+    return {
+      requiredSlides,
+      readySlideIds,
+      missingSlides,
+      readyCount: requiredSlides.filter((slide) => readySlideIds.has(slide.id)).length,
+      total: requiredSlides.length,
+      complete: missingSlides.length === 0,
+    };
+  }
+
+  function updateImageStepFromGate(statusWhenIncomplete: WorkflowStep['status'] = 'idle') {
+    const gate = imageGenerationGate();
+    generatedSlides.value = new Set(gate.readySlideIds);
+
+    if (gate.total === 0) {
+      setStepStatus('images', 'done', 100);
+      return gate;
+    }
+
+    const progress = Math.min(100, Math.round((gate.readyCount / gate.total) * 100));
+    setStepStatus('images', gate.complete ? 'done' : statusWhenIncomplete, gate.complete ? 100 : progress);
+    return gate;
   }
 
   async function readDocxText(file: File) {
@@ -631,6 +688,7 @@ export const useAgentStore = defineStore('agent', () => {
       executorCursor: executorCursor.value,
       workflowActive: isRunning.value || steps.value.some(step => step.status === 'running'),
       lastActiveStep: activeStep.value,
+      waitingForImageRetry: waitingForImageRetry.value,
     };
   }
 
@@ -662,6 +720,7 @@ export const useAgentStore = defineStore('agent', () => {
     const hadActiveWorkflow = Boolean(normalizedState.workflowActive || normalizedState.steps?.some(step => step.status === 'running'));
     recoveredActiveWorkflow.value = hadActiveWorkflow && !normalizedState.paused;
     isPaused.value = Boolean(normalizedState.paused || hadActiveWorkflow);
+    waitingForImageRetry.value = Boolean(normalizedState.waitingForImageRetry);
     pauseRequested.value = false;
     resumeStage.value = normalizedState.resumeStage || normalizedState.lastActiveStep || null;
     executorCursor.value = normalizedState.executorCursor || svgPages.value.length || 0;
@@ -728,6 +787,21 @@ export const useAgentStore = defineStore('agent', () => {
 
   async function syncToProjectNow() {
     await syncToProject();
+  }
+
+  let lastWorkflowSyncAt = 0;
+  let pendingWorkflowSyncCount = 0;
+  async function syncWorkflowProgress(force = false) {
+    pendingWorkflowSyncCount += 1;
+    const now = Date.now();
+    const shouldSync = force
+      || pendingWorkflowSyncCount >= PROJECT_STATE_SYNC_PAGE_BATCH
+      || now - lastWorkflowSyncAt >= PROJECT_STATE_SYNC_INTERVAL_MS;
+
+    if (!shouldSync) return;
+    pendingWorkflowSyncCount = 0;
+    lastWorkflowSyncAt = now;
+    await syncToProjectNow();
   }
 
   let inputSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1150,6 +1224,14 @@ export const useAgentStore = defineStore('agent', () => {
     currentGeneratingSlide.value = null;
   }
 
+  function releaseWorkflowForImageRetry() {
+    isRunning.value = false;
+    pauseRequested.value = false;
+    runningProjectId.value = null;
+    currentGeneratingSlide.value = null;
+    recoveredActiveWorkflow.value = false;
+  }
+
   function takeoverPendingLayoutPauseForRetry(pageNumber: number) {
     const shouldResumePausedLayoutAfterRetry = Boolean(
       isPaused.value &&
@@ -1190,6 +1272,16 @@ export const useAgentStore = defineStore('agent', () => {
 
   function sortSvgPagesByPageNumber() {
     svgPages.value = [...svgPages.value].sort((left, right) => left.pageNumber - right.pageNumber);
+  }
+
+  function upsertSvgPage(page: { pageNumber: number; svg: string; speakerNotes: string }) {
+    const existingPageIndex = svgPages.value.findIndex(item => item.pageNumber === page.pageNumber);
+    if (existingPageIndex >= 0) {
+      svgPages.value[existingPageIndex] = page;
+    } else {
+      svgPages.value.push(page);
+    }
+    sortSvgPagesByPageNumber();
   }
 
   function layoutPageCount() {
@@ -1820,11 +1912,13 @@ export const useAgentStore = defineStore('agent', () => {
 
   async function saveVersion(projectId: string, label?: string) {
     try {
+      const state = snapshotProjectState({ persistable: true });
       await versionApi.save(projectId, {
         label: label || `鐗堟湰 ${Date.now()}`,
-        outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
-        parameters: { ...parameters.value },
-        slideCount: outline.value.length
+        outline: state.outline,
+        parameters: state.parameters,
+        slideCount: state.designSpec?.outline?.length || state.outline.length || state.parameters.slideCount || 0,
+        state
       });
     } catch { /* ignore */ }
   }
@@ -1834,12 +1928,35 @@ export const useAgentStore = defineStore('agent', () => {
       const versions = await getVersions(projectId);
       const version = versions.find(v => v.id === versionId);
       if (!version) return false;
+      const currentProject = pptProjects.value.find(project => project.id === projectId);
+      if (!currentProject) return false;
+
+      await saveVersion(projectId, '切换前自动保存');
       saveHistory();
-      outline.value = version.outline.map(s => ({ ...s, bullets: [...s.bullets] }));
-      parameters.value = normalizeAgentParameters(version.parameters);
-      normalizeParametersAgainstConfig();
-      pushLog(`已回滚到版本：${version.label || versionId}`);
-      syncToProject();
+      if (version.state) {
+        const restoredState = normalizeProjectState({
+          ...version.state,
+          workflowActive: false,
+          paused: false,
+          resumeStage: null,
+        });
+        currentProject.state = restoredState;
+        currentProject.updatedAt = Date.now();
+        restoreProjectState(restoredState);
+      } else {
+        outline.value = version.outline.map(s => ({ ...s, bullets: [...s.bullets] }));
+        parameters.value = normalizeAgentParameters(version.parameters);
+        normalizeParametersAgainstConfig();
+        resetDownstreamSteps('outline');
+        currentProject.state = snapshotProjectState();
+        currentProject.updatedAt = Date.now();
+      }
+      clearPauseState();
+      recoveredActiveWorkflow.value = false;
+      isRunning.value = false;
+      currentGeneratingSlide.value = null;
+      pushLog(`已切换到版本：${version.label || versionId}`);
+      await syncToProject();
       return true;
     } catch { return false; }
   }
@@ -1977,123 +2094,123 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function runImages(ctx: RunContext = createRunContext()) {
-    if (!checkActivePpt() || !checkApiKeys()) return;
-    if (!isRunContextActive(ctx)) return;
+    if (!checkActivePpt() || !checkApiKeys()) return false;
+    if (!isRunContextActive(ctx)) return false;
 
     if (outline.value.length === 0) {
       await runStrategist(ctx);
     }
-    if (!isRunContextActive(ctx)) return;
-    if (outline.value.length === 0) return;
+    if (!isRunContextActive(ctx)) return false;
+    if (outline.value.length === 0) return false;
 
     activeStep.value = 'images';
     setStepStatus('images', 'running', 0);
     generatedSlides.value = new Set();
+    waitingForImageRetry.value = false;
     pushLog('开始按需生成图片。');
 
     try {
-      const slidesWithPrompt = designSpec.value
-        ? designSpec.value.outline
-        : outline.value.map((s, i) => ({
-            ...s,
-            pageNumber: i + 1,
-            visualPrompt: s.visualPrompt,
-            layout: s.layout || 'text-only',
-            rhythm: 'breathing' as const,
-          }));
-      const slidesRequiringImages = slidesWithPrompt.filter((slide) => slideNeedsImage(slide));
+      const slidesRequiringImages = slidesRequiringGeneratedImages();
 
       if (slidesRequiringImages.length === 0) {
         pushLog('本次不需要图片。');
         setStepStatus('images', 'done', 100);
         await syncToProjectNow();
-        return;
+        return true;
       }
 
-      const existingReadySlideIds = new Set(
-        images.value
-          .filter((image) => image.selected && !image.error && image.url)
-          .map((image) => image.slideId)
-      );
-      generatedSlides.value = new Set(existingReadySlideIds);
-      const pendingSlides = slidesRequiringImages.filter((slide) => !existingReadySlideIds.has(slide.id));
+      const existingGate = updateImageStepFromGate('running');
+      const pendingSlides = slidesRequiringImages.filter((slide) => !existingGate.readySlideIds.has(slide.id));
 
       if (pendingSlides.length === 0) {
-        generatedSlides.value = new Set(existingReadySlideIds);
         pushLog('图片已完成。');
         setStepStatus('images', 'done', 100);
         await syncToProjectNow();
-        return;
+        return true;
       }
 
-      await generateSlideImages(
-        pendingSlides.map(s => ({
-          id: s.id,
-          title: s.title,
-          bullets: [...s.bullets],
-          speakerNotes: s.speakerNotes || '',
-          visualPrompt: s.visualPrompt || [s.title, ...(s.bullets || [])].filter(Boolean).join('，'),
-        })),
-        parameters.value.imageStyle,
-        {
-          onStart: (slideId, message) => {
-            if (!isRunContextActive(ctx)) return;
-            currentGeneratingSlide.value = slideId;
-            pushLog(message);
-          },
-          onComplete: (slideId, image) => {
-            if (!isRunContextActive(ctx)) return;
-            if (slideId === '__progress__') {
-              const pendingProgress = (image as any)._progress || 0;
-              const completedPending = Math.round((pendingProgress / 100) * pendingSlides.length);
-              const progress = Math.round(((existingReadySlideIds.size + completedPending) / slidesRequiringImages.length) * 100);
-              setStepStatus('images', 'running', progress);
-              return;
-            }
-            generatedSlides.value.add(slideId);
-            currentGeneratingSlide.value = null;
+      const toImageRequest = (s: any) => ({
+        id: s.id,
+        title: s.title,
+        bullets: [...(s.bullets || [])],
+        speakerNotes: s.speakerNotes || '',
+        visualPrompt: s.visualPrompt || [s.title, ...(s.bullets || [])].filter(Boolean).join('，'),
+      });
 
-            if (image.url || image.error) {
-              const existingIdx = images.value.findIndex(img => img.slideId === slideId);
-              if (existingIdx >= 0) {
-                images.value[existingIdx] = image;
-              } else {
-                images.value = [...images.value, image];
+      const runImageBatch = async (batchSlides: typeof pendingSlides, attemptLabel: 'initial' | 'retry') => {
+        const baseReadyCount = imageGenerationGate().readyCount;
+        await generateSlideImages(
+          batchSlides.map(toImageRequest),
+          parameters.value.imageStyle,
+          {
+            onStart: (slideId, message) => {
+              if (!isRunContextActive(ctx)) return;
+              currentGeneratingSlide.value = slideId;
+              pushLog(message);
+            },
+            onComplete: (slideId, image) => {
+              if (!isRunContextActive(ctx)) return;
+              if (slideId === '__progress__') {
+                const pendingProgress = (image as any)._progress || 0;
+                const completedPending = Math.round((pendingProgress / 100) * batchSlides.length);
+                const progress = Math.round(((baseReadyCount + completedPending) / slidesRequiringImages.length) * 100);
+                setStepStatus('images', 'running', Math.min(99, progress));
+                return;
               }
-            }
+              currentGeneratingSlide.value = null;
 
-            const readyCount = images.value.filter((img) => img.selected && !img.error && img.url).length;
-            const progress = Math.round((readyCount / slidesRequiringImages.length) * 100);
-            setStepStatus('images', 'running', progress);
-            pushLog(image.error
-              ? `图片未生成：${image.title}，继续生成页面。`
-              : `图片完成：${image.title}，${Math.min(readyCount, slidesRequiringImages.length)}/${slidesRequiringImages.length}`);
-          },
-          onError: (_slideId, message) => {
-            if (!isRunContextActive(ctx)) return;
-            currentGeneratingSlide.value = null;
-            pushLog(`图片未生成：${message}`);
-          },
-          onAllComplete: () => {
-            if (!isRunContextActive(ctx)) return;
-            const readyCount = images.value.filter((img) => img.selected && !img.error && img.url).length;
-            generatedSlides.value = new Set(
-              images.value
-                .filter((image) => image.selected && !image.error && image.url)
-                .map((image) => image.slideId)
-            );
-            pushLog(readyCount > 0
-              ? `图片生成完成，共 ${readyCount} 张。`
-              : '没有生成可用图片，页面会使用 SVG 图示。');
-            setStepStatus('images', 'done', 100);
-            syncToProject();
+              if (image.url || image.error) {
+                upsertGeneratedImage(image);
+              }
+
+              const gate = updateImageStepFromGate('running');
+              pushLog(image.error
+                ? `图片未生成：${image.title}${attemptLabel === 'initial' ? '，准备自动重试。' : '，请手动重试。'}`
+                : `图片完成：${image.title}，${Math.min(gate.readyCount, gate.total)}/${gate.total}`);
+            },
+            onError: (_slideId, message) => {
+              if (!isRunContextActive(ctx)) return;
+              currentGeneratingSlide.value = null;
+              pushLog(`图片未生成：${message}`);
+            },
+            onAllComplete: () => {
+              if (!isRunContextActive(ctx)) return;
+              updateImageStepFromGate('running');
+              syncToProject();
+            }
           }
-        }
-      );
-      if (!isRunContextActive(ctx)) return;
+        );
+      };
+
+      await runImageBatch(pendingSlides, 'initial');
+      if (!isRunContextActive(ctx)) return false;
+
+      let gate = updateImageStepFromGate('running');
+      if (!gate.complete) {
+        const failedTitles = gate.missingSlides.map((slide) => slide.title).join('、');
+        pushLog(`图片生成未全部成功，正在自动重试：${failedTitles}`);
+        await runImageBatch(gate.missingSlides, 'retry');
+        if (!isRunContextActive(ctx)) return false;
+        gate = updateImageStepFromGate('idle');
+      }
+
+      if (!gate.complete) {
+        const failedTitles = gate.missingSlides.map((slide) => slide.title).join('、');
+        pushLog(`图片自动重试后仍未完成：${failedTitles}。请手动重试成功后再继续。`);
+        activeStep.value = 'images';
+        currentGeneratingSlide.value = null;
+        waitingForImageRetry.value = true;
+        await syncToProjectNow();
+        return false;
+      }
+
+      pushLog(`图片生成完成，共 ${gate.readyCount} 张。`);
+      setStepStatus('images', 'done', 100);
+      if (!isRunContextActive(ctx)) return false;
       await syncToProjectNow();
+      return true;
     } catch (error) {
-      if (!isRunContextActive(ctx)) return;
+      if (!isRunContextActive(ctx)) return false;
       setStepStatus('images', 'idle', 0);
       const errMsg = error instanceof Error ? error.message : '未知错误';
       pushLog(`图片生成失败：${errMsg}`);
@@ -2108,6 +2225,8 @@ export const useAgentStore = defineStore('agent', () => {
 
     const sourceSlide = (designSpec.value?.outline || outline.value).find((slide: any) => slide.id === slideId) as any;
     if (!sourceSlide) return;
+    const shouldResumeWorkflowWhenReady = waitingForImageRetry.value && activeStep.value === 'images';
+    waitingForImageRetry.value = shouldResumeWorkflowWhenReady;
 
     activeStep.value = 'images';
     currentGeneratingSlide.value = slideId;
@@ -2131,15 +2250,8 @@ export const useAgentStore = defineStore('agent', () => {
           onComplete: (id, image) => {
             if (!isRunContextActive(ctx)) return;
             if (id === '__progress__') return;
-            const existingIdx = images.value.findIndex(img => img.slideId === id);
-            if (existingIdx >= 0) {
-              images.value[existingIdx] = image;
-            } else {
-              images.value = [...images.value, image];
-            }
-            if (!image.error && image.url) {
-              generatedSlides.value.add(id);
-            }
+            upsertGeneratedImage(image);
+            updateImageStepFromGate('idle');
             pushLog(image.error
               ? `图片未生成：${image.title}`
               : `图片完成：${image.title}`);
@@ -2161,7 +2273,15 @@ export const useAgentStore = defineStore('agent', () => {
       } else {
         pushLog(`图片重试成功：${sourceSlide.title}`);
       }
-      syncToProject();
+      const gate = updateImageStepFromGate('idle');
+      await syncToProjectNow();
+
+      if (shouldResumeWorkflowWhenReady && gate.complete) {
+        waitingForImageRetry.value = false;
+        currentGeneratingSlide.value = null;
+        pushLog('图片已全部生成，继续生成页面。');
+        await runFullWorkflow({ resume: true });
+      }
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
@@ -2293,15 +2413,25 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     try {
-      const totalPages = designSpec.value.outline.length;
+      const spec = designSpec.value;
+      if (!spec) return;
+      const totalPages = spec.outline.length;
       const startIndex = options.resume
         ? Math.min(Math.max(executorCursor.value || svgPages.value.length, 0), totalPages)
         : 0;
 
-      for (let i = startIndex; i < totalPages; i++) {
-        if (!isRunContextActive(ctx)) return;
-        const slide = designSpec.value.outline[i];
-        const progress = Math.round(((i) / totalPages) * 100);
+      let nextIndex = startIndex;
+      let completedPages = startIndex;
+      let stopLayoutWorkers = false;
+
+      async function runNextPage() {
+        if (!isRunContextActive(ctx) || stopLayoutWorkers) return;
+        const i = nextIndex;
+        nextIndex += 1;
+        if (i >= totalPages) return;
+
+        const slide = spec.outline[i];
+        const progress = Math.round((completedPages / totalPages) * 100);
         setStepStatus('layout', 'running', progress);
         pushLog(`正在生成第 ${slide.pageNumber} 页：${slide.title}`);
 
@@ -2309,44 +2439,46 @@ export const useAgentStore = defineStore('agent', () => {
           const svg = await generateSlideSvg(slide, ctx);
           if (!isRunContextActive(ctx)) return;
 
-          const page = {
+          upsertSvgPage({
             pageNumber: slide.pageNumber,
             svg,
             speakerNotes: slide.speakerNotes,
-          };
-          const existingPageIndex = svgPages.value.findIndex(item => item.pageNumber === page.pageNumber);
-          if (existingPageIndex >= 0) {
-            svgPages.value[existingPageIndex] = page;
-          } else {
-            svgPages.value.push(page);
-          }
+          });
 
           pushLog(`第 ${slide.pageNumber} 页生成完成。`);
         } catch (pageError) {
           const errMsg = pageError instanceof Error ? pageError.message : '未知错误';
           pushLog(`第 ${slide.pageNumber} 页生成失败（${errMsg}），已标记待重试。`);
-          const page = {
+          upsertSvgPage({
             pageNumber: slide.pageNumber,
             svg: buildFallbackSvg(slide),
             speakerNotes: slide.speakerNotes,
-          };
-          const existingPageIndex = svgPages.value.findIndex(item => item.pageNumber === page.pageNumber);
-          if (existingPageIndex >= 0) {
-            svgPages.value[existingPageIndex] = page;
-          } else {
-            svgPages.value.push(page);
-          }
+          });
         }
 
-        executorCursor.value = i + 1;
-        await syncToProjectNow();
-        if (shouldPauseAt('layout')) return;
+        completedPages += 1;
+        executorCursor.value = completedLeadingLayoutPages(totalPages);
+        setStepStatus('layout', 'running', Math.min(99, Math.round((completedPages / totalPages) * 100)));
+        await syncWorkflowProgress(false);
+        if (shouldPauseAt('layout')) {
+          stopLayoutWorkers = true;
+          return;
+        }
+        await runNextPage();
+      }
+
+      const workerCount = Math.min(LAYOUT_GENERATION_CONCURRENCY, Math.max(1, totalPages - startIndex));
+      await Promise.all(Array.from({ length: workerCount }, () => runNextPage()));
+      if (!isRunContextActive(ctx)) return;
+      if (shouldPauseAt('layout')) {
+        await syncWorkflowProgress(true);
+        return;
       }
 
       executorCursor.value = totalPages;
       setStepStatus('layout', 'done', 100);
       pushLog('页面生成完成。');
-      await syncToProjectNow();
+      await syncWorkflowProgress(true);
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
       setStepStatus('layout', 'idle', 0);
@@ -2436,6 +2568,15 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function runLayout() {
+    const imageGate = updateImageStepFromGate('idle');
+    if (imageGate.total > 0 && !imageGate.complete) {
+      activeStep.value = 'images';
+      waitingForImageRetry.value = true;
+      pushLog('仍有图片未生成成功，请先完成图片后再生成页面。');
+      await syncToProjectNow();
+      return;
+    }
+
     const totalPages = designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount;
     const hasPartialPages = svgPages.value.length > 0 && svgPages.value.length < totalPages;
     await runExecutor({ resume: hasPartialPages || executorCursor.value > 0 });
@@ -2587,19 +2728,47 @@ export const useAgentStore = defineStore('agent', () => {
         const apiKeyStore = useApiKeyStore();
         if (apiKeyStore.isImageModelConfigured) {
           try {
-            await runImages(ctx);
+            const imageReady = await runImages(ctx);
             if (!isRunContextActive(ctx)) return;
+            if (!imageReady) {
+              waitingForImageRetry.value = true;
+              releaseWorkflowForImageRetry();
+              await reportGenerationJob('images-waiting-retry', steps.value.find((step) => step.id === 'images')?.progress || 0, 'running');
+              return;
+            }
             if (shouldPauseAt('layout')) return;
           } catch (imgError) {
             if (!isRunContextActive(ctx)) return;
-            pushLog(`图片生成失败（${imgError instanceof Error ? imgError.message : '未知错误'}），跳过图片继续生成页面。`);
+            waitingForImageRetry.value = true;
+            activeStep.value = 'images';
+            updateImageStepFromGate('idle');
+            pushLog(`图片生成失败（${imgError instanceof Error ? imgError.message : '未知错误'}），请手动重试成功后继续。`);
+            releaseWorkflowForImageRetry();
+            await reportGenerationJob('images-waiting-retry', steps.value.find((step) => step.id === 'images')?.progress || 0, 'running');
+            return;
           }
         } else {
-          pushLog('图像模型未配置，跳过图片生成。');
-          setStepStatus('images', 'done', 100);
+          waitingForImageRetry.value = true;
+          activeStep.value = 'images';
+          setStepStatus('images', 'idle', 0);
+          pushLog('图像模型未配置，无法生成所需图片。请先配置图像模型后重试。');
+          releaseWorkflowForImageRetry();
+          await reportGenerationJob('images-waiting-config', 0, 'running');
+          return;
         }
       } else {
-        pushLog('图片已完成，跳过图片生成。');
+        const imageGate = updateImageStepFromGate('idle');
+        if (imageGate.complete) {
+          waitingForImageRetry.value = false;
+          pushLog('图片已完成，跳过图片生成。');
+        } else {
+          waitingForImageRetry.value = true;
+          activeStep.value = 'images';
+          pushLog('仍有图片未生成成功，请手动重试成功后继续。');
+          releaseWorkflowForImageRetry();
+          await reportGenerationJob('images-waiting-retry', imageGate.total ? Math.round((imageGate.readyCount / imageGate.total) * 100) : 0, 'running');
+          return;
+        }
       }
 
       if (!isRunContextActive(ctx)) return;

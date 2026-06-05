@@ -544,7 +544,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  padding: 16px;
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
 }
 
@@ -728,5 +729,46 @@ onMounted(() => {
 
 .char-count--error {
   color: var(--color-danger);
+}
+
+@media (max-width: 720px) {
+  .skill-page {
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .page-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .page-header__stats,
+  .page-header :deep(.ui-button) {
+    width: 100%;
+  }
+
+  .skill-card__header {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .skill-card__actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .modal-overlay {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .modal {
+    max-width: none;
+    max-height: calc(100dvh - 24px);
+  }
+
+  .modal__footer {
+    flex-direction: column-reverse;
+  }
 }
 </style>

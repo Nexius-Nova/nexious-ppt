@@ -14,7 +14,7 @@
     "sidebar main";
   gap: 0;
   width: 100vw;
-  height: 100vh;
+  height: 100dvh;
   background: var(--color-bg);
   overflow: hidden;
   transition: grid-template-columns var(--transition-fast);
@@ -29,5 +29,27 @@
   grid-template-areas:
     "header"
     "main";
+}
+
+@media (max-width: 860px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas:
+      "header"
+      "main"
+      "sidebar";
+  }
+
+  .app-shell--nav-collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .app-shell--workflow-focus {
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      "header"
+      "main";
+  }
 }
 </style>

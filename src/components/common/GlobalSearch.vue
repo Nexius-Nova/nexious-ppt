@@ -275,7 +275,7 @@ watch(() => props.show, (val) => {
   align-items: flex-start;
   justify-content: center;
   padding-top: 12vh;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
 }
 
@@ -288,7 +288,7 @@ watch(() => props.show, (val) => {
   border: 1px solid var(--color-border);
   border-radius: 14px;
   background: var(--color-surface);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
@@ -457,5 +457,18 @@ watch(() => props.show, (val) => {
 .search-fade-enter-from .search-modal,
 .search-fade-leave-to .search-modal {
   transform: scale(0.96) translateY(-10px);
+}
+
+@media (max-width: 640px) {
+  .search-overlay {
+    align-items: stretch;
+    padding: 12px;
+    padding-top: 12px;
+  }
+
+  .search-modal {
+    max-width: none;
+    max-height: calc(100dvh - 24px);
+  }
 }
 </style>

@@ -64,7 +64,7 @@ function navigateTo(routePath: string) {
   <nav class="side-nav" :class="{ 'side-nav--collapsed': collapsed }" aria-label="主导航">
     <div class="side-nav__brand">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-        <rect width="24" height="24" rx="6" fill="#ef2d2d" />
+        <rect width="24" height="24" rx="6" fill="var(--color-accent)" />
         <path d="M7 12L9.5 9.5L12 12L14.5 9.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         <path d="M7 15L9.5 12.5L12 15L14.5 12.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.6" />
       </svg>
@@ -215,5 +215,79 @@ function navigateTo(routePath: string) {
 .side-nav--collapsed .side-nav__item {
   justify-content: center;
   padding: 0;
+}
+
+@media (max-width: 860px) {
+  .side-nav {
+    z-index: 40;
+    flex-direction: row;
+    align-items: center;
+    height: auto;
+    min-height: 64px;
+    border-top: 1px solid var(--color-border);
+    border-right: 0;
+    background: var(--color-surface);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .side-nav__brand {
+    flex: 0 0 auto;
+    gap: 8px;
+    padding: 10px 12px;
+    border-right: 1px solid var(--color-border);
+    border-bottom: 0;
+  }
+
+  .side-nav__brand span {
+    display: none;
+  }
+
+  .side-nav__collapse {
+    display: none;
+  }
+
+  .side-nav__group {
+    display: contents;
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .side-nav__group-label {
+    display: none;
+  }
+
+  .side-nav__item {
+    flex: 0 0 auto;
+    justify-content: center;
+    min-width: 74px;
+    min-height: 52px;
+    margin: 0;
+    padding: 6px 8px;
+    flex-direction: column;
+    gap: 4px;
+    border-radius: 0;
+    font-size: 11px;
+  }
+
+  .side-nav__item span {
+    display: block;
+    max-width: 68px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .side-nav--collapsed .side-nav__brand {
+    padding: 10px 12px;
+  }
+
+  .side-nav--collapsed .side-nav__brand span {
+    display: none;
+  }
+
+  .side-nav--collapsed .side-nav__item span {
+    display: block;
+  }
 }
 </style>

@@ -38,7 +38,6 @@ const fileTypeIcons: Record<string, any> = {
 };
 
 const previewingTemplateSlide = ref<{ slide: TemplatePreviewSlide; index: number } | null>(null);
-const previewingPromptImage = ref<PromptDefinition | null>(null);
 
 const parameterGroups: Array<{ key: ConfigOptionKey; label: string; icon: any }> = [
   { key: 'slideCount', label: '页数', icon: Layers },
@@ -178,19 +177,6 @@ function handleFileChange(event: Event) {
           />
         </UiField>
         <div v-if="selectedPrompt" class="prompt-selector__preview">
-          <button
-            v-if="selectedPrompt.previewUrl"
-            type="button"
-            class="prompt-selector__image"
-            title="预览提示词效果图"
-            @click="previewingPromptImage = selectedPrompt"
-          >
-            <img :src="selectedPrompt.previewUrl" :alt="`${selectedPrompt.title} 效果图`" />
-          </button>
-          <div v-else class="prompt-selector__image prompt-selector__image--empty" aria-hidden="true">
-            <ImageIcon :size="26" />
-            <span>暂无效果图</span>
-          </div>
           <div class="prompt-selector__preview-copy">
             <strong>{{ selectedPrompt.title }}</strong>
             <span>{{ compactText(selectedPrompt.content || selectedPrompt.scene || '当前提示词将参与本次生成') }}</span>
@@ -312,28 +298,6 @@ function handleFileChange(event: Event) {
         </div>
       </div>
 
-      <div
-        v-if="previewingPromptImage"
-        class="template-preview-modal"
-        @click.self="previewingPromptImage = null"
-      >
-        <div class="template-preview-modal__panel">
-          <header class="template-preview-modal__header">
-            <div>
-              <h3>{{ previewingPromptImage.title }}</h3>
-              <span>{{ previewingPromptImage.scene || '提示词效果图' }}</span>
-            </div>
-            <button type="button" class="template-preview-modal__close" title="关闭" @click="previewingPromptImage = null">
-              <X :size="18" />
-            </button>
-          </header>
-          <div class="template-preview-modal__body">
-            <div class="template-preview-modal__image">
-              <img :src="previewingPromptImage.previewUrl" :alt="`${previewingPromptImage.title} 效果图`" />
-            </div>
-          </div>
-        </div>
-      </div>
     </Teleport>
   </UiCard>
 </template>
@@ -402,38 +366,6 @@ function handleFileChange(event: Event) {
 .prompt-selector__hint {
   color: var(--color-muted);
   font-size: 12px;
-}
-
-.prompt-selector__image {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  min-height: 154px;
-  aspect-ratio: 16 / 9;
-  overflow: hidden;
-  padding: 0;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-panel);
-  cursor: zoom-in;
-}
-
-.prompt-selector__image:hover {
-  border-color: var(--color-border-strong);
-}
-
-.prompt-selector__image--empty {
-  gap: 8px;
-  color: var(--color-muted);
-  font-size: 12px;
-  cursor: default;
-}
-
-.prompt-selector__image img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
 }
 
 .template-selector__hint,
@@ -617,7 +549,6 @@ function handleFileChange(event: Event) {
 }
 
 .template-preview-modal__canvas,
-.template-preview-modal__image,
 .template-preview-modal__fallback {
   width: min(100%, 1040px);
   aspect-ratio: 16 / 9;
@@ -632,14 +563,6 @@ function handleFileChange(event: Event) {
   display: block;
   width: 100%;
   height: 100%;
-}
-
-.template-preview-modal__image img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  background: var(--color-panel);
 }
 
 .template-preview-modal__fallback {

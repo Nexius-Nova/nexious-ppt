@@ -108,6 +108,7 @@ export interface PptProjectState {
   executorCursor?: number;
   workflowActive?: boolean;
   lastActiveStep?: WorkflowStepId | null;
+  waitingForImageRetry?: boolean;
 }
 
 export interface PptProject {
@@ -191,6 +192,7 @@ export interface VersionSnapshot {
   outline: SlideOutline[];
   parameters: AgentParameters;
   slideCount: number;
+  state?: PptProjectState | null;
 }
 
 export type TextModelProvider =

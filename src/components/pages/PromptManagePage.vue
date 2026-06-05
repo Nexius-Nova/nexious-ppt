@@ -5,6 +5,7 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
 import UiField from '@/components/ui/UiField.vue';
+import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { promptApi, type Prompt } from '@/services/api';
 
@@ -15,8 +16,10 @@ const loading = ref(false);
 const searchQuery = ref('');
 const showModal = ref(false);
 const showPreviewModal = ref(false);
+const showDeleteModal = ref(false);
 const previewPrompt = ref<Prompt | null>(null);
 const editingPrompt = ref<Prompt | null>(null);
+const promptToDelete = ref<Prompt | null>(null);
 const previewFileInput = ref<HTMLInputElement | null>(null);
 const uploadingPreview = ref(false);
 const formData = ref({
@@ -171,17 +174,34 @@ async function savePrompt() {
   }
 }
 
-async function deletePrompt(prompt: Prompt) {
-  if (!confirm(`确定要删除提示词「${prompt.title}」吗？`)) return;
-  
+function deletePrompt(prompt: Prompt) {
+  promptToDelete.value = prompt;
+  showDeleteModal.value = true;
+}
+
+function closeDeleteModal(force = false) {
+  if (loading.value && !force) return;
+  showDeleteModal.value = false;
+  promptToDelete.value = null;
+}
+
+async function confirmDeletePrompt() {
+  if (!promptToDelete.value) return;
+
+  loading.value = true;
   try {
-    const response = await promptApi.delete(prompt.id);
+    const response = await promptApi.delete(promptToDelete.value.id);
     if (response.success) {
       toastStore.success('删除成功', '提示词已删除');
+      closeDeleteModal(true);
       await fetchPrompts();
+    } else {
+      toastStore.error('删除失败', response.message || '未知错误');
     }
   } catch (error) {
     toastStore.error('删除失败', error instanceof Error ? error.message : '未知错误');
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -368,9 +388,6 @@ onMounted(() => {
             <button class="modal__close" @click="showPreviewModal = false">×</button>
           </div>
           <div class="modal__body modal__body--prompt-preview">
-            <div v-if="previewPrompt?.preview_url" class="prompt-preview-hero">
-              <img :src="resolvePreviewUrl(previewPrompt.preview_url)" :alt="`${previewPrompt.title} 效果图`" />
-            </div>
             <div class="preview-section">
               <div class="preview-label">标题</div>
               <div class="preview-value preview-value--title">{{ previewPrompt?.title }}</div>
@@ -397,6 +414,14 @@ onMounted(() => {
         </div>
       </div>
     </Teleport>
+
+    <DeleteConfirmModal
+      :open="showDeleteModal"
+      :item-name="promptToDelete?.title || ''"
+      :loading="loading"
+      @close="closeDeleteModal"
+      @confirm="confirmDeletePrompt"
+    />
   </div>
 </template>
 
@@ -528,8 +553,7 @@ onMounted(() => {
 }
 
 .prompt-card__effect,
-.prompt-effect-preview,
-.prompt-preview-hero {
+.prompt-effect-preview {
   position: relative;
   overflow: hidden;
   border: 1px solid var(--color-border);
@@ -541,21 +565,13 @@ onMounted(() => {
   aspect-ratio: 16 / 9;
 }
 
-.prompt-effect-preview,
-.prompt-preview-hero {
+.prompt-effect-preview {
   aspect-ratio: 16 / 9;
   max-height: 260px;
 }
 
-.prompt-preview-hero {
-  flex: 0 0 auto;
-  height: clamp(180px, 26vh, 260px);
-  max-height: none;
-}
-
 .prompt-card__effect img,
-.prompt-effect-preview img,
-.prompt-preview-hero img {
+.prompt-effect-preview img {
   display: block;
   width: 100%;
   height: 100%;
@@ -682,7 +698,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(15, 23, 42, 0.42);
+  background: var(--color-overlay);
 }
 
 .modal {

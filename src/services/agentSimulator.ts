@@ -68,15 +68,51 @@ export async function generateSlideImages(
 ): Promise<GeneratedImage[]> {
   const toastStore = useToastStore();
   const images: GeneratedImage[] = [];
+  const imageCache = new Map<string, GeneratedImage>();
+  const pendingImageRequests = new Map<string, Promise<GeneratedImage>>();
   const total = outline.length;
   const safeConcurrency = Math.max(1, Math.min(3, Math.floor(concurrency) || 1));
   let completed = 0;
 
   async function processSlide(slide: SlideOutline): Promise<GeneratedImage> {
+    const cacheKey = `${style}::${slide.visualPrompt || slide.title}`.trim().toLowerCase();
+    const cached = imageCache.get(cacheKey);
+    if (cached?.url && !cached.error) {
+      const reusedImage: GeneratedImage = {
+        ...cached,
+        id: `${slide.id}-image-1`,
+        slideId: slide.id,
+        title: slide.title,
+        prompt: slide.visualPrompt,
+        selected: true,
+      };
+      completed++;
+      setStepProgress(Math.round((completed / total) * 100));
+      callbacks?.onComplete?.(slide.id, reusedImage);
+      return reusedImage;
+    }
+
+    const pendingImage = pendingImageRequests.get(cacheKey);
+    if (pendingImage) {
+      const sharedImage = await pendingImage;
+      const reusedImage: GeneratedImage = {
+        ...sharedImage,
+        id: `${slide.id}-image-1`,
+        slideId: slide.id,
+        title: slide.title,
+        prompt: slide.visualPrompt,
+        selected: true,
+      };
+      completed++;
+      setStepProgress(Math.round((completed / total) * 100));
+      callbacks?.onComplete?.(slide.id, reusedImage);
+      return reusedImage;
+    }
+
     try {
       callbacks?.onStart?.(slide.id, `正在为"${slide.title}"生成图片...`);
 
-      const image = await aiApi.generateImageStream(
+      const imagePromise = aiApi.generateImageStream(
         {
           slideId: slide.id,
           title: slide.title,
@@ -96,12 +132,16 @@ export async function generateSlideImages(
           }
         }
       );
+      pendingImageRequests.set(cacheKey, imagePromise);
+      const image = await imagePromise;
+      pendingImageRequests.delete(cacheKey);
 
       completed++;
       const progress = Math.round((completed / total) * 100);
       setStepProgress(progress);
 
       if (!image.error && image.url) {
+        imageCache.set(cacheKey, image);
         toastStore.success('图片生成完成', slide.title);
       } else if (image.error) {
         callbacks?.onComplete?.(slide.id, image);
@@ -109,6 +149,7 @@ export async function generateSlideImages(
 
       return image;
     } catch (error) {
+      pendingImageRequests.delete(cacheKey);
       console.warn(`生成图片失败: ${slide.id}`, error);
       completed++;
       const progress = Math.round((completed / total) * 100);
@@ -162,7 +203,7 @@ export async function generateSlideImages(
   } else if (successCount > 0) {
     toastStore.warning('部分图片生成失败', `成功 ${successCount}/${totalCount} 张`);
   } else {
-    toastStore.warning('图片未生成', '页面会使用 SVG 图示继续生成。');
+    toastStore.warning('图片未生成', '请手动重试成功后继续生成页面。');
   }
 
   return images;

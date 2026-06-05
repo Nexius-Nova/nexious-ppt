@@ -3,8 +3,12 @@ import { Resvg } from '@resvg/resvg-js';
 import { buildSpecLock, type SpecLock } from './spec.js';
 import pptxgenModule from 'pptxgenjs';
 import JSZip from 'jszip';
+import { createHash } from 'node:crypto';
 
 const PptxGen = (pptxgenModule as any).default || pptxgenModule;
+const MAX_EXPORT_CACHE_ITEMS = 120;
+const remoteImageCache = new Map<string, string>();
+const pngRenderCache = new Map<string, Buffer>();
 
 type SvgAttrs = Record<string, string>;
 type SvgStyle = Record<string, string>;
@@ -26,6 +30,18 @@ type SvgContext = {
 };
 
 const MIN_PPT_SIZE = 0.001;
+
+function hashText(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function rememberCacheValue<T>(cache: Map<string, T>, key: string, value: T) {
+  if (cache.size >= MAX_EXPORT_CACHE_ITEMS && !cache.has(key)) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey) cache.delete(firstKey);
+  }
+  cache.set(key, value);
+}
 
 function finiteNumber(value: number): number | undefined {
   return Number.isFinite(value) ? value : undefined;
@@ -73,12 +89,19 @@ async function inlineRemoteImages(svg: string): Promise<string> {
   for (const match of matches) {
     try {
       const fetchUrl = match.href.startsWith('/') ? `${publicBaseUrl}${match.href}` : match.href;
+      const cachedDataUrl = remoteImageCache.get(fetchUrl);
+      if (cachedDataUrl) {
+        result = result.split(match.href).join(cachedDataUrl);
+        continue;
+      }
+
       const resp = await fetch(fetchUrl, { signal: AbortSignal.timeout(10000) });
       if (!resp.ok) continue;
       const contentType = resp.headers.get('content-type') || 'image/png';
       const buf = Buffer.from(await resp.arrayBuffer());
       const b64 = buf.toString('base64');
       const dataUrl = `data:${contentType};base64,${b64}`;
+      rememberCacheValue(remoteImageCache, fetchUrl, dataUrl);
       result = result.split(match.href).join(dataUrl);
     } catch {
       result = result.replace(match.full, '');
@@ -585,12 +608,20 @@ export async function renderSvgToPngBuffer(svg: string, width: number, spec?: De
     throw new Error('SVG 内容为空');
   }
 
+  const renderCacheKey = `${width}:${spec?.canvas.width || 0}x${spec?.canvas.height || 0}:${hashText(processedSvg)}`;
+  const cachedPng = pngRenderCache.get(renderCacheKey);
+  if (cachedPng) {
+    return Buffer.from(cachedPng);
+  }
+
   const resvg = new Resvg(processedSvg, {
     fitTo: { mode: 'width', value: width },
     font: { fontFiles: [], defaultFontFamily: 'sans-serif' },
   });
 
-  return Buffer.from(resvg.render().asPng());
+  const pngBuffer = Buffer.from(resvg.render().asPng());
+  rememberCacheValue(pngRenderCache, renderCacheKey, pngBuffer);
+  return Buffer.from(pngBuffer);
 }
 
 export async function convertSvgPagesToPptx(

@@ -9,13 +9,13 @@ html {
 
 body {
   margin: 0;
-  min-width: 1280px;
+  min-width: 320px;
   min-height: 100vh;
   overflow: hidden;
   background: var(--color-bg);
   color: var(--color-text);
   font-family: var(--font-sans);
-  letter-spacing: -0.015em;
+  letter-spacing: 0;
   line-height: 1.5;
 }
 
@@ -66,14 +66,14 @@ img {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #d7dbe2;
+  background: var(--color-border-strong);
   border: 2px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #b4bcc7;
+  background: var(--color-muted);
   background-clip: padding-box;
 }
 

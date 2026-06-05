@@ -34,6 +34,8 @@ type ProjectDisplay = Project & {
   displayProgress: number;
   stageLabel: string;
   detailLabel: string;
+  previewSvg: string;
+  previewPageNumber: number | null;
   imageReady: number;
   imageTotal: number;
   pageReady: number;
@@ -175,9 +177,18 @@ function countReadyImages(state: PptProjectState | null) {
   return (state?.images || []).filter((image) => image.selected && !image.error && Boolean(image.url)).length;
 }
 
+function getProjectPreviewPage(state: PptProjectState | null) {
+  const pages = (state?.svgPages || [])
+    .filter((page) => page.svg?.trim())
+    .sort((left, right) => (left.pageNumber || 0) - (right.pageNumber || 0));
+
+  return pages[0] || null;
+}
+
 function deriveProjectDisplay(project: Project): ProjectDisplay {
   const state = parseProjectState(project);
   const slides = getSlidesForProgress(state);
+  const previewPage = getProjectPreviewPage(state);
   const imageTotal = slides.filter((slide: any) => slideNeedsImage(slide)).length;
   const imageReady = countReadyImages(state);
   const pageTotal = state?.designSpec?.outline?.length || state?.outline?.length || state?.parameters?.slideCount || 0;
@@ -226,6 +237,8 @@ function deriveProjectDisplay(project: Project): ProjectDisplay {
     displayProgress: Math.max(0, Math.min(100, progress)),
     stageLabel,
     detailLabel: detailParts.length ? detailParts.join(' · ') : '尚未生成页面',
+    previewSvg: previewPage?.svg || '',
+    previewPageNumber: previewPage?.pageNumber || null,
     imageReady,
     imageTotal,
     pageReady,
@@ -541,6 +554,15 @@ onMounted(() => {
           </div>
         </div>
 
+        <div v-if="project.previewSvg" class="project-card__preview">
+          <div v-if="project.previewSvg" class="project-card__preview-canvas" v-html="project.previewSvg" />
+          <div v-else class="project-card__preview-empty">
+            <FileText :size="18" />
+            <span>暂无预览</span>
+          </div>
+          <span v-if="project.previewPageNumber" class="project-card__preview-page">P{{ project.previewPageNumber }}</span>
+        </div>
+
         <div class="project-card__body">
           <h3 class="project-card__title">{{ project.title }}</h3>
           <p v-if="project.topic" class="project-card__topic">{{ project.topic }}</p>
@@ -680,23 +702,23 @@ onMounted(() => {
 }
 
 .stat-card--total .stat-card__icon {
-  background: #2563eb;
-  color: white;
+  background: var(--color-info);
+  color: var(--color-inverse);
 }
 
 .stat-card--draft .stat-card__icon {
-  background: #64748b;
-  color: white;
+  background: var(--color-muted);
+  color: var(--color-inverse);
 }
 
 .stat-card--generating .stat-card__icon {
-  background: #d97706;
-  color: white;
+  background: var(--color-warning);
+  color: var(--color-inverse);
 }
 
 .stat-card--completed .stat-card__icon {
-  background: #059669;
-  color: white;
+  background: var(--color-success);
+  color: var(--color-inverse);
 }
 
 .stat-card__content {
@@ -721,8 +743,8 @@ onMounted(() => {
 .spinner {
   width: 20px;
   height: 20px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border: 2px solid color-mix(in srgb, var(--color-inverse) 35%, transparent);
+  border-top-color: var(--color-inverse);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -761,7 +783,7 @@ onMounted(() => {
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  gap: 14px;
 }
 
 .project-card {
@@ -770,7 +792,7 @@ onMounted(() => {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   background: var(--color-surface);
-  padding: 16px;
+  padding: 14px;
   cursor: pointer;
   transition: all var(--transition-fast);
 }
@@ -785,7 +807,7 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .project-card__icon {
@@ -810,6 +832,61 @@ onMounted(() => {
 .project-card__actions:focus-within,
 .project-card--template-saved .project-card__actions {
   opacity: 1;
+}
+
+.project-card__preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+
+.project-card__preview--ready {
+  background: var(--color-surface);
+}
+
+.project-card__preview-canvas {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.project-card__preview-canvas :deep(svg) {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+}
+
+.project-card__preview-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.project-card__preview-page {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 3px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .action-btn {
@@ -878,7 +955,7 @@ onMounted(() => {
 
 .project-card__body {
   flex: 1;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .project-card__title {
@@ -902,8 +979,8 @@ onMounted(() => {
 
 .project-card__progress {
   display: grid;
-  gap: 7px;
-  margin-top: 14px;
+  gap: 6px;
+  margin-top: 12px;
 }
 
 .project-card__progress-head {
@@ -947,7 +1024,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 12px;
+  padding-top: 10px;
   border-top: 1px solid var(--color-border);
 }
 
@@ -966,7 +1043,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
 }
 
@@ -1040,5 +1117,66 @@ onMounted(() => {
   justify-content: flex-end;
   padding: 16px 20px;
   border-top: 1px solid var(--color-border);
+}
+
+@media (max-width: 920px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .my-ppt-page {
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .page-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .page-header :deep(.ui-button) {
+    width: 100%;
+  }
+
+  .stats-grid,
+  .project-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-card {
+    padding: 14px;
+  }
+
+  .search-bar {
+    max-width: none;
+  }
+
+  .project-card__header,
+  .project-card__footer {
+    gap: 10px;
+  }
+
+  .project-card__actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    opacity: 1;
+  }
+
+  .modal-overlay {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .modal {
+    max-width: none;
+    max-height: calc(100dvh - 24px);
+    overflow: auto;
+  }
+
+  .modal__footer {
+    flex-direction: column-reverse;
+  }
 }
 </style>
