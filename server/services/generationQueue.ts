@@ -94,6 +94,7 @@ const EXECUTOR_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.EXECUTOR
 const IMAGE_CONCURRENCY = Math.max(1, Math.min(3, Number(process.env.IMAGE_GENERATION_CONCURRENCY || 3)));
 const IMAGE_GENERATION_ATTEMPTS = 2;
 const MAX_JOB_HISTORY = 300;
+const OUTLINE_JOB_UPDATE_INTERVAL_MS = 140;
 
 interface ImageModelConfig {
   apiKey: string;
@@ -209,6 +210,81 @@ function toGenerationJobStatus(status: QueuedJobStatus): GenerationJobStatus {
   return status === 'queued' ? 'queued' : 'running';
 }
 
+function normalizeStreamingSpecSlide(item: any, index: number): SpecSlide {
+  const pageNumber = Number(item?.pageNumber || index + 1);
+  return {
+    id: String(item?.id || `slide-${pageNumber}`),
+    pageNumber,
+    title: String(item?.title || `第 ${pageNumber} 页`),
+    bullets: Array.isArray(item?.bullets)
+      ? item.bullets.map((bullet: unknown) => String(bullet || '').trim()).filter(Boolean)
+      : [],
+    speakerNotes: String(item?.speakerNotes || ''),
+    visualPrompt: String(item?.visualPrompt || ''),
+    layout: String(item?.layout || 'content') as SpecSlide['layout'],
+    rhythm: item?.rhythm === 'anchor' || item?.rhythm === 'dense' || item?.rhythm === 'breathing'
+      ? item.rhythm
+      : 'breathing',
+    chartHint: item?.chartHint ? String(item.chartHint) : undefined,
+  };
+}
+
+function extractStreamingOutlineSlides(raw: string): SpecSlide[] {
+  const outlineStart = raw.search(/"outline"\s*:\s*\[/);
+  if (outlineStart < 0) return [];
+
+  const arrayStart = raw.indexOf('[', outlineStart);
+  if (arrayStart < 0) return [];
+
+  const slides: SpecSlide[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let objectStart = -1;
+
+  for (let i = arrayStart + 1; i < raw.length; i += 1) {
+    const char = raw[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) objectStart = i;
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        try {
+          slides.push(normalizeStreamingSpecSlide(JSON.parse(raw.slice(objectStart, i + 1)), slides.length));
+        } catch {
+          // The current slide object may still be streaming.
+        }
+        objectStart = -1;
+      }
+    }
+
+    if (char === ']' && depth === 0) break;
+  }
+
+  return slides;
+}
+
 function enqueue(job: QueuedJob) {
   rememberJob(job);
   queue.push(job.id);
@@ -280,11 +356,49 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   await updateJob(job, { phase: 'outline', progress: 8, message: '正在生成大纲' });
   assertJobActive(job);
   const { system, user } = buildStrategistPrompt(input);
+  const streamedSlideIds = new Set<string>();
+  let partialOutline: SpecSlide[] = [];
+  let lastOutlineJobUpdateAt = 0;
+  const publishPartialOutline = async (currentFullContent: string, force = false) => {
+    const slides = extractStreamingOutlineSlides(currentFullContent);
+    const nextSlides: SpecSlide[] = [];
+    let changed = false;
+
+    for (const slide of slides) {
+      const key = slide.id || String(slide.pageNumber);
+      nextSlides.push(slide);
+      if (!streamedSlideIds.has(key)) {
+        streamedSlideIds.add(key);
+        changed = true;
+      }
+    }
+
+    if (!changed && nextSlides.length === partialOutline.length && !force) return;
+    partialOutline = nextSlides;
+    const now = Date.now();
+    if (!force && now - lastOutlineJobUpdateAt < OUTLINE_JOB_UPDATE_INTERVAL_MS) return;
+    lastOutlineJobUpdateAt = now;
+    const targetCount = Number(input.slideCount) > 0 ? Number(input.slideCount) : Math.max(partialOutline.length + 1, 6);
+    const progress = Math.min(27, 8 + Math.round((partialOutline.length / Math.max(1, targetCount)) * 18));
+    await updateJob(job, {
+      phase: 'outline',
+      progress,
+      message: partialOutline.length
+        ? `正在生成大纲：已输出 ${partialOutline.length} 页`
+        : '正在生成大纲',
+      result: { outline: partialOutline, images: [], svgPages: [] },
+    });
+  };
   const strategistOutput = await streamText(textProvider, textApiKey, textBaseUrl, textModel, [
     { role: 'system', content: system },
     { role: 'user', content: user },
-  ]);
+  ], undefined, {
+    onContent: (_content, currentFullContent) => {
+      void publishPartialOutline(currentFullContent);
+    },
+  });
   assertJobActive(job);
+  await publishPartialOutline(strategistOutput, true);
   const spec = parseStrategistOutput(strategistOutput, input);
   const lock = buildSpecLock(spec);
   await updateJob(job, {
@@ -322,8 +436,22 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   });
 }
 
+const IMAGE_LAYOUTS = new Set(['content-image', 'text-image', 'image-text', 'full-image']);
+const IMAGE_INTENT_PATTERN =
+  /(配图|图片|插图|图示|示意图|视觉|场景图|海报|照片|封面图|背景图|产品图|架构图|流程图|路线图|信息图|生成图|image|illustration|visual|photo|poster|diagram|infographic)/i;
+
 function slideNeedsImageServer(slide: SpecSlide) {
-  return Boolean(slide.visualPrompt && ['cover', 'content-image'].includes(String(slide.layout || '')));
+  if (String(slide.visualPrompt || '').trim()) return true;
+  if (IMAGE_LAYOUTS.has(String(slide.layout || ''))) return true;
+
+  const text = [
+    slide.title,
+    ...(slide.bullets || []),
+    slide.speakerNotes,
+    slide.chartHint,
+  ].filter(Boolean).join(' ');
+
+  return IMAGE_INTENT_PATTERN.test(text);
 }
 
 function imagePromptForSlide(slide: SpecSlide) {
@@ -339,7 +467,7 @@ function findMissingRequiredImageSlides(spec: DesignSpec, images: any[]) {
 }
 
 function sortImagesByOutline(images: any[], spec: DesignSpec) {
-  return images.sort((a, b) => spec.outline.findIndex((s) => s.id === a.slideId) - spec.outline.findIndex((s) => s.id === b.slideId));
+  return images.slice().sort((a, b) => spec.outline.findIndex((s) => s.id === a.slideId) - spec.outline.findIndex((s) => s.id === b.slideId));
 }
 
 function upsertServerImage(images: any[], image: any) {
@@ -450,6 +578,15 @@ async function maybeGenerateImages(job: GenerateQueuedJob, spec: DesignSpec, loc
       assertJobActive(job);
       upsertServerImage(results, image);
       completed += 1;
+      const nextProgress = 30 + Math.round((completed / Math.max(1, slides.length)) * 12);
+      await updateJob(job, {
+        phase: 'images',
+        progress: Math.min(44, nextProgress),
+        message: image.error
+          ? `图片未生成：${slide.title}`
+          : `图片完成：${slide.title}，${completed}/${slides.length}`,
+        result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(results, spec), svgPages: [] },
+      });
     }
   }
 
@@ -485,6 +622,12 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
     const image = await generateSlideImageWithAutoRetry(job, slide, imageConfig, 45);
     assertJobActive(job);
     upsertServerImage(images, image);
+    await updateJob(job, {
+      phase: 'images',
+      progress: 45,
+      message: image.error ? `图片未生成：${slide.title}` : `图片完成：${slide.title}`,
+      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: [] },
+    });
   }
 
   missingSlides = findMissingRequiredImageSlides(spec, images);
@@ -526,6 +669,12 @@ async function ensureServerImageForLayout(
   const retryImage = await generateSlideImageWithAutoRetry(job, slide, imageConfig, 45);
   assertJobActive(job);
   upsertServerImage(images, retryImage);
+  await updateJob(job, {
+    phase: 'images',
+    progress: 45,
+    message: retryImage.error ? `图片未生成：${slide.title}` : `图片完成：${slide.title}`,
+    result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
+  });
   const readyImage = findReadyServerImage(images, slide.id);
   if (readyImage) return readyImage;
 

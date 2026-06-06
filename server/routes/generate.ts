@@ -52,18 +52,19 @@ function buildAttachmentDisposition(fileName: string): string {
 
 function normalizeExportOptions(value: any) {
   const animation = value?.animation;
+  const animationEnabled = animation?.enabled === true;
   return {
     animation: {
-      enabled: Boolean(animation?.enabled),
-      effect: ['fade', 'wipe', 'zoom', 'auto', 'none'].includes(String(animation?.effect)) ? animation.effect : 'fade',
+      enabled: animationEnabled,
+      effect: animationEnabled && ['fade', 'wipe', 'zoom'].includes(String(animation?.effect)) ? animation.effect : 'none',
       duration: clampNumber(animation?.duration, 0.1, 3, 0.45),
       stagger: clampNumber(animation?.stagger, 0, 3, 0.18),
       trigger: animation?.trigger === 'with-previous' || animation?.trigger === 'on-click'
         ? animation.trigger
         : 'after-previous',
-      transitionEffect: ['fade', 'push', 'wipe', 'none'].includes(String(animation?.transitionEffect))
+      transitionEffect: animationEnabled && ['fade', 'push', 'wipe'].includes(String(animation?.transitionEffect))
         ? animation.transitionEffect
-        : 'fade',
+        : 'none',
       transitionDuration: clampNumber(animation?.transitionDuration, 0.1, 3, 0.45),
     },
   };

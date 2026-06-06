@@ -654,6 +654,8 @@ export const aiApi = {
             callbacks.onStart?.(parsed.message);
           } else if (parsed.content) {
             callbacks.onContent?.(parsed.content);
+          } else if (parsed.status === 'outline-slide') {
+            callbacks.onOutlineSlide?.(parsed.data);
           } else if (parsed.status === 'complete') {
             callbacks.onComplete?.(parsed.data);
             resolve(parsed.data);

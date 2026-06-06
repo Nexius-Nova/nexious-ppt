@@ -273,12 +273,12 @@ const cloneConfigOptions = (): ConfigOptionGroups => ({
     { value: '100', label: '深入' }
   ],
   animationEnabled: [
-    { value: 'auto', label: 'AI 自动' },
+    { value: 'auto', label: '默认关闭' },
     { value: 'enabled', label: '启用' },
     { value: 'disabled', label: '关闭' }
   ],
   animationEffect: [
-    { value: 'auto', label: '智能编排' },
+    { value: 'auto', label: '默认无动画' },
     { value: 'fade', label: '柔和淡入' },
     { value: 'wipe', label: '逐步展开' },
     { value: 'zoom', label: '重点聚焦' }
@@ -600,6 +600,10 @@ export const useAgentStore = defineStore('agent', () => {
     return (runningStep?.id || fallback) as WorkflowStepId;
   }
 
+  function hasRunningWorkflowStep() {
+    return steps.value.some((step) => step.status === 'running');
+  }
+
   function applyGeneratedProjectInfo(spec?: DesignSpec | null) {
     if (!activePpt.value || !spec?.projectInfo) return;
 
@@ -843,6 +847,25 @@ export const useAgentStore = defineStore('agent', () => {
     return gate;
   }
 
+  function normalizeImageAndLayoutStepState() {
+    const gate = updateImageStepFromGate('idle');
+    if (gate.total > 0 && !gate.complete) {
+      const layoutStep = steps.value.find((step) => step.id === 'layout');
+      const previewStep = steps.value.find((step) => step.id === 'preview');
+      if (layoutStep && layoutStep.status !== 'idle') {
+        setStepStatus('layout', 'idle', 0);
+      }
+      if (previewStep && previewStep.status !== 'idle') {
+        setStepStatus('preview', 'idle', 0);
+      }
+      if (activeStep.value === 'layout' || activeStep.value === 'preview') {
+        activeStep.value = 'images';
+      }
+      waitingForImageRetry.value = true;
+    }
+    return gate;
+  }
+
   async function readDocxText(file: File) {
     const { default: JSZip } = await import('jszip');
     const zip = await JSZip.loadAsync(await file.arrayBuffer());
@@ -948,6 +971,7 @@ export const useAgentStore = defineStore('agent', () => {
     svgPages.value = normalizedState.svgPages || [];
     normalizeParametersAgainstConfig();
     retryingPageNumbers.value = new Set();
+    normalizeImageAndLayoutStepState();
     const hasRunningSteps = Boolean(normalizedState.steps?.some(step => step.status === 'running'));
     const hadActiveWorkflow = !normalizedState.paused && Boolean(normalizedState.workflowActive || hasRunningSteps);
     recoveredActiveWorkflow.value = hadActiveWorkflow && !normalizedState.paused;
@@ -1284,6 +1308,14 @@ export const useAgentStore = defineStore('agent', () => {
 
     const imageGate = updateImageStepFromGate(options.phase === 'images' ? 'running' : 'idle');
     if (options.final) {
+      if (!imageGate.complete) {
+        activeStep.value = 'images';
+        waitingForImageRetry.value = true;
+        setStepStatus('images', 'idle', imageGate.total ? Math.round((imageGate.readyCount / imageGate.total) * 100) : 0);
+        setStepStatus('layout', 'idle', 0);
+        setStepStatus('preview', 'idle', 0);
+        return;
+      }
       setStepStatus('images', 'done', 100);
       setStepStatus('layout', 'done', 100);
       setStepStatus('preview', 'done', 100);
@@ -1300,11 +1332,29 @@ export const useAgentStore = defineStore('agent', () => {
       setStepStatus('layout', 'idle', 0);
       setStepStatus('preview', 'idle', 0);
     } else if (options.phase === 'layout') {
+      if (!imageGate.complete) {
+        activeStep.value = 'images';
+        waitingForImageRetry.value = true;
+        setStepStatus('images', 'idle', imageGate.total ? Math.round((imageGate.readyCount / imageGate.total) * 100) : 0);
+        setStepStatus('layout', 'idle', 0);
+        setStepStatus('preview', 'idle', 0);
+        return;
+      }
       activeStep.value = 'layout';
       setStepStatus('images', 'done', 100);
       setStepStatus('layout', 'running', Math.min(99, options.progress || steps.value.find(step => step.id === 'layout')?.progress || 0));
       setStepStatus('preview', 'idle', 0);
     }
+  }
+
+  function applyQueuedOutlineProgress(result: any, progress: number) {
+    if (!Array.isArray(result?.outline) || result.outline.length === 0) return;
+    const nextOutline = result.outline.map((slide: any, index: number) =>
+      specSlideToOutlineSlide(slide as SpecSlide, index)
+    );
+    if (nextOutline.length < outline.value.length) return;
+    outline.value = nextOutline;
+    setStepStatus('outline', 'running', Math.min(99, progress));
   }
 
   async function reportGenerationJob(
@@ -1468,7 +1518,7 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function requestPauseWorkflow() {
-    if (!isRunning.value) return;
+    if (!isRunning.value && !hasRunningWorkflowStep()) return;
     recoveredActiveWorkflow.value = false;
     pauseRequested.value = true;
     pushLog('已请求暂停，正在停止当前服务端任务。');
@@ -4125,6 +4175,9 @@ export const useAgentStore = defineStore('agent', () => {
         if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') {
           activeStep.value = 'outline';
           setStepStatus('outline', 'running', Math.min(99, job.progress));
+          if (job.phase === 'outline' && job.result) {
+            applyQueuedOutlineProgress(job.result, job.progress);
+          }
         } else if (job.phase === 'images') {
           activeStep.value = 'images';
           setStepStatus('outline', 'done', 100);
@@ -4139,7 +4192,6 @@ export const useAgentStore = defineStore('agent', () => {
         } else if (job.phase === 'layout') {
           activeStep.value = 'layout';
           setStepStatus('outline', 'done', 100);
-          setStepStatus('images', 'done', 100);
           setStepStatus('layout', 'running', Math.min(99, job.progress));
           if (job.result) {
             try {

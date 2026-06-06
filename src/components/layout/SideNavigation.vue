@@ -26,10 +26,10 @@ defineEmits<{
 
 const menuItems = [
   { label: '我的 PPT', icon: FileText, route: '/my-ppt', step: 'my-ppt', group: '功能模块' },
+  { label: '模板广场', icon: LayoutGrid, route: '/templates', step: 'templates', group: '功能模块' },
   { label: '提示词管理', icon: MessageSquare, route: '/prompts', step: 'prompts', group: '功能模块' },
   { label: 'Skill 管理', icon: Zap, route: '/skills', step: 'skills', group: '功能模块' },
   { label: '模型管理', icon: Cpu, route: '/models', step: 'models', group: '功能模块' },
-  { label: '模板广场', icon: LayoutGrid, route: '/templates', step: 'templates', group: '功能模块' },
   { label: '运行配置', icon: Settings2, route: '/config', step: 'config', group: '功能模块' },
   { label: '个人中心', icon: UserCircle, route: '/profile', step: 'profile', group: '账号' }
 ];

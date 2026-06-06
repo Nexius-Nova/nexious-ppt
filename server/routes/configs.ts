@@ -135,7 +135,7 @@ router.post('/reset', async (req: AuthRequest, res: Response) => {
         type: 'select',
         value: 'auto',
         options: [
-          { value: 'auto', label: 'AI 自动' },
+          { value: 'auto', label: '默认关闭' },
           { value: 'enabled', label: '启用' },
           { value: 'disabled', label: '关闭' }
         ],
@@ -147,7 +147,7 @@ router.post('/reset', async (req: AuthRequest, res: Response) => {
         type: 'select',
         value: 'auto',
         options: [
-          { value: 'auto', label: '智能编排' },
+          { value: 'auto', label: '默认无动画' },
           { value: 'fade', label: '柔和淡入' },
           { value: 'wipe', label: '逐步展开' },
           { value: 'zoom', label: '重点聚焦' }

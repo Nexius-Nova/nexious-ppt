@@ -140,8 +140,8 @@ const autoOptionByKey: Record<ConfigOptionKey, { label: string; value: string; d
   tone: { label: 'AI 自动', value: 'auto', description: '由场景决定表达风格' },
   imageStyle: { label: 'AI 自动', value: 'auto', description: '由页面内容决定图像方向' },
   skillIntensity: { label: 'AI 自动', value: '0', description: '由 AI 判断是否增强' },
-  animationEnabled: { label: 'AI 自动', value: 'auto', description: '默认启用体验更好的 PPTX 入场动画' },
-  animationEffect: { label: '智能编排', value: 'auto', description: '按标题、正文、图片和图表自动选择入场方式' }
+  animationEnabled: { label: '默认关闭', value: 'auto', description: '未明确选择时不添加 PPTX 动画' },
+  animationEffect: { label: '默认无动画', value: 'auto', description: '启用动画后再选择具体入场效果' }
 };
 
 function getParameterOptions(key: ConfigOptionKey): Array<{ label: string; value: string; description?: string }> {
@@ -264,73 +264,102 @@ function handleFileChange(event: Event) {
 </script>
 
 <template>
-  <UiCard title="PPT 输入" subtitle="输入资料和目标，AI 会自动提炼 PPT 主题。">
+  <UiCard class="agent-input-card" :padded="false">
     <div class="input-composer">
-      <section class="input-workflow" aria-label="输入处理流程">
-        <div class="input-flow">
-          <header class="input-flow__intro">
-            <div class="input-flow__mark">
-              <Sparkles :size="17" />
-            </div>
-            <div>
-              <span>输入阶段执行流</span>
-              <h3>先处理资料，再进入 PPT 生成</h3>
+      <section class="agent-thread" aria-label="PPT 输入对话">
+        <header class="agent-thread__hero">
+          <span class="agent-thread__bot">
+            <Sparkles :size="18" />
+          </span>
+          <div>
+            <span>AI PPT Agent</span>
+            <h2>把资料、目标或文件发给我</h2>
+            <p>我会先理解输入，再整理资料并进入 PPT 大纲生成。</p>
+          </div>
+          <strong>{{ readinessScore }}%</strong>
+        </header>
+
+        <div class="agent-thread__messages">
+          <article class="agent-message agent-message--assistant">
+            <span class="agent-message__avatar">
+              <Sparkles :size="15" />
+            </span>
+            <div class="agent-message__bubble">
+              <strong>我会按这个顺序处理输入</strong>
               <p>{{ workflowSummary }}</p>
             </div>
-            <strong>{{ readinessScore }}%</strong>
-          </header>
+          </article>
 
-          <ol class="input-flow__steps">
-            <li
-              v-for="(step, index) in inputProcessSteps"
-              :key="step.id"
-              class="input-flow-step"
-              :class="`input-flow-step--${step.status}`"
-            >
-              <span class="input-flow-step__rail" aria-hidden="true" />
-              <span class="input-flow-step__icon">
-                <component
-                  :is="inputStepIcon(step)"
-                  :size="16"
-                  :class="{ spin: step.status === 'running' }"
-                />
-              </span>
-              <div class="input-flow-step__body">
-                <div class="input-flow-step__head">
-                  <strong>{{ index + 1 }}. {{ step.title }}</strong>
-                  <span>{{ inputStepStateLabel(step) }} · {{ step.progress }}%</span>
-                </div>
-                <p>{{ step.detail || step.description }}</p>
-                <div v-if="step.skillName || step.error" class="input-flow-step__meta">
-                  <span v-if="step.skillName">Skill：{{ step.skillName }}</span>
-                  <span v-if="step.error">原因：{{ resultPreview(step.error, 180) }}</span>
-                </div>
-                <div v-if="hasStepResult(step)" class="input-flow-step__result">
-                  <p v-if="step.processedText" class="input-flow-step__processed">
-                    {{ resultPreview(step.processedText, step.id === 'ready' ? 1200 : 420) }}
-                  </p>
-                  <details v-if="step.logs || step.output" class="input-flow-step__details">
-                    <summary>查看执行过程和返回内容</summary>
-                    <div v-if="step.logs" class="input-flow-step__log">
-                      <strong>过程日志</strong>
-                      <pre>{{ resultPreview(step.logs, 700) }}</pre>
-                    </div>
-                    <div v-if="step.output" class="input-flow-step__log">
-                      <strong>返回内容</strong>
-                      <pre>{{ resultPreview(step.output, 700) }}</pre>
-                    </div>
-                  </details>
-                </div>
-                <div v-if="step.status === 'running'" class="input-flow-step__bar" aria-hidden="true">
-                  <span :style="{ width: `${step.progress}%` }" />
-                </div>
-              </div>
-            </li>
-          </ol>
+          <article v-if="hasContent || fileCount" class="agent-message agent-message--user">
+            <span class="agent-message__avatar">你</span>
+            <div class="agent-message__bubble">
+              <strong>{{ fileCount ? `${fileCount} 个附件` : '输入需求' }}</strong>
+              <p>{{ contentPreview }}</p>
+            </div>
+          </article>
 
-          <footer class="input-flow__footer">
-            <span>{{ contentPreview }}</span>
-          </footer>
+          <article class="agent-message agent-message--assistant agent-message--wide">
+            <span class="agent-message__avatar">
+              <Sparkles :size="15" />
+            </span>
+            <div class="agent-message__bubble">
+              <header class="input-flow__intro">
+                <div>
+                  <span>执行轨迹</span>
+                  <h3>输入阶段处理流</h3>
+                </div>
+                <strong>{{ readinessScore }}%</strong>
+              </header>
+
+              <ol class="input-flow__steps">
+                <li
+                  v-for="(step, index) in inputProcessSteps"
+                  :key="step.id"
+                  class="input-flow-step"
+                  :class="`input-flow-step--${step.status}`"
+                >
+                  <span class="input-flow-step__rail" aria-hidden="true" />
+                  <span class="input-flow-step__icon">
+                    <component
+                      :is="inputStepIcon(step)"
+                      :size="16"
+                      :class="{ spin: step.status === 'running' }"
+                    />
+                  </span>
+                  <div class="input-flow-step__body">
+                    <div class="input-flow-step__head">
+                      <strong>{{ index + 1 }}. {{ step.title }}</strong>
+                      <span>{{ inputStepStateLabel(step) }} · {{ step.progress }}%</span>
+                    </div>
+                    <p>{{ step.detail || step.description }}</p>
+                    <div v-if="step.skillName || step.error" class="input-flow-step__meta">
+                      <span v-if="step.skillName">Skill：{{ step.skillName }}</span>
+                      <span v-if="step.error">原因：{{ resultPreview(step.error, 180) }}</span>
+                    </div>
+                    <div v-if="hasStepResult(step)" class="input-flow-step__result">
+                      <p v-if="step.processedText" class="input-flow-step__processed">
+                        {{ resultPreview(step.processedText, step.id === 'ready' ? 1200 : 420) }}
+                      </p>
+                      <details v-if="step.logs || step.output" class="input-flow-step__details">
+                        <summary>查看执行过程和返回内容</summary>
+                        <div v-if="step.logs" class="input-flow-step__log">
+                          <strong>过程日志</strong>
+                          <pre>{{ resultPreview(step.logs, 700) }}</pre>
+                        </div>
+                        <div v-if="step.output" class="input-flow-step__log">
+                          <strong>返回内容</strong>
+                          <pre>{{ resultPreview(step.output, 700) }}</pre>
+                        </div>
+                      </details>
+                    </div>
+                    <div v-if="step.status === 'running'" class="input-flow-step__bar" aria-hidden="true">
+                      <span :style="{ width: `${step.progress}%` }" />
+                    </div>
+                  </div>
+                </li>
+              </ol>
+            </div>
+          </article>
         </div>
       </section>
 
@@ -600,65 +629,73 @@ function handleFileChange(event: Event) {
 <style scoped>
 .input-composer {
   display: grid;
-  gap: var(--space-4);
   grid-template-rows: minmax(320px, 1fr) auto;
   min-height: calc(100vh - 260px);
+  background: var(--color-card);
 }
 
-.input-workflow {
+.agent-thread {
   display: grid;
-  align-content: start;
-  gap: 14px;
+  gap: 18px;
+  justify-self: center;
+  width: min(880px, 100%);
   min-height: 0;
-  padding-bottom: 8px;
+  padding: 22px 22px 240px;
 }
 
-.input-flow {
-  display: grid;
-  gap: 14px;
-  max-width: 940px;
-  min-width: 0;
-}
-
-.input-flow__intro {
+.agent-thread__hero {
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
   gap: 12px;
-  align-items: start;
   min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--color-surface);
 }
 
-.input-flow__mark {
+.agent-thread__bot,
+.agent-message__avatar {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  flex: 0 0 auto;
   border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-accent-soft);
+  background: var(--color-panel);
   color: var(--color-accent);
 }
 
-.input-flow__intro div:nth-child(2) {
+.agent-thread__bot {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+}
+
+.agent-thread__hero div,
+.agent-message__bubble,
+.input-flow__intro div {
   display: grid;
   gap: 5px;
   min-width: 0;
 }
 
+.agent-thread__hero span,
 .input-flow__intro span {
   color: var(--color-accent);
   font-size: 12px;
   font-weight: 800;
 }
 
+.agent-thread__hero h2,
 .input-flow__intro h3 {
   margin: 0;
   color: var(--color-text);
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 850;
   letter-spacing: 0;
 }
 
+.agent-thread__hero p,
 .input-flow__intro p {
   margin: 0;
   color: var(--color-muted);
@@ -666,17 +703,93 @@ function handleFileChange(event: Event) {
   line-height: 1.65;
 }
 
+.agent-thread__hero > strong,
 .input-flow__intro > strong {
   color: var(--color-text);
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1;
+}
+
+.agent-thread__messages {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.agent-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.agent-message--user {
+  justify-content: flex-end;
+}
+
+.agent-message--user .agent-message__avatar {
+  order: 2;
+  color: var(--color-text);
+}
+
+.agent-message__avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.agent-message__bubble {
+  max-width: min(720px, calc(100% - 42px));
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.agent-message--user .agent-message__bubble {
+  background: var(--color-accent-soft);
+  border-color: color-mix(in srgb, var(--color-accent) 34%, var(--color-border));
+}
+
+.agent-message--wide .agent-message__bubble {
+  width: min(760px, calc(100% - 42px));
+  max-width: none;
+  padding: 14px;
+}
+
+.agent-message__bubble strong {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.agent-message__bubble p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
+}
+
+.input-flow__intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 12px;
 }
 
 .input-flow__steps {
   display: grid;
   gap: 0;
   margin: 0;
-  padding: 0 0 0 10px;
+  padding: 2px 0 0;
   list-style: none;
 }
 
@@ -934,7 +1047,10 @@ function handleFileChange(event: Event) {
   z-index: 30;
   display: grid;
   gap: 8px;
-  padding-top: 8px;
+  justify-self: center;
+  width: min(880px, 100%);
+  padding: 10px 22px 14px;
+  border-top: 1px solid var(--color-border);
   background: var(--color-card);
 }
 
@@ -1559,20 +1675,24 @@ function handleFileChange(event: Event) {
     min-height: auto;
   }
 
-  .input-flow {
-    max-width: none;
+  .agent-thread {
+    padding: 14px 12px 280px;
   }
 
+  .agent-thread__hero,
   .input-flow__intro {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .input-flow__mark {
+  .agent-thread__bot {
     display: none;
   }
 
+  .agent-thread__hero > strong {
+    justify-self: start;
+  }
+
   .input-flow__intro,
-  .input-flow__footer,
   .input-flow-step__head {
     align-items: flex-start;
     flex-direction: column;
@@ -1589,7 +1709,8 @@ function handleFileChange(event: Event) {
 
   .input-composer__dock {
     bottom: 0;
-    margin-inline: -2px;
+    width: 100%;
+    padding: 10px 12px 12px;
   }
 
   .doubao-composer__box {
@@ -1604,23 +1725,26 @@ function handleFileChange(event: Event) {
   }
 
   .doubao-composer__toolbar {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: center;
+    flex-direction: row;
     gap: 8px;
   }
 
   .doubao-composer__tools {
+    flex-wrap: nowrap;
     gap: 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 
   .doubao-composer__actions {
+    flex: 0 0 auto;
     justify-content: space-between;
   }
 
   .doubao-composer__module {
-    flex: 1 1 calc(33.333% - 8px);
+    flex: 0 0 auto;
     justify-content: center;
-    min-width: 92px;
   }
 
   .composer-module-panel__header {

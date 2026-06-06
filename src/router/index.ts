@@ -1,90 +1,90 @@
-import { createRouter, createWebHistory } from 'vue-router';
-import AgentWorkspace from '@/views/AgentWorkspace.vue';
-import AuthPage from '@/components/pages/AuthPage.vue';
-import { useAuthStore } from '@/stores/authStore';
+import { createRouter, createWebHistory } from "vue-router";
+import AgentWorkspace from "@/views/AgentWorkspace.vue";
+import AuthPage from "@/components/pages/AuthPage.vue";
+import { useAuthStore } from "@/stores/authStore";
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
-      path: '/login',
-      name: 'login',
+      path: "/login",
+      name: "login",
       component: AuthPage,
       meta: {
-        title: '登录 - AI PPT Agent',
+        title: "登录 - AI PPT Agent",
         public: true
       }
     },
     {
-      path: '/',
-      name: 'home',
+      path: "/",
+      name: "home",
       component: AgentWorkspace,
       meta: {
-        title: 'AI PPT Agent 工作区'
+        title: "AI PPT Agent 工作区"
       }
     },
     {
-      path: '/my-ppt',
-      name: 'my-ppt',
+      path: "/my-ppt",
+      name: "my-ppt",
       component: AgentWorkspace,
       meta: {
-        title: '我的 PPT - AI PPT Agent'
+        title: "我的 PPT - AI PPT Agent"
       }
     },
     {
-      path: '/prompts',
-      name: 'prompts',
+      path: "/templates",
+      name: "templates",
       component: AgentWorkspace,
       meta: {
-        title: '提示词管理 - AI PPT Agent'
+        title: "模板广场 - AI PPT Agent"
       }
     },
     {
-      path: '/skills',
-      name: 'skills',
+      path: "/prompts",
+      name: "prompts",
       component: AgentWorkspace,
       meta: {
-        title: 'Skill 管理 - AI PPT Agent'
+        title: "提示词管理 - AI PPT Agent"
       }
     },
     {
-      path: '/models',
-      name: 'models',
+      path: "/skills",
+      name: "skills",
       component: AgentWorkspace,
       meta: {
-        title: '模型管理 - AI PPT Agent'
+        title: "Skill 管理 - AI PPT Agent"
       }
     },
     {
-      path: '/templates',
-      name: 'templates',
+      path: "/models",
+      name: "models",
       component: AgentWorkspace,
       meta: {
-        title: '模板广场 - AI PPT Agent'
+        title: "模型管理 - AI PPT Agent"
       }
     },
     {
-      path: '/config',
-      name: 'config',
+      path: "/config",
+      name: "config",
       component: AgentWorkspace,
       meta: {
-        title: '运行配置 - AI PPT Agent'
+        title: "运行配置 - AI PPT Agent"
       }
     },
     {
-      path: '/profile',
-      name: 'profile',
+      path: "/profile",
+      name: "profile",
       component: AgentWorkspace,
       meta: {
-        title: '个人中心 - AI PPT Agent'
+        title: "个人中心 - AI PPT Agent"
       }
     },
     {
-      path: '/project/:id/:tab?',
-      name: 'project-edit',
+      path: "/project/:id/:tab?",
+      name: "project-edit",
       component: AgentWorkspace,
       meta: {
-        title: '编辑项目 - AI PPT Agent'
+        title: "编辑项目 - AI PPT Agent"
       }
     }
   ]
@@ -99,12 +99,12 @@ router.beforeEach((to) => {
 
   if (!to.meta.public && !authStore.token) {
     return {
-      path: '/login',
+      path: "/login",
       query: { redirect: to.fullPath }
     };
   }
 
   if (to.meta.public && authStore.token) {
-    return '/my-ppt';
+    return "/my-ppt";
   }
 });
