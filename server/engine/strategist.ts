@@ -1,7 +1,7 @@
 import type { DesignSpec, SpecSlide, SkillExtension } from './spec.js';
 import { CANVAS_FORMATS, normalizeColors, normalizeTypography } from './spec.js';
 
-type TemplatePreviewSlide = { title: string; layout: string; description?: string; svg?: string; pageNumber?: number };
+type TemplatePreviewSlide = { title: string; layout: string; description?: string; svg?: string; pageNumber?: number; visualSummary?: string };
 const MAX_TEMPLATE_SVG_SNIPPET_CHARS = 1600;
 const templatePreviewSummaryCache = new Map<string, string>();
 
@@ -262,10 +262,10 @@ function buildTemplateGuide(input: StrategistInput) {
 function formatTemplatePreviewSlides(previewSlides?: TemplatePreviewSlide[]) {
   if (!Array.isArray(previewSlides) || previewSlides.length === 0) return '无';
   return previewSlides
-    .slice(0, 3)
+    .slice(0, 8)
     .map((slide: any, index) => {
       const meta = `${slide.title || `示例页 ${index + 1}`}（${slide.layout || 'content'}${slide.description ? `：${slide.description}` : ''}）`;
-      const svgSummary = summarizeTemplateSvg(slide.svg);
+      const svgSummary = slide.visualSummary ? String(slide.visualSummary) : summarizeTemplateSvg(slide.svg);
       return `${meta}${svgSummary ? `\n视觉摘要：${svgSummary}` : ''}`;
     })
     .join('\n\n');
@@ -333,12 +333,13 @@ function sanitizeTemplateAsset(template: StrategistInput['templateAsset']): Stra
           }
         : undefined,
       previewSlides: Array.isArray(settings.previewSlides)
-        ? settings.previewSlides.slice(0, 3).map((slide) => ({
+        ? settings.previewSlides.slice(0, 8).map((slide) => ({
             title: String(slide.title || '示例页'),
             layout: String(slide.layout || 'content'),
             description: slide.description ? String(slide.description) : undefined,
             svg: typeof slide.svg === 'string' && slide.svg.trim() ? slide.svg : undefined,
             pageNumber: Number(slide.pageNumber) || undefined,
+            visualSummary: slide.visualSummary ? String(slide.visualSummary) : undefined,
           }))
         : undefined,
       constraints: settings.constraints

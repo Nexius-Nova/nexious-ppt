@@ -1,9 +1,16 @@
+import { inlinePrivateSvgImages } from '@/composables/usePrivateAssetUrl';
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 async function fetchImageAsDataUrl(imageUrl: string): Promise<string | null> {
   try {
     const proxyUrl = `${API_BASE_URL}/api/ai/proxy-image?url=${encodeURIComponent(imageUrl)}`;
-    const resp = await fetch(proxyUrl);
+    const token = localStorage.getItem('auth_token');
+    const resp = await fetch(proxyUrl, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      }
+    });
     if (!resp.ok) {
       console.warn(`[svgRenderer] proxy-image failed for ${imageUrl}: ${resp.status}`);
       return null;
@@ -136,7 +143,8 @@ function svgToDataUrl(svgString: string): string {
 }
 
 export async function renderSvgToPng(svgString: string, width: number, height: number): Promise<Blob> {
-  const inlined = await inlineRemoteImages(svgString);
+  const withPrivateAssets = await inlinePrivateSvgImages(svgString);
+  const inlined = await inlineRemoteImages(withPrivateAssets);
 
   const dataUrl = svgToDataUrl(inlined);
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
+import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import { renderSvgToPng } from '@/services/svgRenderer';
 
 const props = defineProps<{
@@ -98,10 +99,10 @@ function zoomOut() {
       </div>
       <div class="svg-deck-preview__viewport">
         <div class="svg-deck-preview__canvas" :style="{ transform: `scale(${scale})` }">
-          <div
+          <PrivateSvg
             class="svg-deck-preview__slide"
-            v-html="currentSvg"
-          ></div>
+            :svg="currentSvg"
+          />
         </div>
       </div>
       <div v-if="showNotes && currentNotes" class="svg-deck-preview__notes">
@@ -126,7 +127,7 @@ function zoomOut() {
           class="svg-deck-preview__thumb-img"
           alt=""
         />
-        <div v-else class="svg-deck-preview__thumb-svg" v-html="page.svg"></div>
+        <PrivateSvg v-else class="svg-deck-preview__thumb-svg" :svg="page.svg" />
         <span class="svg-deck-preview__thumb-num">{{ page.pageNumber }}</span>
       </div>
     </div>

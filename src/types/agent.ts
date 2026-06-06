@@ -139,7 +139,7 @@ export interface PptProjectState {
   steps: WorkflowStep[];
   designSpec: DesignSpec | null;
   specLock: SpecLock | null;
-  svgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>;
+  svgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string; visualSummary?: string }>;
   configOptions?: ConfigOptionGroups;
   paused?: boolean;
   resumeStage?: WorkflowStepId | null;
@@ -193,6 +193,7 @@ export interface TemplateAssetSettings {
     description?: string;
     svg?: string;
     pageNumber?: number;
+    visualSummary?: string;
   }>;
   constraints?: {
     preferredSlideCount?: number;

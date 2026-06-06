@@ -3,10 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import {
   Bot,
   Loader2,
-  Pause,
-  Play,
   RefreshCw,
-  Save,
   SendHorizonal,
   Sparkles,
   User,
@@ -379,37 +376,6 @@ async function confirmDelete() {
       </div>
 
       <div class="assistant-body">
-        <section class="assistant-status">
-          <div class="assistant-status__copy">
-            <strong>{{ petStatusText }}</strong>
-            <span>{{ petHint }}</span>
-          </div>
-          <div class="assistant-status__actions">
-            <UiButton size="sm" variant="secondary" :loading="actionRunning === 'save'" @click="runAction('save', async () => { await store.saveWorkflow(); return '当前 PPT 已保存'; })">
-              <Save :size="13" />保存
-            </UiButton>
-            <UiButton
-              v-if="isRunning && !isPaused"
-              size="sm"
-              variant="secondary"
-              :disabled="pauseRequested"
-              :loading="actionRunning === 'pause'"
-              @click="runAction('pause', async () => { await store.requestPauseWorkflow(); return '已请求暂停工作流'; })"
-            >
-              <Pause :size="13" />暂停
-            </UiButton>
-            <UiButton
-              v-else
-              size="sm"
-              variant="secondary"
-              :loading="actionRunning === 'continue'"
-              @click="runAction('continue', async () => { await store.continueWorkflow(); return '已继续工作流'; })"
-            >
-              <Play :size="13" />继续
-            </UiButton>
-          </div>
-        </section>
-
         <section ref="messagesContainer" class="chat-messages">
           <div class="chat-suggestions">
             <button
@@ -737,8 +703,8 @@ async function confirmDelete() {
   z-index: 9990;
   display: flex;
   flex-direction: column;
-  width: min(620px, calc(100vw - 32px));
-  height: min(760px, calc(100dvh - 48px));
+  width: min(420px, calc(100vw - 32px));
+  height: min(580px, calc(100dvh - 48px));
   overflow: visible;
   border: 1px solid var(--color-border);
   border-radius: 14px;
@@ -828,43 +794,13 @@ async function confirmDelete() {
 }
 
 .assistant-body {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   flex: 1;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 12px;
   border-radius: 0 0 14px 14px;
-}
-
-.assistant-status {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-panel);
-}
-
-.assistant-status__copy {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.assistant-status__copy strong {
-  font-size: 14px;
-}
-
-.assistant-status__copy span {
-  color: var(--color-muted);
-  font-size: 12px;
-}
-
-.assistant-status__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 .chat-suggestions {
@@ -904,8 +840,8 @@ async function confirmDelete() {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 250px;
-  margin-top: 12px;
+  min-height: 0;
+  flex: 1;
   overflow-y: auto;
 }
 
@@ -1081,12 +1017,7 @@ async function confirmDelete() {
     bottom: 74px;
     left: 10px;
     width: auto;
-    height: min(720px, calc(100dvh - 92px));
-  }
-
-  .assistant-status {
-    align-items: stretch;
-    flex-direction: column;
+    height: min(560px, calc(100dvh - 92px));
   }
 }
 </style>

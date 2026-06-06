@@ -60,6 +60,14 @@ export async function getProjectById(id: number): Promise<Project | null> {
   return projects.length > 0 ? projects[0] : null;
 }
 
+export async function getProjectByIdForUser(id: number, userId: number): Promise<Project | null> {
+  const projects = await query<Project>(
+    'SELECT * FROM projects WHERE id = ? AND user_id = ?',
+    [id, userId]
+  );
+  return projects.length > 0 ? projects[0] : null;
+}
+
 /**
  * 根据用户ID查询所有项目
  */
@@ -140,6 +148,44 @@ export async function updateProject(id: number, data: UpdateProjectData): Promis
   values.push(id);
   const result = await update(
     `UPDATE projects SET ${fields.join(', ')} WHERE id = ?`,
+    values
+  );
+  return result.affectedRows > 0;
+}
+
+export async function updateProjectForUser(id: number, userId: number, data: UpdateProjectData): Promise<boolean> {
+  const syncedData = withSyncedContent(data);
+  const fields: string[] = [];
+  const values: any[] = [];
+
+  if (syncedData.title !== undefined) {
+    fields.push('title = ?');
+    values.push(syncedData.title);
+  }
+  if (syncedData.topic !== undefined) {
+    fields.push('topic = ?');
+    values.push(syncedData.topic);
+  }
+  if (syncedData.content !== undefined) {
+    fields.push('content = ?');
+    values.push(syncedData.content);
+  }
+  if (syncedData.status !== undefined) {
+    fields.push('status = ?');
+    values.push(syncedData.status);
+  }
+  if (syncedData.state !== undefined) {
+    fields.push('state = ?');
+    values.push(JSON.stringify(syncedData.state));
+  }
+
+  if (fields.length === 0) {
+    return false;
+  }
+
+  values.push(id, userId);
+  const result = await update(
+    `UPDATE projects SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`,
     values
   );
   return result.affectedRows > 0;

@@ -321,7 +321,7 @@ router.post('/jobs/export-pptx', authMiddleware, async (req: AuthRequest, res: R
       return res.status(400).json({ success: false, message: '缺少导出任务参数' });
     }
 
-    const job = enqueueExportJob(req.userId!, {
+    const job = await enqueueExportJob(req.userId!, {
       projectId: String(projectId),
       title: typeof title === 'string' ? title : undefined,
       pages: pages.map((page: any, index: number) => ({
@@ -377,7 +377,7 @@ router.get('/jobs/:id/download', authMiddleware, async (req: AuthRequest, res: R
   res.send(artifact.buffer);
 });
 
-router.post('/render-png', async (req: Request, res: Response) => {
+router.post('/render-png', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { svg, width } = req.body;
     if (!svg) {

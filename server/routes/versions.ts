@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { query, insert, remove } from '../db/connection.js';
+import { getProjectByIdForUser } from '../models/project.js';
 
 const router = Router();
 const MAX_VERSIONS = 30;
@@ -50,10 +51,19 @@ function buildSnapshotState(input: { outline?: any[]; parameters?: any; slideCou
   };
 }
 
+async function ensureOwnedProject(userId: number, projectId: string) {
+  const id = Number(projectId);
+  if (!Number.isSafeInteger(id) || id <= 0) return false;
+  return Boolean(await getProjectByIdForUser(id, userId));
+}
+
 router.get('/:projectId', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId!;
     const { projectId } = req.params;
+    if (!(await ensureOwnedProject(userId, projectId))) {
+      return res.status(404).json({ success: false, message: '项目不存在或无权访问' });
+    }
 
     const rows = await query(
       `SELECT id, project_id, label, state, created_at FROM version_snapshots WHERE user_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT ${MAX_VERSIONS}`,
@@ -86,6 +96,9 @@ router.post('/:projectId', async (req: AuthRequest, res: Response) => {
     const userId = req.userId!;
     const { projectId } = req.params;
     const { label, outline, parameters, slideCount, state } = req.body;
+    if (!(await ensureOwnedProject(userId, projectId))) {
+      return res.status(404).json({ success: false, message: '项目不存在或无权访问' });
+    }
     const snapshotState = buildSnapshotState({ outline, parameters, slideCount, state });
 
     const countResult = await query(
@@ -123,6 +136,9 @@ router.delete('/:projectId/:versionId', async (req: AuthRequest, res: Response) 
   try {
     const userId = req.userId!;
     const { projectId, versionId } = req.params;
+    if (!(await ensureOwnedProject(userId, projectId))) {
+      return res.status(404).json({ success: false, message: '项目不存在或无权访问' });
+    }
     const numericId = versionId.replace('v-', '');
 
     await remove(

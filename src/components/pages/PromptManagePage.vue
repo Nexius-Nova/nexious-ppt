@@ -7,6 +7,7 @@ import UiEmpty from '@/components/ui/UiEmpty.vue';
 import UiField from '@/components/ui/UiField.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
+import PrivateImage from '@/components/common/PrivateImage.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { promptApi, type Prompt } from '@/services/api';
 
@@ -282,7 +283,7 @@ onMounted(() => {
 
         <div class="prompt-card__body">
           <div v-if="prompt.preview_url" class="prompt-card__effect">
-            <img :src="resolvePreviewUrl(prompt.preview_url)" :alt="`${prompt.title} 效果图`" />
+            <PrivateImage :src="resolvePreviewUrl(prompt.preview_url)" :alt="`${prompt.title} 效果图`" />
           </div>
           <h3 class="prompt-card__title">{{ prompt.title }}</h3>
           <div v-if="prompt.scene" class="prompt-card__scene">
@@ -357,7 +358,7 @@ onMounted(() => {
               </button>
 
               <div v-else class="prompt-effect-preview">
-                <img :src="resolvePreviewUrl(formData.preview_url)" alt="提示词效果图预览" />
+                <PrivateImage :src="resolvePreviewUrl(formData.preview_url)" alt="提示词效果图预览" />
                 <div class="prompt-effect-preview__actions">
                   <UiButton size="sm" variant="secondary" :loading="uploadingPreview" @click="triggerPreviewUpload">
                     <ImageIcon :size="14" />

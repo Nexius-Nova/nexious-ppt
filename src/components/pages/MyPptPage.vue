@@ -8,6 +8,7 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import NexiousLoader from '@/components/common/NexiousLoader.vue';
+import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
 import { projectApi, templateApi, type Project, type Template } from '@/services/api';
@@ -574,7 +575,7 @@ onMounted(() => {
         </div>
 
         <div v-if="project.previewSvg" class="project-card__preview">
-          <div v-if="project.previewSvg" class="project-card__preview-canvas" v-html="project.previewSvg" />
+          <PrivateSvg v-if="project.previewSvg" class="project-card__preview-canvas" :svg="project.previewSvg" />
           <div v-else class="project-card__preview-empty">
             <FileText :size="18" />
             <span>暂无预览</span>

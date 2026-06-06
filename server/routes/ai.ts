@@ -1,6 +1,8 @@
 import { Router, Response, Request } from 'express';
 import path from 'path';
 import { mkdir, writeFile } from 'fs/promises';
+import { randomUUID } from 'crypto';
+import net from 'net';
 import { getDefaultApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
 import { authMiddleware, AuthRequest } from './auth.js';
@@ -219,6 +221,38 @@ function imageExtension(mime: string): string {
   return 'png';
 }
 
+function isPrivateAddress(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  if (lower === 'localhost' || lower.endsWith('.localhost')) return true;
+  const ipVersion = net.isIP(lower);
+  if (ipVersion === 4) {
+    const parts = lower.split('.').map(Number);
+    return (
+      parts[0] === 10 ||
+      parts[0] === 127 ||
+      (parts[0] === 169 && parts[1] === 254) ||
+      (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+      (parts[0] === 192 && parts[1] === 168)
+    );
+  }
+  if (ipVersion === 6) {
+    return lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80');
+  }
+  return false;
+}
+
+function isAllowedProxyUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    const publicOrigin = new URL(PUBLIC_BASE_URL).origin;
+    if (url.origin === publicOrigin && url.pathname.startsWith('/generated-images/')) return true;
+    return !isPrivateAddress(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export async function persistDataImage(imageUrl: string, slideId: string): Promise<string> {
   if (!imageUrl.startsWith('data:image/')) return imageUrl;
   const match = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
@@ -226,8 +260,7 @@ export async function persistDataImage(imageUrl: string, slideId: string): Promi
 
   await mkdir(GENERATED_IMAGE_DIR, { recursive: true });
   const ext = imageExtension(match[1]);
-  const safeSlideId = String(slideId || 'slide').replace(/[^\w-]+/g, '_');
-  const fileName = `${safeSlideId}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}.${ext}`;
+  const fileName = `${Date.now()}_${randomUUID()}.${ext}`;
   await writeFile(path.join(GENERATED_IMAGE_DIR, fileName), Buffer.from(match[2], 'base64'));
   return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/generated-images/${fileName}`;
 }
@@ -686,7 +719,7 @@ function parseOutlineFromText(text: string, count: number): any[] {
   return slides.slice(0, count);
 }
 
-router.get('/proxy-image', async (req: Request, res: Response) => {
+router.get('/proxy-image', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const imageUrl = req.query.url as string;
     if (!imageUrl) {
@@ -695,8 +728,8 @@ router.get('/proxy-image', async (req: Request, res: Response) => {
 
     const decodedUrl = decodeURIComponent(imageUrl);
 
-    if (!/^https?:\/\//.test(decodedUrl)) {
-      return res.status(400).json({ success: false, message: 'Only http/https URLs are supported' });
+    if (!isAllowedProxyUrl(decodedUrl)) {
+      return res.status(400).json({ success: false, message: '图片地址不允许代理' });
     }
 
     const response = await fetch(decodedUrl);

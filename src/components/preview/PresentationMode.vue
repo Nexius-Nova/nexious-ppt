@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, watch, ref } from 'vue';
 import { X, ChevronLeft, ChevronRight } from 'lucide-vue-next';
+import PrivateBackground from '@/components/common/PrivateBackground.vue';
 import { getTemplateColors } from '@/composables/templateColors';
 import type { SlideOutline, GeneratedImage, AgentParameters } from '@/types/agent';
 
@@ -101,15 +102,15 @@ function currentImage(): GeneratedImage | null {
             <h1 v-if="currentSlide" :style="{ color: getColor().text, textShadow: '0 2px 12px rgba(0,0,0,0.5)' }">{{ currentSlide.title }}</h1>
           </div>
           <!-- Image -->
-          <div
+          <PrivateBackground
             v-if="(currentSlide?.layout || 'text-only') !== 'text-only' && currentImage()?.url"
             class="present-image"
+            :src="currentImage()?.url"
             :class="{
               'present-image--right': (currentSlide?.layout || 'text-only') === 'text-image',
               'present-image--left': (currentSlide?.layout || 'text-only') === 'image-text',
               'present-image--full': (currentSlide?.layout || 'text-only') === 'full-image'
             }"
-            :style="{ backgroundImage: `url(${currentImage()?.url})` }"
           />
           <div
             v-if="(currentSlide?.layout || 'text-only') !== 'text-only' && !currentImage()?.url"

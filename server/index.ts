@@ -9,7 +9,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { testConnection, closePool } from './db/connection.js';
-import authRoutes from './routes/auth.js';
+import authRoutes, { authMiddleware } from './routes/auth.js';
 import apiKeyRoutes from './routes/apiKeys.js';
 import projectRoutes from './routes/projects.js';
 import aiRoutes from './routes/ai.js';
@@ -62,8 +62,8 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
-app.use('/generated-images', express.static(path.join(process.cwd(), '.generated', 'images')));
-app.use('/avatars', express.static(path.join(process.cwd(), '.generated', 'avatars')));
+app.use('/generated-images', authMiddleware, express.static(path.join(process.cwd(), '.generated', 'images')));
+app.use('/avatars', authMiddleware, express.static(path.join(process.cwd(), '.generated', 'avatars')));
 
 app.get('/health', (req, res) => {
   res.json({

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import type { TemplateAssetSettings } from '@/types/agent';
 
 type PreviewSlide = NonNullable<TemplateAssetSettings['previewSlides']>[number];
@@ -22,12 +23,6 @@ const emit = defineEmits<{
 
 const visibleSlides = computed(() => props.slides.slice(0, 3));
 
-function normalizePreviewSvg(svg: string) {
-  const baseUrl = (import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
-  return svg
-    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])\.?\/generated-images\//gi, `$1${baseUrl}/generated-images/`)
-    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])generated-images\//gi, `$1${baseUrl}/generated-images/`);
-}
 </script>
 
 <template>
@@ -57,10 +52,10 @@ function normalizePreviewSvg(svg: string) {
         @keydown.enter.prevent="interactive && emit('preview', slide, index)"
         @keydown.space.prevent="interactive && emit('preview', slide, index)"
       >
-        <span
+        <PrivateSvg
           v-if="slide.svg"
           class="template-preview-deck__svg"
-          v-html="normalizePreviewSvg(slide.svg)"
+          :svg="slide.svg"
         />
         <template v-else>
           <span class="template-preview-deck__index">{{ index + 1 }}</span>

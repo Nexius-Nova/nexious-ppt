@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Response } from 'express';
 import { getDefaultApiKey } from '../models/apiKey.js';
-import { updateProject } from '../models/project.js';
+import { getProjectByIdForUser, updateProjectForUser } from '../models/project.js';
 import { createGenerationJob, updateGenerationJob, type GenerationJobStatus } from '../models/generationJob.js';
 import { decrypt } from '../utils/crypto.js';
 import {
@@ -107,6 +107,23 @@ const subscribers = new Map<string, Set<Response>>();
 const exportArtifacts = new Map<string, { buffer: Buffer; fileName: string; contentType: string }>();
 let activeGenerationJobs = 0;
 let activeExportJobs = 0;
+
+function parseOwnedProjectId(projectId: string): number {
+  const id = Number(projectId);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error('项目不存在或无权访问');
+  }
+  return id;
+}
+
+async function assertProjectOwnedByUser(userId: number, projectId: string) {
+  const id = parseOwnedProjectId(projectId);
+  const project = await getProjectByIdForUser(id, userId);
+  if (!project) {
+    throw new Error('项目不存在或无权访问');
+  }
+  return project;
+}
 
 class QueueJobCancelledError extends Error {
   constructor() {
@@ -290,7 +307,7 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   const svgPages = await generateSvgPages(job, spec, lock, images, textProvider, textApiKey, textBaseUrl, textModel);
   assertJobActive(job);
   const result = { spec, lock, outline: spec.outline, images, svgPages };
-  await updateProject(Number(job.projectId), {
+  await updateProjectForUser(parseOwnedProjectId(job.projectId), job.userId, {
     status: 'completed',
     state: mergeProjectState(job.payload.projectState, result),
   }).catch((error) => console.warn('保存生成结果到项目失败:', error));
@@ -672,6 +689,7 @@ function mergeProjectState(base: any, result: { spec: DesignSpec; lock: SpecLock
 }
 
 export async function enqueueGenerateJob(userId: number, payload: GenerateJobPayload) {
+  await assertProjectOwnedByUser(userId, payload.projectId);
   const dbJobId = await createGenerationJob({
     userId,
     projectId: payload.projectId,
@@ -698,7 +716,8 @@ export async function enqueueGenerateJob(userId: number, payload: GenerateJobPay
   return snapshotJob(job);
 }
 
-export function enqueueExportJob(userId: number, payload: ExportJobPayload) {
+export async function enqueueExportJob(userId: number, payload: ExportJobPayload) {
+  await assertProjectOwnedByUser(userId, payload.projectId);
   const job: ExportQueuedJob = {
     id: randomUUID(),
     kind: 'export',

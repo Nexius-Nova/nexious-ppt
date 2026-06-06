@@ -5,6 +5,7 @@ import UiCard from '@/components/ui/UiCard.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
+import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import TemplatePreviewDeck from '@/components/common/TemplatePreviewDeck.vue';
 import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
 import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, InputProcessStep, PromptDefinition, PptTemplate, SkillDefinition, TemplateAsset, TemplateAssetSettings } from '@/types/agent';
@@ -241,13 +242,6 @@ function skillStatusLabel(skill: SkillDefinition) {
 function handleSkillToggle(skill: SkillDefinition) {
   if (!canUseSkill(skill)) return;
   emit('toggle-skill', skill.id);
-}
-
-function normalizePreviewSvg(svg: string) {
-  const baseUrl = (import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
-  return svg
-    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])\.?\/generated-images\//gi, `$1${baseUrl}/generated-images/`)
-    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])generated-images\//gi, `$1${baseUrl}/generated-images/`);
 }
 
 function handleRun() {
@@ -582,10 +576,10 @@ function handleFileChange(event: Event) {
             </button>
           </header>
           <div class="template-preview-modal__body">
-            <div
+            <PrivateSvg
               v-if="previewingTemplateSlide.slide.svg"
               class="template-preview-modal__canvas"
-              v-html="normalizePreviewSvg(previewingTemplateSlide.slide.svg)"
+              :svg="previewingTemplateSlide.slide.svg"
             />
             <div v-else class="template-preview-modal__fallback">
               <strong>{{ previewingTemplateSlide.slide.title }}</strong>

@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { query } from '../db/connection.js';
+import { getProjectByIdForUser } from '../models/project.js';
 import {
   createSkillFromPackage,
   initializeAndTestSkill,
@@ -105,6 +106,12 @@ async function fetchSkill(id: number, userId: number) {
   return rows[0] ? normalizeSkill(rows[0]) : null;
 }
 
+async function ensureOwnedProject(userId: number, projectId: string) {
+  const id = Number(projectId);
+  if (!Number.isSafeInteger(id) || id <= 0) return false;
+  return Boolean(await getProjectByIdForUser(id, userId));
+}
+
 function normalizeRun(row: any) {
   return {
     ...row,
@@ -133,6 +140,9 @@ router.get('/runs', async (req: AuthRequest, res: Response) => {
       params.push('__skill_health_check__');
     }
     if (projectId) {
+      if (!(await ensureOwnedProject(req.userId!, projectId))) {
+        return res.status(404).json({ success: false, message: '项目不存在或无权访问' });
+      }
       where += ' AND sr.project_id = ?';
       params.push(projectId);
     }
@@ -301,8 +311,12 @@ router.post('/:id/test', async (req: AuthRequest, res: Response) => {
 router.post('/:id/run', async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
+    const projectId = req.body?.projectId ? String(req.body.projectId) : undefined;
+    if (projectId && !(await ensureOwnedProject(req.userId!, projectId))) {
+      return res.status(404).json({ success: false, message: '项目不存在或无权访问' });
+    }
     const runId = await runSkillPackage(req.userId!, id, {
-      projectId: req.body?.projectId ? String(req.body.projectId) : undefined,
+      projectId,
       phase: req.body?.phase ? String(req.body.phase) : 'input',
       input: req.body?.input || {},
     });

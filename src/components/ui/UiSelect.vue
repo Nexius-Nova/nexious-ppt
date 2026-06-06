@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { ChevronDown, Check } from 'lucide-vue-next';
+import PrivateImage from '@/components/common/PrivateImage.vue';
 import TemplatePreviewDeck from '@/components/common/TemplatePreviewDeck.vue';
 
 type SelectPreviewSlide = {
@@ -104,7 +105,7 @@ onUnmounted(() => {
               class="ui-select__option-image"
               aria-hidden="true"
             >
-              <img :src="option.previewImageUrl" :alt="option.label" />
+              <PrivateImage :src="option.previewImageUrl" :alt="option.label" />
             </span>
             <span class="ui-select__option-content">
               <span class="ui-select__option-label">{{ option.label }}</span>

@@ -5,7 +5,7 @@ import { useRouter } from 'vue-router';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import NotificationCenter from '@/components/common/NotificationCenter.vue';
 import ThemeSwitcher from '@/components/common/ThemeSwitcher.vue';
-import { resolveAssetUrl } from '@/services/api';
+import PrivateImage from '@/components/common/PrivateImage.vue';
 import { useAuthStore } from '@/stores/authStore';
 import { useToastStore } from '@/stores/toastStore';
 
@@ -16,7 +16,7 @@ const toastStore = useToastStore();
 const showUserMenu = ref(false);
 const displayName = computed(() => authStore.user?.name || authStore.user?.email || '个人中心');
 const userInitial = computed(() => displayName.value.trim().slice(0, 1).toUpperCase() || 'U');
-const avatarSrc = computed(() => resolveAssetUrl(authStore.user?.avatar));
+const avatarSrc = computed(() => authStore.user?.avatar || '');
 
 function openProfile() {
   showUserMenu.value = false;
@@ -50,7 +50,7 @@ function logout() {
           @click="showUserMenu = !showUserMenu"
         >
           <span class="workspace-header__avatar">
-            <img v-if="avatarSrc" :src="avatarSrc" :alt="displayName" />
+            <PrivateImage v-if="avatarSrc" :src="avatarSrc" :alt="displayName" />
             <span v-else>{{ userInitial }}</span>
           </span>
           <span class="workspace-header__user-name">{{ displayName }}</span>

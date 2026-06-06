@@ -512,7 +512,7 @@ export const useAgentStore = defineStore('agent', () => {
   const streamingText = ref('');
   const designSpec = ref<DesignSpec | null>(null);
   const specLock = ref<SpecLock | null>(null);
-  const svgPages = ref<Array<{ pageNumber: number; svg: string; speakerNotes: string }>>([]);
+  const svgPages = ref<Array<{ pageNumber: number; svg: string; speakerNotes: string; visualSummary?: string }>>([]);
   const selectedPromptId = ref<string>('');
   const currentGeneratingSlide = ref<string | null>(null);
   const generatedSlides = ref<Set<string>>(new Set());
@@ -879,7 +879,8 @@ export const useAgentStore = defineStore('agent', () => {
         ? svgPages.value.map(page => ({
             pageNumber: page.pageNumber,
             svg: page.svg,
-            speakerNotes: page.speakerNotes
+            speakerNotes: page.speakerNotes,
+            visualSummary: page.visualSummary,
           }))
         : svgPages.value,
       paused: isPaused.value,
@@ -1131,6 +1132,7 @@ export const useAgentStore = defineStore('agent', () => {
             description: slide.description ? String(slide.description) : undefined,
             svg: typeof slide.svg === 'string' && slide.svg.trim() ? slide.svg : undefined,
             pageNumber: Number(slide.pageNumber) || undefined,
+            visualSummary: slide.visualSummary ? String(slide.visualSummary) : undefined,
           }))
         : fallback.previewSlides,
       constraints: {

@@ -51,11 +51,11 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function login(email: string, password: string) {
+  async function login(email: string, password: string, captchaToken: string) {
     loading.value = true;
     error.value = null;
 
-    const response = await authApi.login(email, password);
+    const response = await authApi.login(email, password, captchaToken);
 
     if (response.success && response.data) {
       token.value = response.data.token;

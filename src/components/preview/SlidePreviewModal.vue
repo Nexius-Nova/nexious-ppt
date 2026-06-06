@@ -2,6 +2,7 @@
 import { ChevronLeft, ChevronRight, X, Maximize2 } from 'lucide-vue-next';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
+import PrivateBackground from '@/components/common/PrivateBackground.vue';
 import { getTemplateColors } from '@/composables/templateColors';
 import type { SlideOutline, GeneratedImage, AgentParameters } from '@/types/agent';
 
@@ -80,15 +81,15 @@ function onKeyDown(event: KeyboardEvent) {
             <!-- full-image: title overlay -->
             <h2 v-else class="preview-title-overlay" :style="{ color: getTemplateColor().text }">{{ slide.title }}</h2>
             <!-- Image -->
-            <div
+            <PrivateBackground
               v-if="(slide.layout || 'text-only') !== 'text-only' && image?.url"
               class="preview-image"
+              :src="image.url"
               :class="{
                 'preview-image--right': (slide.layout || 'text-only') === 'text-image',
                 'preview-image--left': (slide.layout || 'text-only') === 'image-text',
                 'preview-image--full': (slide.layout || 'text-only') === 'full-image'
               }"
-              :style="{ backgroundImage: `url(${image.url})` }"
             />
             <div
               v-if="(slide.layout || 'text-only') !== 'text-only' && !image?.url"

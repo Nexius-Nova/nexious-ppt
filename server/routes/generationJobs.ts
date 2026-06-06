@@ -8,6 +8,7 @@ import {
   updateGenerationJob,
   type GenerationJobStatus,
 } from '../models/generationJob.js';
+import { getProjectByIdForUser } from '../models/project.js';
 
 const router = Router();
 const ALLOWED_STATUSES = new Set<GenerationJobStatus>([
@@ -42,6 +43,12 @@ function normalizeJob(job: any) {
   };
 }
 
+async function ensureOwnedProject(userId: number, projectId: string) {
+  const id = Number(projectId);
+  if (!Number.isSafeInteger(id) || id <= 0) return false;
+  return Boolean(await getProjectByIdForUser(id, userId));
+}
+
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId!;
@@ -54,6 +61,10 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         code: 'PROJECT_REQUIRED',
         message: '缺少 PPT 项目 ID',
       });
+    }
+
+    if (!(await ensureOwnedProject(userId, normalizedProjectId))) {
+      return res.status(404).json({ success: false, message: '项目不存在或无权访问' });
     }
 
     const id = await createGenerationJob({
@@ -85,6 +96,10 @@ router.get('/project/:projectId', async (req: AuthRequest, res: Response) => {
     const projectId = String(req.params.projectId || '').trim();
     if (!projectId) {
       return res.status(400).json({ success: false, message: '缺少 PPT 项目 ID' });
+    }
+
+    if (!(await ensureOwnedProject(req.userId!, projectId))) {
+      return res.status(404).json({ success: false, message: '项目不存在或无权访问' });
     }
 
     const jobs = await getGenerationJobsByProject(req.userId!, projectId, parseLimit(req.query.limit));

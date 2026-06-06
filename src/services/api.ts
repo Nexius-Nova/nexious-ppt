@@ -237,6 +237,27 @@ export interface User {
   createdAt?: string;
 }
 
+export type AuthCaptchaChallenge =
+  | {
+      challengeId: string;
+      type: 'click';
+      prompt: string;
+      imageSvg: string;
+      expiresIn: number;
+    }
+  | {
+      challengeId: string;
+      type: 'slider';
+      prompt: string;
+      imageSvg: string;
+      pieceSvg: string;
+      initialX: number;
+      pieceY: number;
+      pieceSize: number;
+      trackWidth: number;
+      expiresIn: number;
+    };
+
 export interface ApiKey {
   id: number;
   name: string;
@@ -273,10 +294,19 @@ export const authApi = {
       name,
     }),
 
-  login: (email: string, password: string) =>
+  createCaptcha: (email: string) =>
+    api.post<AuthCaptchaChallenge>('/api/auth/captcha', {
+      email,
+    }),
+
+  verifyCaptcha: (data: { email: string; challengeId: string; x: number; y?: number }) =>
+    api.post<{ captchaToken: string; expiresIn: number }>('/api/auth/captcha/verify', data),
+
+  login: (email: string, password: string, captchaToken: string) =>
     api.post<{ userId: number; email: string; name: string; avatar: string | null; token: string }>('/api/auth/login', {
       email,
       password,
+      captchaToken,
     }),
 
   getMe: () => api.get<User>('/api/auth/me'),
@@ -925,6 +955,24 @@ export interface RunConfig {
   updated_at: string;
 }
 
+export interface ImportedPptxSvgSlide {
+  pageNumber: number;
+  title: string;
+  bullets: string[];
+  description: string;
+  layout: string;
+  svg: string;
+  visualSummary?: string;
+}
+
+export interface ImportedPptxSvgPreview {
+  slideCount: number;
+  width: number;
+  height: number;
+  slides: ImportedPptxSvgSlide[];
+  allText: string;
+}
+
 export type GenerationJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface GenerationJob {
@@ -1014,6 +1062,9 @@ export const templateApi = {
   getCategories: () => api.get<string[]>('/api/templates/categories'),
 
   getById: (id: number) => api.get<Template>(`/api/templates/${id}`),
+
+  importPptxPreview: (data: { filename: string; dataBase64: string }) =>
+    api.post<ImportedPptxSvgPreview>('/api/templates/import-pptx/preview', data, { timeoutMs: 150000 }),
 
   create: (data: {
     name: string;

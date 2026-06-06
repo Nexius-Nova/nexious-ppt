@@ -48,16 +48,41 @@ function describeSlide(slide: any) {
   return slide.speakerNotes || bullets || slide.visualPrompt || undefined;
 }
 
+function summarizeSvgForTemplate(svg?: string, pageNumber?: number) {
+  if (typeof svg !== 'string' || !svg.trim()) return undefined;
+  const source = svg.trim();
+  const count = (tag: string) => (source.match(new RegExp(`<${tag}\\b`, 'gi')) || []).length;
+  const colors = Array.from(new Set(source.match(/#[0-9a-fA-F]{6,8}\b/g) || [])).slice(0, 8);
+  const viewBox = source.match(/viewBox=["']([^"']+)["']/i)?.[1] || '';
+  const fullSlideImage = /<image\b[^>]*x="0"[^>]*y="0"[^>]*preserveAspectRatio="none"/i.test(source);
+  return [
+    `第 ${pageNumber || ''} 页视觉参考`,
+    viewBox ? `画布 ${viewBox}` : '',
+    fullSlideImage ? '整页图片快照铺满画布，重点参考构图、色彩、留白和装饰语言，不复用业务内容' : '',
+    `元素统计 image:${count('image')}, text:${count('text')}, rect:${count('rect')}, path:${count('path')}, line:${count('line')}`,
+    colors.length ? `主要颜色 ${colors.join(', ')}` : '',
+  ].filter(Boolean).join('；');
+}
+
 function pickPreviewSvgPages(state: PptProjectState | null) {
   const pages = (state?.svgPages || [])
     .filter((page) => page.svg?.trim())
     .sort((a, b) => a.pageNumber - b.pageNumber);
-  if (pages.length <= 4) return pages;
+  if (pages.length <= 8) return pages;
 
   const first = pages[0];
   const last = pages[pages.length - 1];
-  const middle = pages.slice(1, -1).slice(0, 2);
-  return [first, ...middle, last].filter(Boolean);
+  const middle = pages.slice(1, -1);
+  const sampled: typeof pages = [];
+  const slots = 6;
+  for (let index = 0; index < Math.min(slots, middle.length); index += 1) {
+    const pickIndex = Math.round((index * (middle.length - 1)) / Math.max(1, slots - 1));
+    const page = middle[pickIndex];
+    if (page && !sampled.some((item) => item.pageNumber === page.pageNumber)) {
+      sampled.push(page);
+    }
+  }
+  return [first, ...sampled, last].filter(Boolean);
 }
 
 export function buildTemplatePayloadFromProject(
@@ -136,6 +161,7 @@ export function buildTemplatePayloadFromProject(
           description: describeSlide(slide),
           svg: page.svg || undefined,
           pageNumber: Number(page.pageNumber) || index + 1,
+          visualSummary: page.visualSummary || summarizeSvgForTemplate(page.svg, Number(page.pageNumber) || index + 1),
         };
       }),
       constraints: {

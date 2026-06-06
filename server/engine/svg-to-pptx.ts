@@ -4,6 +4,8 @@ import { buildSpecLock, type SpecLock } from './spec.js';
 import pptxgenModule from 'pptxgenjs';
 import JSZip from 'jszip';
 import { createHash } from 'node:crypto';
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 const PptxGen = (pptxgenModule as any).default || pptxgenModule;
 const MAX_EXPORT_CACHE_ITEMS = 120;
@@ -73,6 +75,7 @@ function escapeXmlText(value: unknown): string {
 
 async function inlineRemoteImages(svg: string): Promise<string> {
   const publicBaseUrl = (process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/+$/, '');
+  const generatedImageRoot = path.join(process.cwd(), '.generated', 'images');
   const imgRegex = /<image\b([^>]*?)\/?\s*>/gi;
   const matches: Array<{ full: string; href: string }> = [];
   let m;
@@ -95,10 +98,32 @@ async function inlineRemoteImages(svg: string): Promise<string> {
         continue;
       }
 
-      const resp = await fetch(fetchUrl, { signal: AbortSignal.timeout(10000) });
-      if (!resp.ok) continue;
-      const contentType = resp.headers.get('content-type') || 'image/png';
-      const buf = Buffer.from(await resp.arrayBuffer());
+      let contentType = 'image/png';
+      let buf: Buffer;
+      const localUrl = new URL(fetchUrl);
+      const publicUrl = new URL(publicBaseUrl);
+
+      if (localUrl.origin === publicUrl.origin && localUrl.pathname.startsWith('/generated-images/')) {
+        const relativePath = decodeURIComponent(localUrl.pathname.replace(/^\/generated-images\/?/, ''));
+        const safePath = path.normalize(relativePath).replace(/^(\.\.(\/|\\|$))+/, '');
+        const filePath = path.join(generatedImageRoot, safePath);
+        const relativeToRoot = path.relative(generatedImageRoot, filePath);
+        if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) continue;
+        const ext = path.extname(filePath).toLowerCase();
+        contentType = ext === '.jpg' || ext === '.jpeg'
+          ? 'image/jpeg'
+          : ext === '.webp'
+          ? 'image/webp'
+          : ext === '.gif'
+          ? 'image/gif'
+          : 'image/png';
+        buf = await readFile(filePath);
+      } else {
+        const resp = await fetch(fetchUrl, { signal: AbortSignal.timeout(10000) });
+        if (!resp.ok) continue;
+        contentType = resp.headers.get('content-type') || 'image/png';
+        buf = Buffer.from(await resp.arrayBuffer());
+      }
       const b64 = buf.toString('base64');
       const dataUrl = `data:${contentType};base64,${b64}`;
       rememberCacheValue(remoteImageCache, fetchUrl, dataUrl);

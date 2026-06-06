@@ -46,6 +46,8 @@ import ShortcutsHelp from '@/components/common/ShortcutsHelp.vue';
 import AiChatPanel from '@/components/panels/AiChatPanel.vue';
 import VersionHistory from '@/components/common/VersionHistory.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
+import PrivateImage from '@/components/common/PrivateImage.vue';
+import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useShortcuts } from '@/composables/useShortcuts';
 import { slideNeedsImage } from '@/utils/slideVisuals';
@@ -833,11 +835,10 @@ async function retryImage(slideId: string) {
                         :disabled="!imageBySlideId.get(slide.id)?.url || imageBySlideId.get(slide.id)?.error"
                         @click="openImagePreview(slide.id)"
                       >
-                        <img
+                        <PrivateImage
                           v-if="imageBySlideId.get(slide.id)?.url && !imageBySlideId.get(slide.id)?.error"
                           :src="imageBySlideId.get(slide.id)?.url"
                           :alt="slide.title"
-                          loading="lazy"
                         />
                         <Maximize2 v-if="imageBySlideId.get(slide.id)?.url && !imageBySlideId.get(slide.id)?.error" :size="14" class="image-page-item__zoom" />
                         <Image v-else :size="18" />
@@ -910,7 +911,7 @@ async function retryImage(slideId: string) {
                     </div>
                     <div class="executor-preview">
                       <div class="executor-preview__live">
-                        <div v-if="latestSvgPage" class="executor-preview__canvas" v-html="latestSvgPage.svg" />
+                        <PrivateSvg v-if="latestSvgPage" class="executor-preview__canvas" :svg="latestSvgPage.svg" />
                         <div v-else class="executor-preview__empty">
                           <Paintbrush :size="28" />
                           <span>等待第一张 SVG 页面</span>
@@ -941,7 +942,7 @@ async function retryImage(slideId: string) {
                             @click="previewPageIndex = i - 1; goToWorkflowStep('preview')"
                           >
                             <span>{{ i }}</span>
-                            <div v-html="svgPages[i - 1].svg" />
+                            <PrivateSvg :svg="svgPages[i - 1].svg" />
                           </button>
                           <button
                             v-if="isFallbackPageSvg(svgPages[i - 1].svg)"
@@ -1044,7 +1045,7 @@ async function retryImage(slideId: string) {
           </button>
         </header>
         <div class="image-preview-modal__canvas">
-          <img :src="previewingImage.url" :alt="previewingImage.title" />
+          <PrivateImage :src="previewingImage.url" :alt="previewingImage.title" />
         </div>
         <footer class="image-preview-modal__footer">
           <UiButton variant="secondary" @click="retryImage(previewingImage.slideId)">

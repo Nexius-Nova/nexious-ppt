@@ -5,6 +5,7 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
+import PrivateBackground from '@/components/common/PrivateBackground.vue';
 import SlidePreviewModal from './SlidePreviewModal.vue';
 import PresentationMode from './PresentationMode.vue';
 import { getTemplateColors, accentToTemplateColors } from '@/composables/templateColors';
@@ -115,16 +116,16 @@ function getLayoutLabel(layout?: string): string {
                 <h3 :style="{ color: colors.text, textShadow: '0 2px 8px rgba(0,0,0,0.6)' }">{{ slide.title }}</h3>
               </div>
               <!-- Image area -->
-              <div
+              <PrivateBackground
                 v-if="(slide.layout || 'text-only') !== 'text-only' && imageBySlide.get(slide.id)?.url"
                 class="preview-visual"
+                :src="imageBySlide.get(slide.id)?.url"
                 :class="{
                   'preview-visual--right': (slide.layout || 'text-only') === 'text-image',
                   'preview-visual--left': (slide.layout || 'text-only') === 'image-text',
                   'preview-visual--full': (slide.layout || 'text-only') === 'full-image'
                 }"
                 :style="{
-                  backgroundImage: `url(${imageBySlide.get(slide.id)?.url})`,
                   backgroundColor: colors.panel
                 }"
               />

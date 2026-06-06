@@ -3,24 +3,32 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import path from 'path';
 import { promises as fs } from 'fs';
-import { randomUUID } from 'crypto';
+import { createHash, randomInt, randomUUID } from 'crypto';
 import {
   getUserById,
   getUserByEmail,
   createUser,
   updateUser,
-  deleteUser,
-  getAllUsers,
-  getUserCount
+  deleteUser
 } from '../models/user.js';
-import { encrypt, decrypt } from '../utils/crypto.js';
 
 const router = Router();
 const DEFAULT_JWT_SECRET = 'your-secret-key-change-in-production';
 const JWT_SECRET = process.env.JWT_SECRET || DEFAULT_JWT_SECRET;
 const SALT_ROUNDS = 10;
+
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = Number(process.env.LOGIN_MAX_ATTEMPTS || 8);
+const AUTH_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_MAX_REQUESTS = Number(process.env.AUTH_MAX_REQUESTS || 80);
+const CAPTCHA_WINDOW_MS = 10 * 60 * 1000;
+const CAPTCHA_MAX_REQUESTS = Number(process.env.CAPTCHA_MAX_REQUESTS || 30);
+const CAPTCHA_MAX_REQUESTS_PER_USER_IP = Number(process.env.CAPTCHA_MAX_REQUESTS_PER_USER_IP || 12);
+const CAPTCHA_MAX_REQUESTS_PER_IP = Number(process.env.CAPTCHA_MAX_REQUESTS_PER_IP || 120);
+const CAPTCHA_EXPIRES_MS = 2 * 60 * 1000;
+const CAPTCHA_TOKEN_EXPIRES_MS = 3 * 60 * 1000;
+const CAPTCHA_MAX_ATTEMPTS = 4;
+
 const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 const AVATAR_MIME_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -28,7 +36,22 @@ const AVATAR_MIME_EXT: Record<string, string> = {
   'image/webp': 'webp',
   'image/gif': 'gif',
 };
+
 const loginAttempts = new Map<string, { count: number; firstAt: number }>();
+const authRequests = new Map<string, { count: number; firstAt: number }>();
+const captchaRequests = new Map<string, { count: number; firstAt: number }>();
+const captchaChallenges = new Map<string, {
+  key: string;
+  type: 'click' | 'slider';
+  expiresAt: number;
+  attempts: number;
+  target: { x: number; y?: number; width?: number; height?: number; tolerance?: number };
+}>();
+const captchaTokens = new Map<string, { key: string; expiresAt: number; used: boolean }>();
+
+type CaptchaVerifyResult =
+  | { ok: true; captchaToken: string; expiresIn: number }
+  | { ok: false; message: string };
 
 if (process.env.NODE_ENV === 'production' && JWT_SECRET === DEFAULT_JWT_SECRET) {
   throw new Error('JWT_SECRET must be configured in production');
@@ -50,9 +73,83 @@ function verifyToken(token: string): { userId: number } | null {
   }
 }
 
+function clientIp(req: Request): string {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function normalizeEmail(value: unknown): string {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
+}
+
+function isStrongPassword(password: string): boolean {
+  return password.length >= 8 && password.length <= 128 && /[A-Za-z]/.test(password) && /\d/.test(password);
+}
+
+function rateKey(req: Request, scope: string): string {
+  return `${scope}:${clientIp(req)}`;
+}
+
+function emailScopedRateKey(req: Request, scope: string, email: unknown): string {
+  const hash = createHash('sha256').update(normalizeEmail(email)).digest('hex').slice(0, 16);
+  return `${scope}:${clientIp(req)}:${hash}`;
+}
+
+function isRateLimited(bucket: Map<string, { count: number; firstAt: number }>, key: string, maxRequests: number, windowMs: number): boolean {
+  const now = Date.now();
+  const entry = bucket.get(key);
+  if (!entry || now - entry.firstAt > windowMs) {
+    bucket.set(key, { count: 1, firstAt: now });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > maxRequests;
+}
+
+function checkCaptchaRateLimit(req: Request, email: unknown, action: 'request' | 'verify') {
+  const ipLimited = isRateLimited(
+    captchaRequests,
+    rateKey(req, `captcha-${action}-ip`),
+    CAPTCHA_MAX_REQUESTS_PER_IP,
+    CAPTCHA_WINDOW_MS
+  );
+  if (ipLimited) {
+    return {
+      limited: true,
+      message: '该 IP 验证码请求过于频繁，请稍后再试'
+    };
+  }
+
+  const userIpLimited = isRateLimited(
+    captchaRequests,
+    emailScopedRateKey(req, `captcha-${action}-user-ip`, email),
+    CAPTCHA_MAX_REQUESTS_PER_USER_IP,
+    CAPTCHA_WINDOW_MS
+  );
+  if (userIpLimited) {
+    return {
+      limited: true,
+      message: '该邮箱验证码请求过于频繁，请稍后再试'
+    };
+  }
+
+  const actionLimited = isRateLimited(
+    captchaRequests,
+    emailScopedRateKey(req, `captcha-${action}`, email),
+    CAPTCHA_MAX_REQUESTS,
+    CAPTCHA_WINDOW_MS
+  );
+  return {
+    limited: actionLimited,
+    message: action === 'request' ? '验证码请求过于频繁，请稍后再试' : '验证码校验过于频繁，请稍后再试'
+  };
+}
+
 function loginAttemptKey(req: Request, email: unknown): string {
-  const ip = req.ip || req.socket.remoteAddress || 'unknown';
-  return `${ip}:${String(email || '').trim().toLowerCase()}`;
+  return `${clientIp(req)}:${normalizeEmail(email)}`;
 }
 
 function isLoginRateLimited(key: string): boolean {
@@ -79,9 +176,301 @@ function clearLoginFailures(key: string) {
   loginAttempts.delete(key);
 }
 
+function cleanupCaptchaState() {
+  const now = Date.now();
+  for (const [id, challenge] of captchaChallenges) {
+    if (challenge.expiresAt <= now) captchaChallenges.delete(id);
+  }
+  for (const [token, entry] of captchaTokens) {
+    if (entry.expiresAt <= now || entry.used) captchaTokens.delete(token);
+  }
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildShapePath(kind: string, x: number, y: number) {
+  if (kind === 'circle') return `<circle cx="${x}" cy="${y}" r="18" />`;
+  if (kind === 'diamond') return `<path d="M${x} ${y - 22}L${x + 22} ${y}L${x} ${y + 22}L${x - 22} ${y}Z" />`;
+  if (kind === 'shield') return `<path d="M${x - 18} ${y - 20}H${x + 18}V${y + 2}C${x + 18} ${y + 18} ${x + 5} ${y + 27} ${x} ${y + 30}C${x - 5} ${y + 27} ${x - 18} ${y + 18} ${x - 18} ${y + 2}Z" />`;
+  if (kind === 'flag') return `<path d="M${x - 17} ${y + 22}V${y - 22}H${x + 17}L${x + 7} ${y - 6}L${x + 17} ${y + 10}H${x - 17}Z" />`;
+  if (kind === 'triangle') return `<path d="M${x} ${y - 25}L${x + 25} ${y + 20}H${x - 25}Z" />`;
+  if (kind === 'hexagon') return `<path d="M${x - 20} ${y - 12}L${x} ${y - 25}L${x + 20} ${y - 12}V${y + 12}L${x} ${y + 25}L${x - 20} ${y + 12}Z" />`;
+  return `<path d="M${x} ${y - 23}L${x + 7} ${y - 7}L${x + 24} ${y - 6}L${x + 10} ${y + 5}L${x + 15} ${y + 22}L${x} ${y + 12}L${x - 15} ${y + 22}L${x - 10} ${y + 5}L${x - 24} ${y - 6}L${x - 7} ${y - 7}Z" />`;
+}
+
+function randomFloat(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
+function pickOne<T>(items: T[]): T {
+  return items[randomInt(0, items.length)];
+}
+
+function shuffled<T>(items: T[]): T[] {
+  const next = [...items];
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomInt(0, index + 1);
+    [next[index], next[swapIndex]] = [next[swapIndex], next[index]];
+  }
+  return next;
+}
+
+function createRandomPositions(count: number) {
+  const positions: Array<{ x: number; y: number }> = [];
+  let guard = 0;
+  while (positions.length < count && guard < 120) {
+    guard += 1;
+    const candidate = { x: randomInt(48, 273), y: randomInt(58, 134) };
+    const farEnough = positions.every(pos => Math.hypot(pos.x - candidate.x, pos.y - candidate.y) >= 62);
+    if (farEnough) positions.push(candidate);
+  }
+  while (positions.length < count) {
+    positions.push({ x: randomInt(48, 273), y: randomInt(58, 134) });
+  }
+  return positions;
+}
+
+function createBackgroundMarks(count: number) {
+  const colors = ['#E2E8F0', '#CBD5E1', '#D9E6E2', '#E8E0D4', '#DBE7F3'];
+  return Array.from({ length: count }, () => {
+    const x = randomInt(18, 292);
+    const y = randomInt(40, 138);
+    const w = randomInt(12, 42);
+    const h = randomInt(5, 18);
+    const rx = randomInt(3, 8);
+    const opacity = randomFloat(0.38, 0.74).toFixed(2);
+    return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}" fill="${pickOne(colors)}" opacity="${opacity}" />`;
+  }).join('');
+}
+
+function createClickCaptcha(email: unknown, req: Request) {
+  cleanupCaptchaState();
+  const challengeId = randomUUID();
+  const key = emailScopedRateKey(req, 'captcha', email);
+  const palette = shuffled(['#334155', '#0F766E', '#B45309', '#7F1D1D', '#1D4ED8', '#166534', '#92400E', '#4338CA']);
+  const shapes = shuffled([
+    { kind: 'shield', label: '盾牌' },
+    { kind: 'star', label: '星形' },
+    { kind: 'diamond', label: '菱形' },
+    { kind: 'flag', label: '旗帜' },
+    { kind: 'circle', label: '圆形' },
+    { kind: 'triangle', label: '三角形' },
+    { kind: 'hexagon', label: '六边形' }
+  ]).slice(0, randomInt(5, 8));
+  const targetIndex = randomInt(0, shapes.length);
+  const positions = createRandomPositions(shapes.length);
+  const backgroundMarks = createBackgroundMarks(randomInt(6, 12));
+
+  const elements = shapes.map((shape, index) => {
+    const pos = positions[index];
+    const scale = randomFloat(0.82, 1.22).toFixed(2);
+    const rotation = randomInt(-22, 23);
+    const opacity = index === targetIndex ? '0.96' : '0.72';
+    return `<g transform="translate(${pos.x} ${pos.y}) rotate(${rotation}) scale(${scale}) translate(${-pos.x} ${-pos.y})" fill="${palette[index]}" stroke="#0F172A" stroke-width="2" opacity="${opacity}">
+      ${buildShapePath(shape.kind, pos.x, pos.y)}
+    </g>`;
+  }).join('');
+
+  const targetPos = positions[targetIndex];
+  const targetSize = 64;
+  captchaChallenges.set(challengeId, {
+    key,
+    type: 'click',
+    expiresAt: Date.now() + CAPTCHA_EXPIRES_MS,
+    attempts: 0,
+    target: { x: targetPos.x - targetSize / 2, y: targetPos.y - targetSize / 2 + 10, width: targetSize, height: targetSize }
+  });
+
+  const prompt = `请点击图中的${shapes[targetIndex].label}`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 170" role="img" aria-label="${escapeXml(prompt)}">
+    <rect width="320" height="170" rx="10" fill="#F8FAFC" />
+    <rect x="1" y="1" width="318" height="168" rx="9" fill="none" stroke="#CBD5E1" />
+    <text x="18" y="26" font-size="15" font-weight="700" fill="#0F172A">${escapeXml(prompt)}</text>
+    <g>${backgroundMarks}</g>
+    <g transform="translate(0 10)">${elements}</g>
+    <path d="M18 146H302" stroke="#CBD5E1" stroke-width="1" stroke-dasharray="4 5" />
+  </svg>`;
+
+  return { challengeId, type: 'click' as const, prompt, imageSvg: svg, expiresIn: Math.floor(CAPTCHA_EXPIRES_MS / 1000) };
+}
+
+function buildPuzzlePath(size: number, variant: number) {
+  const notch = Math.round(size * 0.22);
+  const mid = Math.round(size * 0.5);
+  if (variant === 1) {
+    return [
+      `M4 4H${size - 4}V${mid - notch}`,
+      `C${size - 2} ${mid - notch} ${size - 2} ${mid + notch} ${size - 4} ${mid + notch}`,
+      `V${size - 4}H${mid + notch}`,
+      `C${mid + notch} ${size} ${mid - notch} ${size} ${mid - notch} ${size - 4}`,
+      'H4V4Z'
+    ].join('');
+  }
+  if (variant === 2) {
+    return [
+      `M5 5H${mid - notch}`,
+      `C${mid - notch} 1 ${mid + notch} 1 ${mid + notch} 5`,
+      `H${size - 5}V${size - 5}H5V${mid + notch}`,
+      `C1 ${mid + notch} 1 ${mid - notch} 5 ${mid - notch}`,
+      'Z'
+    ].join('');
+  }
+  if (variant === 3) {
+    return [
+      `M5 5H${size - 5}V${mid - notch}`,
+      `C${size - 1} ${mid - notch} ${size - 1} ${mid + notch} ${size - 5} ${mid + notch}`,
+      `V${size - 5}H${mid - notch}`,
+      `C${mid - notch} ${size - 1} ${mid + notch} ${size - 1} ${mid + notch} ${size - 5}`,
+      'H5Z'
+    ].join('');
+  }
+  return [
+    `M4 4H${mid - notch}`,
+    `C${mid - notch} 0 ${mid + notch} 0 ${mid + notch} 4`,
+    `H${size - 4}V${mid - notch}`,
+    `C${size} ${mid - notch} ${size} ${mid + notch} ${size - 4} ${mid + notch}`,
+    `V${size - 4}H4V${mid + notch}`,
+    `C0 ${mid + notch} 0 ${mid - notch} 4 ${mid - notch}`,
+    'Z'
+  ].join('');
+}
+
+function createSliderCaptcha(email: unknown, req: Request) {
+  cleanupCaptchaState();
+  const challengeId = randomUUID();
+  const key = emailScopedRateKey(req, 'captcha', email);
+  const pieceSize = randomInt(42, 57);
+  const targetX = randomInt(118, 292 - pieceSize);
+  const pieceY = randomInt(52, 122 - pieceSize);
+  const initialX = randomInt(8, 37);
+  const prompt = '拖动滑块完成拼图';
+  const puzzlePath = buildPuzzlePath(pieceSize, randomInt(0, 4));
+  const fill = pickOne(['#E2E8F0', '#D9E6E2', '#E8E0D4', '#DBE7F3', '#E7E5E4']);
+  const accent = pickOne(['#0F766E', '#334155', '#B45309', '#1D4ED8', '#7F1D1D']);
+  const backgroundFill = pickOne(['#F8FAFC', '#F6F8F5', '#FAF8F4', '#F7F9FB']);
+  const backgroundMarks = createBackgroundMarks(randomInt(9, 17));
+  const guideY = randomInt(140, 150);
+
+  captchaChallenges.set(challengeId, {
+    key,
+    type: 'slider',
+    expiresAt: Date.now() + CAPTCHA_EXPIRES_MS,
+    attempts: 0,
+    target: { x: targetX, tolerance: Math.max(6, Math.round(pieceSize * 0.16)) }
+  });
+
+  const imageSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 170" role="img" aria-label="${escapeXml(prompt)}">
+    <rect width="320" height="170" rx="10" fill="${backgroundFill}" />
+    <rect x="1" y="1" width="318" height="168" rx="9" fill="none" stroke="#CBD5E1" />
+    <text x="18" y="26" font-size="15" font-weight="700" fill="#0F172A">${escapeXml(prompt)}</text>
+    <g>${backgroundMarks}</g>
+    <g transform="translate(${targetX} ${pieceY})">
+      <path d="${puzzlePath}" fill="#FFFFFF" stroke="#64748B" stroke-width="2" opacity="0.88" />
+      <path d="${puzzlePath}" fill="none" stroke="#0F172A" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.45" />
+    </g>
+    <path d="M18 ${guideY}H302" stroke="#CBD5E1" stroke-width="1" stroke-dasharray="4 5" />
+  </svg>`;
+
+  const pieceSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${pieceSize} ${pieceSize}" role="img" aria-label="滑块拼图块">
+    <path d="${puzzlePath}" fill="${fill}" stroke="#0F172A" stroke-width="2" />
+    <path d="M10 12H34M10 24H30M10 36H26" stroke="${accent}" stroke-width="3" stroke-linecap="round" opacity="0.85" />
+  </svg>`;
+
+  return {
+    challengeId,
+    type: 'slider' as const,
+    prompt,
+    imageSvg,
+    pieceSvg,
+    initialX,
+    pieceY,
+    pieceSize,
+    trackWidth: 320,
+    expiresIn: Math.floor(CAPTCHA_EXPIRES_MS / 1000)
+  };
+}
+
+function createCaptcha(email: unknown, req: Request) {
+  return randomInt(0, 2) === 0 ? createClickCaptcha(email, req) : createSliderCaptcha(email, req);
+}
+
+function issueCaptchaToken(req: Request, email: unknown, challengeId: unknown): CaptchaVerifyResult {
+  captchaChallenges.delete(String(challengeId || ''));
+  const captchaToken = randomUUID();
+  captchaTokens.set(captchaToken, {
+    key: emailScopedRateKey(req, 'captcha', email),
+    expiresAt: Date.now() + CAPTCHA_TOKEN_EXPIRES_MS,
+    used: false
+  });
+  return { ok: true, captchaToken, expiresIn: Math.floor(CAPTCHA_TOKEN_EXPIRES_MS / 1000) };
+}
+
+function verifyCaptchaChallenge(req: Request, email: unknown, challengeId: unknown, x: unknown, y: unknown): CaptchaVerifyResult {
+  cleanupCaptchaState();
+  const challenge = captchaChallenges.get(String(challengeId || ''));
+  if (!challenge) return { ok: false, message: '验证码已过期，请刷新后重试' };
+  if (challenge.key !== emailScopedRateKey(req, 'captcha', email)) {
+    captchaChallenges.delete(String(challengeId || ''));
+    return { ok: false, message: '验证码与当前邮箱不匹配，请重新获取' };
+  }
+
+  challenge.attempts += 1;
+  if (challenge.attempts > CAPTCHA_MAX_ATTEMPTS) {
+    captchaChallenges.delete(String(challengeId || ''));
+    return { ok: false, message: '验证码尝试次数过多，请刷新后重试' };
+  }
+
+  const px = Number(x);
+  const target = challenge.target;
+  let matched = false;
+  if (challenge.type === 'click') {
+    const py = Number(y);
+    matched = Number.isFinite(px) && Number.isFinite(py)
+      && target.y !== undefined
+      && target.width !== undefined
+      && target.height !== undefined
+      && px >= target.x
+      && px <= target.x + target.width
+      && py >= target.y
+      && py <= target.y + target.height;
+  } else {
+    matched = Number.isFinite(px) && Math.abs(px - target.x) <= (target.tolerance ?? 6);
+  }
+
+  if (!matched) {
+    return {
+      ok: false,
+      message: challenge.type === 'slider' ? '滑块位置不正确，请再试一次' : '点击位置不正确，请再试一次'
+    };
+  }
+
+  return issueCaptchaToken(req, email, challengeId);
+}
+
+function consumeCaptchaToken(req: Request, email: unknown, captchaToken: unknown): boolean {
+  cleanupCaptchaState();
+  const token = String(captchaToken || '');
+  const entry = captchaTokens.get(token);
+  if (!entry || entry.used || entry.expiresAt <= Date.now()) {
+    captchaTokens.delete(token);
+    return false;
+  }
+  if (entry.key !== emailScopedRateKey(req, 'captcha', email)) return false;
+  entry.used = true;
+  captchaTokens.delete(token);
+  return true;
+}
+
 async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({
       success: false,
@@ -92,7 +481,7 @@ async function authMiddleware(req: AuthRequest, res: Response, next: NextFunctio
 
   const token = authHeader.substring(7);
   const decoded = verifyToken(token);
-  
+
   if (!decoded) {
     return res.status(401).json({
       success: false,
@@ -105,14 +494,106 @@ async function authMiddleware(req: AuthRequest, res: Response, next: NextFunctio
   next();
 }
 
-router.post('/register', async (req: Request, res: Response) => {
+router.post('/captcha', async (req: Request, res: Response) => {
   try {
-    const { email, password, name } = req.body;
-
-    if (!email || !password) {
+    const email = normalizeEmail(req.body?.email);
+    if (!isValidEmail(email)) {
       return res.status(400).json({
         success: false,
-        message: '邮箱和密码不能为空'
+        message: '请先输入有效邮箱'
+      });
+    }
+    const captchaRateLimit = checkCaptchaRateLimit(req, email, 'request');
+    if (captchaRateLimit.limited) {
+      return res.status(429).json({
+        success: false,
+        code: 'CAPTCHA_RATE_LIMITED',
+        message: captchaRateLimit.message
+      });
+    }
+
+    res.json({
+      success: true,
+      data: createCaptcha(email, req)
+    });
+  } catch (error) {
+    console.error('创建验证码错误:', error);
+    res.status(500).json({
+      success: false,
+      message: '验证码创建失败'
+    });
+  }
+});
+
+router.post('/captcha/verify', async (req: Request, res: Response) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const { challengeId, x, y } = req.body || {};
+    if (!isValidEmail(email) || !challengeId) {
+      return res.status(400).json({
+        success: false,
+        message: '验证码参数不完整'
+      });
+    }
+    const captchaRateLimit = checkCaptchaRateLimit(req, email, 'verify');
+    if (captchaRateLimit.limited) {
+      return res.status(429).json({
+        success: false,
+        code: 'CAPTCHA_RATE_LIMITED',
+        message: captchaRateLimit.message
+      });
+    }
+
+    const result = verifyCaptchaChallenge(req, email, challengeId, x, y);
+    if (result.ok === false) {
+      return res.status(400).json({
+        success: false,
+        message: result.message
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        captchaToken: result.captchaToken,
+        expiresIn: result.expiresIn
+      },
+      message: '验证码通过'
+    });
+  } catch (error) {
+    console.error('校验验证码错误:', error);
+    res.status(500).json({
+      success: false,
+      message: '验证码校验失败'
+    });
+  }
+});
+
+router.post('/register', async (req: Request, res: Response) => {
+  try {
+    if (isRateLimited(authRequests, rateKey(req, 'register'), AUTH_MAX_REQUESTS, AUTH_WINDOW_MS)) {
+      return res.status(429).json({
+        success: false,
+        code: 'AUTH_RATE_LIMITED',
+        message: '请求过于频繁，请稍后再试'
+      });
+    }
+
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || '');
+    const name = String(req.body?.name || '').trim().slice(0, 80);
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: '请输入有效邮箱'
+      });
+    }
+
+    if (!isStrongPassword(password)) {
+      return res.status(400).json({
+        success: false,
+        message: '密码至少 8 位，且需要包含字母和数字'
       });
     }
 
@@ -155,13 +636,23 @@ router.post('/register', async (req: Request, res: Response) => {
 
 router.post('/login', async (req: Request, res: Response) => {
   try {
-    const { email, password } = req.body;
+    if (isRateLimited(authRequests, rateKey(req, 'login'), AUTH_MAX_REQUESTS, AUTH_WINDOW_MS)) {
+      return res.status(429).json({
+        success: false,
+        code: 'AUTH_RATE_LIMITED',
+        message: '请求过于频繁，请稍后再试'
+      });
+    }
+
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || '');
+    const captchaToken = req.body?.captchaToken;
     const attemptKey = loginAttemptKey(req, email);
 
-    if (!email || !password) {
+    if (!isValidEmail(email) || !password) {
       return res.status(400).json({
         success: false,
-        message: '邮箱和密码不能为空'
+        message: '邮箱或密码格式不正确'
       });
     }
 
@@ -170,6 +661,15 @@ router.post('/login', async (req: Request, res: Response) => {
         success: false,
         code: 'LOGIN_RATE_LIMITED',
         message: '登录失败次数过多，请稍后再试'
+      });
+    }
+
+    if (!consumeCaptchaToken(req, email, captchaToken)) {
+      recordLoginFailure(attemptKey);
+      return res.status(400).json({
+        success: false,
+        code: 'CAPTCHA_REQUIRED',
+        message: '请先完成图片验证码'
       });
     }
 
@@ -263,7 +763,7 @@ router.put('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
     const { name, avatar, currentPassword, password } = req.body;
     const updateData: any = {};
 
-    if (name !== undefined) updateData.name = name;
+    if (name !== undefined) updateData.name = String(name || '').trim().slice(0, 80);
     if (avatar !== undefined) {
       const avatarValue = String(avatar || '');
       if (avatarValue.startsWith('data:')) {
@@ -287,10 +787,10 @@ router.put('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
           message: '请输入当前密码'
         });
       }
-      if (String(password).length < 8) {
+      if (!isStrongPassword(String(password))) {
         return res.status(400).json({
           success: false,
-          message: '新密码至少 8 位'
+          message: '新密码至少 8 位，且需要包含字母和数字'
         });
       }
       const currentUser = await getUserById(req.userId);

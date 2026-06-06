@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { RefreshCw, Check, Loader2, ImageOff } from 'lucide-vue-next';
 import UiBadge from '@/components/ui/UiBadge.vue';
+import PrivateImage from '@/components/common/PrivateImage.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
@@ -131,12 +132,11 @@ function getStyleLabel(style: string) {
         @click="$emit('select', image.id)"
       >
         <div class="image-tile__visual">
-          <img
+          <PrivateImage
             v-if="image.url && !image.error"
             :src="image.url"
             :alt="image.title"
             class="image-tile__img"
-            loading="lazy"
           />
           <div v-else-if="isRunning && currentGeneratingSlide === image.slideId" class="image-tile__loading">
             <Loader2 :size="20" class="animate-spin" />

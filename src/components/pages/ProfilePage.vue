@@ -7,7 +7,7 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
-import { resolveAssetUrl } from '@/services/api';
+import PrivateImage from '@/components/common/PrivateImage.vue';
 import { useAuthStore } from '@/stores/authStore';
 import { useToastStore } from '@/stores/toastStore';
 
@@ -25,7 +25,7 @@ const isAvatarProcessing = ref(false);
 
 const displayName = computed(() => authStore.user?.name || authStore.user?.email || '当前用户');
 const userInitial = computed(() => displayName.value.trim().slice(0, 1).toUpperCase() || 'U');
-const avatarSrc = computed(() => resolveAssetUrl(avatar.value));
+const avatarSrc = computed(() => avatar.value);
 const wantsPasswordChange = computed(() => Boolean(currentPassword.value || newPassword.value || confirmPassword.value));
 const passwordRules = computed(() => [
   { label: '至少 8 位', done: newPassword.value.length >= 8 },
@@ -172,7 +172,7 @@ async function logout() {
         <div class="profile-fields">
           <div class="avatar-editor">
             <div class="avatar-editor__preview">
-              <img v-if="avatarSrc" :src="avatarSrc" :alt="displayName" />
+              <PrivateImage v-if="avatarSrc" :src="avatarSrc" :alt="displayName" />
               <span v-else>{{ userInitial }}</span>
             </div>
             <div class="avatar-editor__actions">

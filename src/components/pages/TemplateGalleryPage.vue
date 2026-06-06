@@ -21,13 +21,12 @@ import UiInput from '@/components/ui/UiInput.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
+import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import { templateApi, type Template } from '@/services/api';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
 import { buildTemplatePayloadFromProject } from '@/utils/templateFromProject';
 import type { AgentParameters, PptProjectState, SlideOutline, TemplateAssetSettings } from '@/types/agent';
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 type EditorForm = {
   name: string;
@@ -58,6 +57,8 @@ type ImportedPptSlide = {
   bullets: string[];
   description: string;
   layout: string;
+  svg?: string;
+  visualSummary?: string;
 };
 type ImportedPptParseResult = {
   slideCount: number;
@@ -140,6 +141,8 @@ const editorOutlineItems = computed(() => splitLines(editorForm.value.outlinePat
 const editorSuitableItems = computed(() => splitLines(editorForm.value.suitableFor || editorForm.value.category));
 const editorAvoidItems = computed(() => splitLines(editorForm.value.avoid));
 const editorPreviewSlides = computed(() => parsePreviewSlideLines(editorForm.value.previewSlides));
+const importPreviewSlides = computed(() => importDraft.value?.settings.previewSlides || []);
+const importHeroSlide = computed(() => importPreviewSlides.value[0] || null);
 const isTemplateNameDuplicated = computed(() => {
   const name = normalizeTemplateText(editorForm.value.name);
   if (!name) return false;
@@ -255,6 +258,7 @@ function normalizeSettings(template: Template): TemplateAssetSettings {
           description: slide.description ? String(slide.description) : undefined,
           svg: typeof slide.svg === 'string' && slide.svg.trim() ? slide.svg : undefined,
           pageNumber: Number(slide.pageNumber) || undefined,
+          visualSummary: slide.visualSummary ? String(slide.visualSummary) : undefined,
         }))
       : [
           { title: '封面', layout: 'cover', description: '展示主题、受众和场景' },
@@ -308,6 +312,7 @@ function buildSettingsFromForm(): TemplateAssetSettings {
           description: description || existing?.description || `示例页面 ${index + 1}`,
           svg: existing?.svg,
           pageNumber: existing?.pageNumber,
+          visualSummary: existing?.visualSummary,
         };
       }),
     constraints: {
@@ -316,13 +321,6 @@ function buildSettingsFromForm(): TemplateAssetSettings {
       avoid: splitLines(editorForm.value.avoid),
     },
   };
-}
-
-function normalizePreviewSvg(svg: string) {
-  const baseUrl = API_BASE_URL.replace(/\/+$/, '');
-  return svg
-    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])\.?\/generated-images\//gi, `$1${baseUrl}/generated-images/`)
-    .replace(/(<image\b[^>]*?\s(?:href|xlink:href)=["'])generated-images\//gi, `$1${baseUrl}/generated-images/`);
 }
 
 const LAYOUT_LABELS: Record<string, string> = {
@@ -421,15 +419,6 @@ function triggerPptImport() {
   importFileInput.value?.click();
 }
 
-function decodeXmlText(value: string) {
-  return value
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'");
-}
-
 function escapeSvgText(value: unknown) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -507,6 +496,15 @@ function createFallbackImportedSlides(slideCount: number, baseName: string): Imp
       description: '从导入 PPT 生成的模板参考页',
       layout,
     };
+  });
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('读取 PPTX 文件失败'));
+    reader.readAsDataURL(file);
   });
 }
 
@@ -609,8 +607,9 @@ function buildImportedProjectState(baseName: string, fileName: string, parsed: I
     },
     svgPages: slides.map((slide) => ({
       pageNumber: slide.pageNumber,
-      svg: buildImportedSlideSvg(slide, colors.accent),
+      svg: slide.svg?.trim() || buildImportedSlideSvg(slide, colors.accent),
       speakerNotes: slide.description,
+      visualSummary: slide.visualSummary,
     })),
     paused: false,
     resumeStage: null,
@@ -622,34 +621,25 @@ function buildImportedProjectState(baseName: string, fileName: string, parsed: I
 }
 
 async function parsePptxPreview(file: File): Promise<ImportedPptParseResult> {
-  const { default: JSZip } = await import('jszip');
-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
-  const slideFiles = Object.keys(zip.files)
-    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
-    .sort((a, b) => Number(a.match(/slide(\d+)\.xml/i)?.[1] || 0) - Number(b.match(/slide(\d+)\.xml/i)?.[1] || 0));
-
-  const slides: ImportedPptSlide[] = [];
-  const allTexts: string[] = [];
-  for (const [index, slidePath] of slideFiles.entries()) {
-    const xml = await zip.file(slidePath)?.async('string');
-    const texts = Array.from((xml || '').matchAll(/<a:t>([\s\S]*?)<\/a:t>/g))
-      .map((match) => decodeXmlText(match[1]).trim())
-      .filter(Boolean);
-    allTexts.push(...texts);
-    const pageNumber = index + 1;
-    slides.push({
-      pageNumber,
-      title: texts[0] || `示例页 ${pageNumber}`,
-      bullets: texts.slice(1, 5),
-      description: texts.slice(1, 4).join(' / ') || '从导入 PPT 中提取的示例页',
-      layout: inferImportedSlideLayout(index, slideFiles.length, texts),
-    });
+  const response = await templateApi.importPptxPreview({
+    filename: file.name,
+    dataBase64: await readFileAsDataUrl(file),
+  });
+  if (!response.success || !response.data) {
+    throw new Error(response.message || 'PPTX 转 SVG 失败');
   }
-
   return {
-    slideCount: slideFiles.length || 10,
-    slides,
-    allText: allTexts.join('\n'),
+    slideCount: response.data.slideCount,
+    allText: response.data.allText,
+    slides: response.data.slides.map((slide, index) => ({
+      pageNumber: slide.pageNumber || index + 1,
+      title: slide.title || `示例页 ${index + 1}`,
+      bullets: slide.bullets || [],
+      description: slide.description || '从 PPTX 页面转换得到的真实 SVG 预览',
+      layout: slide.layout || inferImportedSlideLayout(index, response.data!.slideCount, [slide.title, ...(slide.bullets || [])]),
+      svg: slide.svg,
+      visualSummary: slide.visualSummary,
+    })),
   };
 }
 
@@ -660,16 +650,14 @@ async function handlePptImport(event: Event) {
   if (!file) return;
 
   const lowerName = file.name.toLowerCase();
-  if (!lowerName.endsWith('.pptx') && !lowerName.endsWith('.ppt')) {
-    toastStore.warning('文件格式不支持', '请上传 .ppt 或 .pptx 文件');
+  if (!lowerName.endsWith('.pptx')) {
+    toastStore.warning('文件格式不支持', '轻量 pptx_to_svg 转换器仅支持 .pptx，请先将 .ppt 另存为 .pptx 后导入');
     return;
   }
 
   importingPpt.value = true;
   try {
-    const parsed = lowerName.endsWith('.pptx')
-      ? await parsePptxPreview(file)
-      : { slideCount: 10, slides: [], allText: '' };
+    const parsed = await parsePptxPreview(file);
     const baseName = file.name.replace(/\.(pptx?|PPTX?)$/, '').trim() || '导入 PPT 模板';
     const importedState = buildImportedProjectState(baseName, file.name, parsed);
     const payload = buildTemplatePayloadFromProject(
@@ -939,12 +927,12 @@ onMounted(fetchTemplates);
               class="preview-deck__slide"
               :class="[`preview-deck__slide--${slide.layout}`, { 'preview-deck__slide--svg': slide.svg }]"
             >
-              <div
+              <PrivateSvg
                 v-if="slide.svg"
                 class="preview-deck__svg"
                 role="img"
                 :aria-label="slide.title"
-                v-html="normalizePreviewSvg(slide.svg)"
+                :svg="slide.svg"
               />
               <template v-else>
                 <span class="preview-deck__index">{{ index + 1 }}</span>
@@ -1032,12 +1020,12 @@ onMounted(fetchTemplates);
                     :class="[`ppt-preview-slide--${slide.layout}`, { 'ppt-preview-slide--svg': slide.svg }]"
                   >
                     <button class="ppt-preview-slide__stage" type="button" @click="openZoomPreview(slide)">
-                      <div
+                      <PrivateSvg
                         v-if="slide.svg"
                         class="ppt-preview-slide__svg"
                         role="img"
                         :aria-label="slide.title"
-                        v-html="normalizePreviewSvg(slide.svg)"
+                        :svg="slide.svg"
                       />
                       <template v-else>
                       <span class="ppt-preview-slide__number">{{ index + 1 }}</span>
@@ -1112,12 +1100,12 @@ onMounted(fetchTemplates);
 
           <div class="svg-preview-zoom__body">
             <div class="svg-preview-zoom__canvas">
-              <div
+              <PrivateSvg
                 v-if="zoomPreviewSlide.svg"
                 class="svg-preview-zoom__svg"
                 role="img"
                 :aria-label="zoomPreviewSlide.title"
-                v-html="normalizePreviewSvg(zoomPreviewSlide.svg)"
+                :svg="zoomPreviewSlide.svg"
               />
               <div v-else class="svg-preview-zoom__fallback" :class="`ppt-preview-slide--${zoomPreviewSlide.layout}`">
                 <span class="ppt-preview-slide__number">{{ zoomPreviewSlide.pageNumber || 1 }}</span>
@@ -1167,6 +1155,7 @@ onMounted(fetchTemplates);
               <strong>{{ importDraft.slide_count }} 页参考</strong>
             </div>
 
+            <div class="detail-grid">
             <section class="detail-block detail-block--preview">
               <h4><FileText :size="15" /> 示例 PPT 预览</h4>
               <div class="ppt-preview-grid" :style="{ '--accent': importDraft.accent }">
@@ -1177,12 +1166,12 @@ onMounted(fetchTemplates);
                   :class="[`ppt-preview-slide--${slide.layout}`, { 'ppt-preview-slide--svg': slide.svg }]"
                 >
                   <button class="ppt-preview-slide__stage" type="button" @click="openZoomPreview(slide)">
-                    <div
+                    <PrivateSvg
                       v-if="slide.svg"
                       class="ppt-preview-slide__svg"
                       role="img"
                       :aria-label="slide.title"
-                      v-html="normalizePreviewSvg(slide.svg)"
+                      :svg="slide.svg"
                     />
                     <template v-else>
                       <span class="ppt-preview-slide__number">{{ slide.pageNumber || index + 1 }}</span>
@@ -1199,6 +1188,40 @@ onMounted(fetchTemplates);
                 </div>
               </div>
             </section>
+
+            <section class="detail-block">
+              <h4><Palette :size="15" /> 主题风格</h4>
+              <p>{{ importDraft.settings.styleGuide?.visualTone }}</p>
+              <div class="swatches">
+                <span
+                  v-for="color in importDraft.settings.styleGuide?.colorPalette"
+                  :key="color"
+                  class="swatch"
+                  :style="{ background: color }"
+                  :title="color"
+                ></span>
+              </div>
+              <p>{{ importDraft.settings.styleGuide?.typography }}</p>
+              <p>{{ importDraft.settings.styleGuide?.iconStyle }}</p>
+            </section>
+
+            <section class="detail-block">
+              <h4><Layers :size="15" /> 排版布局</h4>
+              <p>封面：{{ importDraft.settings.layoutGuide?.cover }}</p>
+              <p>章节：{{ importDraft.settings.layoutGuide?.section }}</p>
+              <div class="tag-list">
+                <span v-for="layout in importDraft.settings.layoutGuide?.contentLayouts" :key="layout">{{ formatLayoutLabel(layout) }}</span>
+                <span v-for="layout in importDraft.settings.layoutGuide?.dataLayouts" :key="layout">{{ formatLayoutLabel(layout) }}</span>
+              </div>
+            </section>
+
+            <section class="detail-block">
+              <h4><ListTree :size="15" /> 大纲结构</h4>
+              <ol class="outline-list">
+                <li v-for="item in importDraft.settings.outlinePattern" :key="item">{{ item }}</li>
+              </ol>
+            </section>
+            </div>
           </div>
 
           <footer class="modal-footer">
@@ -2114,6 +2137,23 @@ onMounted(fetchTemplates);
   border: 1px dashed color-mix(in srgb, var(--accent) 44%, var(--color-border));
   border-radius: 6px;
   background: color-mix(in srgb, var(--accent) 8%, var(--color-panel));
+}
+
+.ppt-preview-slide--svg .ppt-preview-slide__stage::after {
+  content: none;
+}
+
+.modal--preview .ppt-preview-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+.modal--preview .ppt-preview-grid .ppt-preview-slide:first-child {
+  grid-column: 1 / -1;
+}
+
+.modal--preview .ppt-preview-grid .ppt-preview-slide:first-child .ppt-preview-slide__stage {
+  max-height: min(58vh, 620px);
 }
 
 .ppt-preview-slide__meta {
