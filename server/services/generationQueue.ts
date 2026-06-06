@@ -17,7 +17,7 @@ import { streamText } from './textModel.js';
 import { generateImage, persistDataImage } from '../routes/ai.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { DesignSpec, SpecLock, SpecSlide, StrategistInput } from '../engine/index.js';
-import { exportWithNexiousPpt, type PptExportPage } from '../engine/ppt-exporter.js';
+import { exportWithNexiousPpt, type PptExportOptions, type PptExportPage } from '../engine/ppt-exporter.js';
 
 type QueuedJobKind = 'generate' | 'export';
 type QueuedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -54,6 +54,7 @@ interface ExportJobPayload {
   pages: PptExportPage[];
   spec: DesignSpec;
   lock?: SpecLock;
+  exportOptions?: PptExportOptions;
 }
 
 interface QueuedJobBase {
@@ -645,7 +646,7 @@ async function runExportJob(job: ExportQueuedJob) {
   await updateJob(job, { phase: 'exporting', progress: 20, message: '正在导出 PPTX' });
   assertJobActive(job);
   const lock = job.payload.lock || buildSpecLock(job.payload.spec);
-  const result = await exportWithNexiousPpt(job.payload.pages, job.payload.spec, lock);
+  const result = await exportWithNexiousPpt(job.payload.pages, job.payload.spec, lock, job.payload.exportOptions);
   assertJobActive(job);
   exportArtifacts.set(job.id, {
     buffer: result.buffer,

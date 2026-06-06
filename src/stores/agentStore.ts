@@ -232,13 +232,15 @@ const cloneTemplates = (): PptTemplate[] => exampleTemplates.map((template) => (
   ...template,
   settings: template.settings ? structuredClone(template.settings) : undefined,
 }));
-const CONFIG_KEYS: ConfigOptionKey[] = ['slideCount', 'summaryLength', 'tone', 'imageStyle', 'skillIntensity'];
+const CONFIG_KEYS: ConfigOptionKey[] = ['slideCount', 'summaryLength', 'tone', 'imageStyle', 'skillIntensity', 'animationEnabled', 'animationEffect'];
 const CONFIG_META: Record<ConfigOptionKey, { name: string; description: string; type: RunConfig['type']; min?: number; max?: number }> = {
   slideCount: { name: 'PPT 页数', description: 'PPT 输入页可选择的目标页数。', type: 'number', min: 1, max: 60 },
   summaryLength: { name: '摘要长度', description: '控制内容提炼的详略程度。', type: 'select' },
   tone: { name: '语言风格', description: '控制标题、正文和讲稿的表达口吻。', type: 'select' },
   imageStyle: { name: '图像风格', description: '控制需要配图时的画面方向。', type: 'select' },
   skillIntensity: { name: 'Skill 强度', description: '控制 Skill 扩展功能的处理深度。', type: 'number', min: 0, max: 100 },
+  animationEnabled: { name: '动画开关', description: '控制导出 PPTX 时是否添加元素入场动画。', type: 'select' },
+  animationEffect: { name: '动画效果', description: '控制导出 PPTX 时的元素入场动画方式。', type: 'select' },
 };
 const cloneConfigOptions = (): ConfigOptionGroups => ({
   slideCount: [
@@ -269,6 +271,17 @@ const cloneConfigOptions = (): ConfigOptionGroups => ({
     { value: '30', label: '轻量' },
     { value: '70', label: '标准' },
     { value: '100', label: '深入' }
+  ],
+  animationEnabled: [
+    { value: 'auto', label: 'AI 自动' },
+    { value: 'enabled', label: '启用' },
+    { value: 'disabled', label: '关闭' }
+  ],
+  animationEffect: [
+    { value: 'auto', label: '智能编排' },
+    { value: 'fade', label: '柔和淡入' },
+    { value: 'wipe', label: '逐步展开' },
+    { value: 'zoom', label: '重点聚焦' }
   ]
 });
 
@@ -282,6 +295,8 @@ function normalizeConfigOptions(options?: Partial<ConfigOptionGroups> | null): C
     tone: options.tone?.length ? options.tone.map(option => ({ ...option })) : fallback.tone,
     imageStyle: options.imageStyle?.length ? options.imageStyle.map(option => ({ ...option })) : fallback.imageStyle,
     skillIntensity: options.skillIntensity?.length ? options.skillIntensity.map(option => ({ ...option })) : fallback.skillIntensity,
+    animationEnabled: options.animationEnabled?.length ? options.animationEnabled.map(option => ({ ...option })) : fallback.animationEnabled,
+    animationEffect: options.animationEffect?.length ? options.animationEffect.map(option => ({ ...option })) : fallback.animationEffect,
   };
 }
 
@@ -334,6 +349,8 @@ function normalizeAgentParameters(value?: Partial<AgentParameters> | null): Agen
     imageStyle: String(value?.imageStyle || 'auto'),
     template: (value?.template || 'auto') as TemplateStyle,
     skillIntensity: skillIntensityValue === 0 ? 0 : Number(skillIntensityValue) || 0,
+    animationEnabled: String(value?.animationEnabled || 'auto'),
+    animationEffect: String(value?.animationEffect || 'auto'),
   };
 }
 
@@ -487,7 +504,9 @@ export const useAgentStore = defineStore('agent', () => {
     tone: 'auto',
     imageStyle: 'auto',
     template: 'auto',
-    skillIntensity: 0
+    skillIntensity: 0,
+    animationEnabled: 'auto',
+    animationEffect: 'auto'
   });
   const steps = ref<WorkflowStep[]>(cloneSteps());
   const outline = ref<SlideOutline[]>([]);
@@ -746,7 +765,7 @@ export const useAgentStore = defineStore('agent', () => {
       activityLog: [...(state.activityLog || [])],
       steps: (state.steps || fallback.steps).map(s => ({ ...s })),
       svgPages: (state.svgPages || []).map(page => ({ ...page })),
-      configOptions: state.configOptions || fallback.configOptions,
+      configOptions: normalizeConfigOptions(state.configOptions || fallback.configOptions),
     };
   }
 
@@ -890,6 +909,8 @@ export const useAgentStore = defineStore('agent', () => {
         tone: configOptions.value.tone.map(option => ({ ...option })),
         imageStyle: configOptions.value.imageStyle.map(option => ({ ...option })),
         skillIntensity: configOptions.value.skillIntensity.map(option => ({ ...option })),
+        animationEnabled: configOptions.value.animationEnabled.map(option => ({ ...option })),
+        animationEffect: configOptions.value.animationEffect.map(option => ({ ...option })),
       },
       resumeStage: resumeStage.value,
       executorCursor: executorCursor.value,
@@ -2227,7 +2248,9 @@ export const useAgentStore = defineStore('agent', () => {
       parameters.value.slideCount > 0 ||
       parameters.value.summaryLength !== 'auto' ||
       parameters.value.tone !== 'auto' ||
-      parameters.value.imageStyle !== 'auto'
+      parameters.value.imageStyle !== 'auto' ||
+      parameters.value.animationEnabled !== 'auto' ||
+      parameters.value.animationEffect !== 'auto'
     );
     const selectionOptions = {
       userText: `${userContent}\n${input.value.topic}`.trim(),
@@ -4174,7 +4197,7 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  async function exportCurrentDeck(format: 'pptx' | 'pdf') {
+  async function exportCurrentDeck(format: 'pptx' | 'pdf', exportOptions?: Parameters<typeof aiApi.createExportPptxJob>[0]['exportOptions']) {
     if (!checkActivePpt()) return;
 
     const toastStore = useToastStore();
@@ -4202,7 +4225,8 @@ export const useAgentStore = defineStore('agent', () => {
           title: currentProject.title,
           pages: svgPages.value.map(p => ({ pageNumber: p.pageNumber, svg: p.svg, speakerNotes: p.speakerNotes })),
           spec: designSpec.value,
-          lock: specLock.value || undefined
+          lock: specLock.value || undefined,
+          exportOptions
         });
         if (!response.success || !response.data) {
           throw new Error(response.message || '创建导出任务失败');

@@ -128,7 +128,32 @@ router.post('/reset', async (req: AuthRequest, res: Response) => {
       { name: '语言风格', key: 'tone', type: 'select', value: 'professional', options: [{ value: 'professional', label: '专业严谨' }, { value: 'creative', label: '创意活泼' }, { value: 'casual', label: '通俗易懂' }], description: 'PPT 的语言风格' },
       { name: '图像风格', key: 'imageStyle', type: 'select', value: 'flat', options: [{ value: 'flat', label: '扁平化' }, { value: '3d', label: '3D 立体' }, { value: 'illustration', label: '插画风格' }, { value: 'photo', label: '摄影风格' }], description: '生成图像的风格' },
       { name: 'PPT 模板', key: 'template', type: 'select', value: 'business', options: [{ value: 'business', label: '商务模板' }, { value: 'creative', label: '创意模板' }, { value: 'minimal', label: '极简模板' }, { value: 'tech', label: '科技模板' }], description: 'PPT 整体风格模板' },
-      { name: 'Skill 强度', key: 'skillIntensity', type: 'number', value: '70', min: 0, max: 100, description: '控制 Skill 扩展功能的强度' }
+      { name: 'Skill 强度', key: 'skillIntensity', type: 'number', value: '70', min: 0, max: 100, description: '控制 Skill 扩展功能的强度' },
+      {
+        name: '动画开关',
+        key: 'animationEnabled',
+        type: 'select',
+        value: 'auto',
+        options: [
+          { value: 'auto', label: 'AI 自动' },
+          { value: 'enabled', label: '启用' },
+          { value: 'disabled', label: '关闭' }
+        ],
+        description: '导出 PPTX 时是否添加元素入场动画'
+      },
+      {
+        name: '动画效果',
+        key: 'animationEffect',
+        type: 'select',
+        value: 'auto',
+        options: [
+          { value: 'auto', label: '智能编排' },
+          { value: 'fade', label: '柔和淡入' },
+          { value: 'wipe', label: '逐步展开' },
+          { value: 'zoom', label: '重点聚焦' }
+        ],
+        description: '导出 PPTX 时的元素入场动画方式'
+      }
     ];
     
     for (const config of defaultConfigs) {

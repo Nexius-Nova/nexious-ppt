@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DesignSpec, SpecLock } from './spec.js';
 import { inlineRemoteImages } from './svg-to-pptx.js';
-import { exportNativeEditablePptx } from './native-svg-pptx.js';
+import { exportNativeEditablePptx, type NativeSvgPptxAnimationOptions } from './native-svg-pptx.js';
 
 export interface PptExportPage {
   pageNumber?: number;
@@ -16,6 +16,10 @@ export interface PptExportResult {
   fileName: string;
   projectPath: string;
   logs: string[];
+}
+
+export interface PptExportOptions {
+  animation?: NativeSvgPptxAnimationOptions;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -167,6 +171,7 @@ export async function exportWithNexiousPpt(
   pages: PptExportPage[],
   spec: DesignSpec,
   lock: SpecLock,
+  options: PptExportOptions = {},
 ): Promise<PptExportResult> {
   if (!pages.length) {
     throw new Error('没有可导出的 SVG 页面');
@@ -193,10 +198,13 @@ export async function exportWithNexiousPpt(
 
   let buffer: Buffer;
   try {
-    const nativeResult = await exportNativeEditablePptx(projectPath, exportPath, spec);
+    const nativeResult = await exportNativeEditablePptx(projectPath, exportPath, spec, options.animation);
     buffer = nativeResult.buffer;
     await writeFile(exportPath, buffer);
     logs.push(...nativeResult.logs);
+    if (options.animation?.enabled) {
+      logs.push('元素入场动画已在 PPTX 导出阶段添加，生成内容与 SVG 页面保持不变。');
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logs.push(`可编辑 PPTX 导出失败：${message}`);

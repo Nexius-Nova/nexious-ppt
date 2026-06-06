@@ -573,7 +573,7 @@ def convert_svg_to_slide_shapes(
     # the count is reasonable. Presenter-click animation should reveal
     # semantic blocks, not atomized drawing primitives, so fallback is
     # intentionally capped at a low count.
-    _ANIM_FALLBACK_CAP = 8
+    _ANIM_FALLBACK_CAP = 10
     if not ctx.anim_targets and 0 < len(fallback_targets) <= _ANIM_FALLBACK_CAP:
         ctx.anim_targets = fallback_targets
 

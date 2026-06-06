@@ -40,7 +40,19 @@ const paramDefs: Array<{ key: ConfigOptionKey; label: string; description: strin
     key: 'skillIntensity',
     label: '增强强度',
     description: '维护 Skill 扩展处理深度。',
-    example: '例如：80'
+    example: '例如：70'
+  },
+  {
+    key: 'animationEnabled',
+    label: '动画开关',
+    description: '维护导出 PPTX 时是否添加元素入场动画。',
+    example: '例如：启用'
+  },
+  {
+    key: 'animationEffect',
+    label: '动画效果',
+    description: '维护导出 PPTX 时的元素入场动画效果。',
+    example: '例如：逐步展开'
   }
 ];
 
@@ -49,7 +61,9 @@ const addingLabels = ref<Record<ConfigOptionKey, string>>({
   summaryLength: '',
   tone: '',
   imageStyle: '',
-  skillIntensity: ''
+  skillIntensity: '',
+  animationEnabled: '',
+  animationEffect: ''
 });
 const editingOption = ref<{ key: ConfigOptionKey; value: string } | null>(null);
 const editingLabel = ref('');

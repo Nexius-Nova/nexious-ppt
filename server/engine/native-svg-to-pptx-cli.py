@@ -42,6 +42,16 @@ def main() -> int:
     parser.add_argument("--notes-json", default=None)
     parser.add_argument("--trace-json", default=None)
     parser.add_argument("--merge-paragraphs", action="store_true", default=False)
+    parser.add_argument("--animation-effect", choices=["none", "fade", "wipe", "zoom", "auto"], default="none")
+    parser.add_argument("--animation-duration", type=float, default=0.45)
+    parser.add_argument("--animation-stagger", type=float, default=0.18)
+    parser.add_argument("--transition-effect", choices=["none", "fade", "push", "wipe"], default="none")
+    parser.add_argument("--transition-duration", type=float, default=0.45)
+    parser.add_argument(
+        "--animation-trigger",
+        choices=["after-previous", "with-previous", "on-click"],
+        default="after-previous",
+    )
     args = parser.parse_args()
 
     project_path = Path(args.project)
@@ -65,17 +75,17 @@ def main() -> int:
                 output_path=output_path,
                 canvas_format=_canvas_format(args.format, args.width, args.height),
                 verbose=False,
-                transition=None,
-                transition_duration=0,
+                transition=None if args.transition_effect == "none" else args.transition_effect,
+                transition_duration=max(0.1, args.transition_duration),
                 auto_advance=None,
                 use_compat_mode=False,
                 notes=notes,
                 enable_notes=True,
                 use_native_shapes=True,
-                animation=None,
-                animation_duration=0,
-                animation_stagger=0,
-                animation_trigger="after-previous",
+                animation=None if args.animation_effect == "none" else args.animation_effect,
+                animation_duration=max(0.1, args.animation_duration),
+                animation_stagger=max(0, args.animation_stagger),
+                animation_trigger=args.animation_trigger,
                 animation_config=None,
                 animation_cli_overrides={
                     "transition": True,

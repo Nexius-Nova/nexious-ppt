@@ -517,6 +517,8 @@ function buildImportedProjectState(baseName: string, fileName: string, parsed: I
     imageStyle: 'auto',
     template: 'auto',
     skillIntensity: 0,
+    animationEnabled: 'auto',
+    animationEffect: 'auto',
   };
   const outline: SlideOutline[] = slides.map((slide) => ({
     id: `imported-slide-${slide.pageNumber}`,

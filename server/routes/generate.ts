@@ -50,6 +50,31 @@ function buildAttachmentDisposition(fileName: string): string {
   return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
 }
 
+function normalizeExportOptions(value: any) {
+  const animation = value?.animation;
+  return {
+    animation: {
+      enabled: Boolean(animation?.enabled),
+      effect: ['fade', 'wipe', 'zoom', 'auto', 'none'].includes(String(animation?.effect)) ? animation.effect : 'fade',
+      duration: clampNumber(animation?.duration, 0.1, 3, 0.45),
+      stagger: clampNumber(animation?.stagger, 0, 3, 0.18),
+      trigger: animation?.trigger === 'with-previous' || animation?.trigger === 'on-click'
+        ? animation.trigger
+        : 'after-previous',
+      transitionEffect: ['fade', 'push', 'wipe', 'none'].includes(String(animation?.transitionEffect))
+        ? animation.transitionEffect
+        : 'fade',
+      transitionDuration: clampNumber(animation?.transitionDuration, 0.1, 3, 0.45),
+    },
+  };
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number) {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
 function extractStreamingOutlineSlides(raw: string): SpecSlide[] {
   const outlineStart = raw.search(/"outline"\s*:\s*\[/);
   if (outlineStart < 0) return [];
@@ -253,7 +278,7 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
 
 router.post('/export-pptx', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { pages, spec, lock } = req.body;
+    const { pages, spec, lock, exportOptions } = req.body;
 
     if (!pages || !Array.isArray(pages) || pages.length === 0) {
       return res.status(400).json({ success: false, message: '没有可导出的页面' });
@@ -279,7 +304,8 @@ router.post('/export-pptx', authMiddleware, async (req: AuthRequest, res: Respon
         speakerNotes: page.speakerNotes || ''
       })),
       spec,
-      effectiveLock
+      effectiveLock,
+      normalizeExportOptions(exportOptions)
     );
 
     const fileName = result.fileName || `nexious-deck-${Date.now()}.pptx`;
@@ -316,7 +342,7 @@ router.post('/jobs/generate', authMiddleware, async (req: AuthRequest, res: Resp
 
 router.post('/jobs/export-pptx', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { projectId, title, pages, spec, lock } = req.body || {};
+    const { projectId, title, pages, spec, lock, exportOptions } = req.body || {};
     if (!projectId || !spec || !Array.isArray(pages) || pages.length === 0) {
       return res.status(400).json({ success: false, message: '缺少导出任务参数' });
     }
@@ -331,6 +357,7 @@ router.post('/jobs/export-pptx', authMiddleware, async (req: AuthRequest, res: R
       })),
       spec,
       lock,
+      exportOptions: normalizeExportOptions(exportOptions),
     });
 
     res.status(202).json({ success: true, data: job });

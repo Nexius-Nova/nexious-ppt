@@ -451,6 +451,18 @@ export interface QueueJobSnapshot {
   completedAt?: number;
 }
 
+export interface PptxExportOptions {
+  animation?: {
+    enabled?: boolean;
+    effect?: 'fade' | 'wipe' | 'zoom' | 'auto' | 'none';
+    duration?: number;
+    stagger?: number;
+    trigger?: 'after-previous' | 'with-previous' | 'on-click';
+    transitionEffect?: 'fade' | 'push' | 'wipe' | 'none';
+    transitionDuration?: number;
+  };
+}
+
 export const aiApi = {
   generateOutline: (data: {
     topic: string;
@@ -713,6 +725,7 @@ export const aiApi = {
     pages: Array<{ pageNumber?: number; svg: string; speakerNotes: string }>;
     spec: DesignSpec;
     lock?: SpecLock;
+    exportOptions?: PptxExportOptions;
   }) => api.post<QueueJobSnapshot>('/api/generate/jobs/export-pptx', data),
 
   getQueueJob: (id: string) => api.get<QueueJobSnapshot>(`/api/generate/jobs/${id}`),
@@ -820,7 +833,12 @@ export const aiApi = {
     return fileName;
   },
 
-  exportPptx: async (pages: Array<{ svg: string; speakerNotes: string }>, spec: DesignSpec, lock?: SpecLock): Promise<string> => {
+  exportPptx: async (
+    pages: Array<{ svg: string; speakerNotes: string }>,
+    spec: DesignSpec,
+    lock?: SpecLock,
+    exportOptions?: PptxExportOptions
+  ): Promise<string> => {
     const token = localStorage.getItem('auth_token');
     const response = await fetch(`${API_BASE_URL}/api/generate/export-pptx`, {
       method: 'POST',
@@ -828,7 +846,7 @@ export const aiApi = {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {})
       },
-      body: JSON.stringify({ pages, spec, lock }),
+      body: JSON.stringify({ pages, spec, lock, exportOptions }),
     });
     if (!response.ok) throw new Error('导出失败');
     const blob = await response.blob();

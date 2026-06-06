@@ -13,6 +13,16 @@ export interface NativeSvgPptxResult {
   logs: string[];
 }
 
+export interface NativeSvgPptxAnimationOptions {
+  enabled?: boolean;
+  effect?: 'fade' | 'wipe' | 'zoom' | 'auto' | 'none';
+  duration?: number;
+  stagger?: number;
+  trigger?: 'after-previous' | 'with-previous' | 'on-click';
+  transitionEffect?: 'fade' | 'push' | 'wipe' | 'none';
+  transitionDuration?: number;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const CLI_PATH = path.join(__dirname, 'native-svg-to-pptx-cli.py');
@@ -22,6 +32,7 @@ export async function exportNativeEditablePptx(
   projectPath: string,
   outputPath: string,
   spec: DesignSpec,
+  animation?: NativeSvgPptxAnimationOptions,
 ): Promise<NativeSvgPptxResult> {
   const tracePath = `${outputPath}.trace.json`;
   const notesPath = path.join(projectPath, 'notes', 'export-notes.json');
@@ -35,6 +46,18 @@ export async function exportNativeEditablePptx(
     '--notes-json', notesPath,
     '--trace-json', tracePath,
   ];
+
+  const animationOptions = normalizeAnimationOptions(animation);
+  if (animationOptions.enabled) {
+    args.push(
+      '--animation-effect', animationOptions.effect,
+      '--animation-duration', String(animationOptions.duration),
+      '--animation-stagger', String(animationOptions.stagger),
+      '--animation-trigger', animationOptions.trigger,
+      '--transition-effect', animationOptions.transitionEffect,
+      '--transition-duration', String(animationOptions.transitionDuration),
+    );
+  }
 
   const run = await runPython(args);
   const cliPayload = parseCliPayload(run.stdout);
@@ -93,6 +116,29 @@ function parseCliPayload(stdout: string): Record<string, any> | null {
     }
   }
   return null;
+}
+
+function normalizeAnimationOptions(animation?: NativeSvgPptxAnimationOptions): Required<NativeSvgPptxAnimationOptions> {
+  const enabled = Boolean(animation?.enabled);
+  const effect = ['fade', 'wipe', 'zoom', 'auto', 'none'].includes(String(animation?.effect))
+    ? animation!.effect!
+    : 'fade';
+  const duration = clampNumber(animation?.duration, 0.1, 3, 0.45);
+  const stagger = clampNumber(animation?.stagger, 0, 3, 0.18);
+  const trigger = animation?.trigger === 'with-previous' || animation?.trigger === 'on-click'
+    ? animation.trigger
+    : 'after-previous';
+  const transitionEffect = ['fade', 'push', 'wipe', 'none'].includes(String(animation?.transitionEffect))
+    ? animation!.transitionEffect!
+    : 'fade';
+  const transitionDuration = clampNumber(animation?.transitionDuration, 0.1, 3, 0.45);
+  return { enabled, effect, duration, stagger, trigger, transitionEffect, transitionDuration };
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number) {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
 }
 
 async function assertEditablePptx(buffer: Buffer) {

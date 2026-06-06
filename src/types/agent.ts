@@ -35,9 +35,18 @@ export interface AgentParameters {
   imageStyle: ImageStyle;
   template: TemplateStyle;
   skillIntensity: number;
+  animationEnabled: string;
+  animationEffect: string;
 }
 
-export type ConfigOptionKey = 'slideCount' | 'summaryLength' | 'tone' | 'imageStyle' | 'skillIntensity';
+export type ConfigOptionKey =
+  | 'slideCount'
+  | 'summaryLength'
+  | 'tone'
+  | 'imageStyle'
+  | 'skillIntensity'
+  | 'animationEnabled'
+  | 'animationEffect';
 
 export interface ConfigOption {
   value: string;

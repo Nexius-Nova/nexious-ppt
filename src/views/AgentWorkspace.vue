@@ -52,6 +52,7 @@ import { useAgentStore } from '@/stores/agentStore';
 import { useShortcuts } from '@/composables/useShortcuts';
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import type { GeneratedImage, WorkflowStep, WorkflowStepId } from '@/types/agent';
+import type { PptxExportOptions } from '@/services/api';
 
 const route = useRoute();
 const router = useRouter();
@@ -137,6 +138,21 @@ useShortcuts([
   }
 ]);
 
+const pageRouteToStep: Record<string, WorkflowStepId> = {
+  '/': 'my-ppt',
+  '/my-ppt': 'my-ppt',
+  '/prompts': 'prompts',
+  '/skills': 'skills',
+  '/models': 'models',
+  '/templates': 'templates',
+  '/config': 'config',
+  '/profile': 'profile'
+};
+
+function routePageStep(path: string): WorkflowStepId | null {
+  return pageRouteToStep[path] || null;
+}
+
 function selectInputTemplate(templateId: string) {
   const template = templates.value.find((item) => item.id === templateId);
   if (template) {
@@ -144,8 +160,13 @@ function selectInputTemplate(templateId: string) {
   }
 }
 
-const activeStep = computed({
-  get: () => store.activeStep,
+const activeStep = computed<WorkflowStepId>({
+  get: () => {
+    if (!isProjectRoute.value) {
+      return routePageStep(route.path) || 'my-ppt';
+    }
+    return store.activeStep;
+  },
   set: (value) => {
     const step = value as WorkflowStepId;
     if (isWorkflowTab(step)) {
@@ -425,16 +446,6 @@ async function syncStepWithRoute() {
   const token = ++routeSyncToken;
   routeReady.value = false;
   const path = route.path;
-  const routeToStep: Record<string, string> = {
-    '/': 'my-ppt',
-    '/my-ppt': 'my-ppt',
-    '/prompts': 'prompts',
-    '/skills': 'skills',
-    '/models': 'models',
-    '/templates': 'templates',
-    '/config': 'config',
-    '/profile': 'profile'
-  };
 
   if (path.startsWith('/project/')) {
     const routeProjectId = String(route.params.id || '');
@@ -460,7 +471,7 @@ async function syncStepWithRoute() {
     }
   } else {
     isSyncingRouteStep = false;
-    store.activeStep = (routeToStep[path] || 'my-ppt') as WorkflowStepId;
+    store.activeStep = routePageStep(path) || 'my-ppt';
     if (token === routeSyncToken) {
       routeReady.value = true;
     }
@@ -542,6 +553,24 @@ async function runFromCurrentStep() {
   }
 }
 
+function buildExportOptions(format: 'pptx' | 'pdf'): PptxExportOptions {
+  const enabledSetting = String(parameters.value.animationEnabled || 'auto');
+  const effectSetting = String(parameters.value.animationEffect || 'auto');
+  const enabled = format === 'pptx' && enabledSetting !== 'disabled';
+  const effect = ['fade', 'wipe', 'zoom'].includes(effectSetting) ? effectSetting as 'fade' | 'wipe' | 'zoom' : 'auto';
+  return {
+    animation: {
+      enabled,
+      effect: enabled ? effect : 'none',
+      duration: 0.5,
+      stagger: 0.14,
+      trigger: 'after-previous',
+      transitionEffect: enabled ? 'fade' : 'none',
+      transitionDuration: 0.45
+    }
+  };
+}
+
 async function handleExport(format: 'pptx' | 'pdf', options: { filename: string; pageRange: string }) {
   if (isExporting.value) return;
   isExporting.value = true;
@@ -561,7 +590,7 @@ async function handleExport(format: 'pptx' | 'pdf', options: { filename: string;
   }, 300);
 
   try {
-    await store.exportCurrentDeck(format);
+    await store.exportCurrentDeck(format, buildExportOptions(format));
     exportProgress.value = 100;
     window.clearInterval(progressInterval);
     const item = exportHistory.value.find(h => h.id === exportId);

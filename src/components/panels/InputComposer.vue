@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, ref } from 'vue';
-import { CheckCircle2, Circle, FileCheck2, FileText, Image as ImageIcon, LayoutTemplate, Layers, Loader2, PackageCheck, Palette, PenLine, Plus, SendHorizontal, Settings2, SlidersHorizontal, Sparkles, X, XCircle } from 'lucide-vue-next';
+import { CheckCircle2, Circle, FileCheck2, FileText, Image as ImageIcon, LayoutTemplate, Layers, Loader2, PackageCheck, Palette, PenLine, Play, Plus, SendHorizontal, Settings2, SlidersHorizontal, Sparkles, Wand2, X, XCircle } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
@@ -50,7 +50,9 @@ const parameterGroups: Array<{ key: ConfigOptionKey; label: string; icon: any }>
   { key: 'summaryLength', label: '摘要', icon: SlidersHorizontal },
   { key: 'tone', label: '语言', icon: PenLine },
   { key: 'imageStyle', label: '图像', icon: Palette },
-  { key: 'skillIntensity', label: '增强', icon: Sparkles }
+  { key: 'skillIntensity', label: '增强', icon: Sparkles },
+  { key: 'animationEnabled', label: '动画', icon: Play },
+  { key: 'animationEffect', label: '效果', icon: Wand2 }
 ];
 
 const templateOptions = computed(() =>
@@ -73,7 +75,7 @@ const selectedTemplateId = computed(() => props.selectedTemplate?.id || '');
 const selectedPrompt = computed(() => props.prompts.find((prompt) => prompt.id === props.selectedPromptId) || null);
 const contentCharCount = computed(() => props.modelValue.content.trim().length);
 const activeParameterCount = computed(() =>
-  parameterGroups.filter((group) => !isParameterActive(group.key, autoOptionByKey[group.key].value)).length
+  parameterGroups.filter((group) => String(parameterValue(group.key)) !== autoOptionByKey[group.key].value).length
 );
 const selectedSkillCount = computed(() => props.skills.filter((skill) => skill.enabled).length);
 const hasContent = computed(() => Boolean(props.modelValue.content.trim()));
@@ -110,7 +112,7 @@ const activeModuleSubtitle = computed(() => {
   if (activeModule.value === 'prompt') return '选择本次生成的表达策略';
   if (activeModule.value === 'template') return '选择 PPT 的视觉参考';
   if (activeModule.value === 'skills') return '选择本次输入阶段要调用的能力';
-  return '调整页数、摘要、语言和图像偏好';
+  return '调整页数、摘要、语言、图像和导出动画';
 });
 
 const skillGroups = computed(() =>
@@ -137,7 +139,9 @@ const autoOptionByKey: Record<ConfigOptionKey, { label: string; value: string; d
   summaryLength: { label: 'AI 自动', value: 'auto', description: '由内容密度决定详略' },
   tone: { label: 'AI 自动', value: 'auto', description: '由场景决定表达风格' },
   imageStyle: { label: 'AI 自动', value: 'auto', description: '由页面内容决定图像方向' },
-  skillIntensity: { label: 'AI 自动', value: '0', description: '由 AI 判断是否增强' }
+  skillIntensity: { label: 'AI 自动', value: '0', description: '由 AI 判断是否增强' },
+  animationEnabled: { label: 'AI 自动', value: 'auto', description: '默认启用体验更好的 PPTX 入场动画' },
+  animationEffect: { label: '智能编排', value: 'auto', description: '按标题、正文、图片和图表自动选择入场方式' }
 };
 
 function getParameterOptions(key: ConfigOptionKey): Array<{ label: string; value: string; description?: string }> {
@@ -165,8 +169,12 @@ function updateParameter(key: ConfigOptionKey, value: string) {
   });
 }
 
+function parameterValue(key: ConfigOptionKey) {
+  return props.parameters[key] ?? autoOptionByKey[key].value;
+}
+
 function isParameterActive(key: ConfigOptionKey, value: string) {
-  return String(props.parameters[key]) === value;
+  return String(parameterValue(key)) === value;
 }
 
 function handleTemplateSelect(templateId: string) {
@@ -322,10 +330,6 @@ function handleFileChange(event: Event) {
 
           <footer class="input-flow__footer">
             <span>{{ contentPreview }}</span>
-            <button type="button" @click="toggleModule('config')">
-              <Settings2 :size="14" />
-              调整偏好
-            </button>
           </footer>
         </div>
       </section>
