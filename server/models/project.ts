@@ -156,6 +156,24 @@ export async function deleteProject(id: number): Promise<boolean> {
   return result.affectedRows > 0;
 }
 
+export async function cleanupProjectRelations(userId: number, projectId: number): Promise<void> {
+  const projectIdText = String(projectId);
+  await update(
+    `UPDATE generation_jobs
+     SET status = 'cancelled',
+         phase = 'cancelled',
+         completed_at = COALESCE(completed_at, NOW())
+     WHERE user_id = ?
+       AND project_id = ?
+       AND status IN ('queued', 'running')`,
+    [userId, projectIdText]
+  );
+  await remove('DELETE FROM generation_jobs WHERE user_id = ? AND project_id = ?', [userId, projectIdText]);
+  await remove('DELETE FROM version_snapshots WHERE user_id = ? AND project_id = ?', [userId, projectId]);
+  await remove('DELETE FROM skill_runs WHERE user_id = ? AND project_id = ?', [userId, projectIdText]);
+  await remove('DELETE FROM workflow_snapshots WHERE user_id = ?', [userId]);
+}
+
 /**
  * 获取用户项目统计
  */

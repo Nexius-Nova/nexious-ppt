@@ -23,6 +23,9 @@ export interface DeckInput {
 export interface UploadedFileContent {
   name: string;
   text: string;
+  dataBase64?: string;
+  mimeType?: string;
+  extension?: string;
 }
 
 export interface AgentParameters {
@@ -89,6 +92,9 @@ export interface SkillDefinition {
   installStatus?: string;
   installLog?: string | null;
   dependencyFile?: string | null;
+  testStatus?: string;
+  testLog?: string | null;
+  lastTestedAt?: string | null;
 }
 
 export type InputProcessStepStatus = 'idle' | 'running' | 'done' | 'skipped' | 'failed';

@@ -345,6 +345,7 @@ const PROJECT_STATE_SYNC_INTERVAL_MS = 1800;
 const PROJECT_STATE_SYNC_PAGE_BATCH = 2;
 const TEXT_FILE_PATTERN = /\.(txt|md|markdown|csv|json|log)$/i;
 const DOCX_FILE_PATTERN = /\.docx$/i;
+const PARSE_WITH_SKILL_FILE_PATTERN = /\.(pdf|ppt|pptx)$/i;
 const MAX_FILE_TEXT_CHARS = 120_000;
 const SKILL_CONTEXT_START = '【Skill 处理结果（自动生成，可重新运行刷新）】';
 const SKILL_CONTEXT_END = '【Skill 处理结果结束】';
@@ -497,6 +498,7 @@ export const useAgentStore = defineStore('agent', () => {
   const templates = ref<PptTemplate[]>(cloneTemplates());
   const selectedTemplate = ref<TemplateAsset | null>(null);
   const activePptId = ref<string | null>(null);
+  const deletedPptProjectIds = ref<Set<string>>(new Set());
   const exportArtifacts = ref<ExportArtifact[]>([]);
   const activityLog = ref<string[]>(['系统就绪，等待添加 PPT 项目。']);
   const inputProcessSteps = ref<InputProcessStep[]>(cloneInputProcessSteps());
@@ -526,6 +528,14 @@ export const useAgentStore = defineStore('agent', () => {
   const activeQueueJobId = ref<string | null>(null);
 
   const enabledSkills = computed(() => skills.value.filter((skill) => skill.enabled).sort((a, b) => a.order - b.order));
+  const runnableSkills = computed(() => skills.value.filter((skill) =>
+    skill.runtime === 'prompt-only' ||
+    skill.type === 'prompt-only' ||
+    skill.testStatus === 'passed'
+  ).sort((a, b) => a.order - b.order));
+  const runnableEnabledSkills = computed(() => enabledSkills.value.filter((skill) =>
+    runnableSkills.value.some((item) => item.id === skill.id)
+  ));
   const selectedImages = computed(() => images.value.filter((image) => image.selected));
   const activeStepMeta = computed(() => steps.value.find((step) => step.id === activeStep.value));
   const activePpt = computed(() => pptProjects.value.find((project) => project.id === activePptId.value) || null);
@@ -546,6 +556,12 @@ export const useAgentStore = defineStore('agent', () => {
     return workflowRunToken.value === ctx.token && activePptId.value === ctx.projectId;
   }
 
+  function assertRunContextActive(ctx: RunContext) {
+    if (!isRunContextActive(ctx)) {
+      throw new Error('当前 PPT 项目已切换，本次后台处理结果已丢弃。');
+    }
+  }
+
   function freezeWorkflowStepsForPause(stage: WorkflowStepId) {
     steps.value = steps.value.map((step) => {
       if (step.status !== 'running') return step;
@@ -555,6 +571,14 @@ export const useAgentStore = defineStore('agent', () => {
         progress: Math.max(0, Math.min(99, Math.round(step.progress || (step.id === stage ? 1 : 0)))),
       };
     });
+  }
+
+  function inferPauseStage(fallback: WorkflowStepId): WorkflowStepId {
+    if (activeStep.value && steps.value.some((step) => step.id === activeStep.value && step.status === 'running')) {
+      return activeStep.value;
+    }
+    const runningStep = [...steps.value].reverse().find((step) => step.status === 'running');
+    return (runningStep?.id || fallback) as WorkflowStepId;
   }
 
   function applyGeneratedProjectInfo(spec?: DesignSpec | null) {
@@ -622,6 +646,7 @@ export const useAgentStore = defineStore('agent', () => {
         id: String(rawProject.id),
         state: normalizeProjectState(rawProject.state || makeDefaultProjectState())
       };
+      if (deletedPptProjectIds.value.has(project.id)) continue;
       const existingById = byId.get(project.id);
       if (existingById) {
         Object.assign(existingById, project, {
@@ -705,7 +730,10 @@ export const useAgentStore = defineStore('agent', () => {
       uploadedFileContents: (state.uploadedFileContents || []).map((file) => ({
         name: String(file.name || ''),
         text: String(file.text || ''),
-      })).filter((file) => file.name && file.text),
+        dataBase64: typeof file.dataBase64 === 'string' ? file.dataBase64 : undefined,
+        mimeType: typeof file.mimeType === 'string' ? file.mimeType : undefined,
+        extension: typeof file.extension === 'string' ? file.extension : undefined,
+      })).filter((file) => file.name && (file.text || file.dataBase64)),
       processedInputContent: String(state.processedInputContent || ''),
       parameters: normalizeAgentParameters(state.parameters || fallback.parameters),
       selectedTemplate: state.selectedTemplate ? snapshotTemplateAsset(state.selectedTemplate) : null,
@@ -815,6 +843,18 @@ export const useAgentStore = defineStore('agent', () => {
       .join('\n');
   }
 
+  function fileToBase64(file: File) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || '');
+        resolve(result.includes(',') ? result.split(',')[1] : result);
+      };
+      reader.onerror = () => reject(new Error('读取文件失败'));
+      reader.readAsDataURL(file);
+    });
+  }
+
   function snapshotProjectState(options: { persistable?: boolean } = {}): PptProjectState {
     const persistable = options.persistable ?? false;
     return {
@@ -907,7 +947,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (normalizedState.steps && normalizedState.steps.length > 0) {
       const restoredSteps = normalizedState.steps.map(s => ({
         ...s,
-        status: (s.status === 'running' ? (hadActiveWorkflow ? 'running' : 'idle') : s.status) as WorkflowStep['status'],
+        status: (s.status === 'running' ? (normalizedState.paused ? 'idle' : hadActiveWorkflow ? 'running' : 'idle') : s.status) as WorkflowStep['status'],
         progress: s.status === 'running' && !hadActiveWorkflow && !normalizedState.paused ? 0 : s.progress,
       }));
       const currentStepIds = new Set(workflowSteps.map(s => s.id));
@@ -1360,6 +1400,10 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
+  function isConfigOptionKey(value?: string): value is ConfigOptionKey {
+    return Boolean(value && CONFIG_KEYS.includes(value as ConfigOptionKey));
+  }
+
   async function addConfigOption(key: ConfigOptionKey, label: string) {
     const trimmed = label.trim();
     if (!trimmed) return;
@@ -1427,12 +1471,13 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function markPaused(stage: WorkflowStepId) {
+    const actualStage = inferPauseStage(stage);
     workflowRunToken.value += 1;
-    freezeWorkflowStepsForPause(stage);
+    freezeWorkflowStepsForPause(actualStage);
     isPaused.value = true;
     recoveredActiveWorkflow.value = false;
     pauseRequested.value = false;
-    resumeStage.value = stage;
+    resumeStage.value = actualStage;
     isRunning.value = false;
     currentGeneratingSlide.value = null;
     activeQueueJobId.value = null;
@@ -1526,6 +1571,139 @@ export const useAgentStore = defineStore('agent', () => {
 
   function sortSvgPagesByPageNumber() {
     svgPages.value = [...svgPages.value].sort((left, right) => left.pageNumber - right.pageNumber);
+  }
+
+  function reindexSpecSlides(slides: SpecSlide[]) {
+    return slides.map((slide, index) => ({
+      ...slide,
+      pageNumber: index + 1,
+    }));
+  }
+
+  function reindexPageRecord<T>(record: Record<string, T> | undefined, removedPageNumber: number) {
+    const next: Record<string, T> = {};
+    Object.entries(record || {}).forEach(([key, value]) => {
+      const pageNumber = Number.parseInt(key.replace(/^P/i, ''), 10);
+      if (!Number.isInteger(pageNumber) || pageNumber === removedPageNumber) return;
+      const nextPageNumber = pageNumber > removedPageNumber ? pageNumber - 1 : pageNumber;
+      next[`P${String(nextPageNumber).padStart(2, '0')}`] = value;
+    });
+    return next;
+  }
+
+  function refreshPreviewStepAfterPageMutation() {
+    const totalPages = layoutPageCount();
+    if (totalPages > 0 && svgPages.value.length >= totalPages && !hasPendingLayoutPages(totalPages)) {
+      setStepStatus('layout', 'done', 100);
+      activeStep.value = 'preview';
+      return;
+    }
+
+    if (svgPages.value.length > 0) {
+      setStepStatus('layout', 'idle', Math.round((svgPages.value.length / Math.max(1, totalPages)) * 100));
+    } else {
+      setStepStatus('layout', 'idle', 0);
+    }
+  }
+
+  function escapeSvgText(value: string) {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function deleteSlideImage(slideId: string): string | null {
+    const target = images.value.find((image) => image.slideId === slideId || image.id === slideId);
+    if (!target) return null;
+
+    images.value = images.value.filter((image) => image.id !== target.id);
+    syncGeneratedSlidesFromImages();
+    updateImageStepFromGate('idle');
+    pushLog(`已删除图片：${target.title}`);
+    syncToProject();
+    return `已删除图片「${target.title}」`;
+  }
+
+  function deleteSvgPage(pageNumber: number): string | null {
+    const targetPage = Number(pageNumber);
+    if (!Number.isInteger(targetPage) || targetPage < 1) return null;
+
+    const existingPage = svgPages.value.find((page) => page.pageNumber === targetPage);
+    const existingSlide = designSpec.value?.outline.find((slide) => slide.pageNumber === targetPage)
+      || outline.value[targetPage - 1];
+    if (!existingPage && !existingSlide) return null;
+    const removedSlideId = existingSlide?.id;
+
+    saveHistory();
+
+    svgPages.value = svgPages.value
+      .filter((page) => page.pageNumber !== targetPage)
+      .map((page) => ({
+        ...page,
+        pageNumber: page.pageNumber > targetPage ? page.pageNumber - 1 : page.pageNumber,
+      }));
+    sortSvgPagesByPageNumber();
+
+    if (designSpec.value) {
+      designSpec.value = {
+        ...designSpec.value,
+        outline: reindexSpecSlides(designSpec.value.outline.filter((slide) => slide.pageNumber !== targetPage)),
+      };
+    }
+
+    if (specLock.value) {
+      specLock.value = {
+        ...specLock.value,
+        pageRhythm: reindexPageRecord(specLock.value.pageRhythm, targetPage),
+        pageLayouts: reindexPageRecord(specLock.value.pageLayouts, targetPage),
+        pageCharts: reindexPageRecord(specLock.value.pageCharts, targetPage),
+      };
+    }
+
+    outline.value = outline.value.filter((_, index) => index !== targetPage - 1);
+    if (removedSlideId) {
+      images.value = images.value.filter((image) => image.slideId !== removedSlideId);
+      syncGeneratedSlidesFromImages();
+      updateImageStepFromGate('idle');
+    }
+
+    executorCursor.value = Math.min(executorCursor.value, completedLeadingLayoutPages());
+    parameters.value = {
+      ...parameters.value,
+      slideCount: Math.max(0, layoutPageCount()),
+    };
+    refreshPreviewStepAfterPageMutation();
+    pushLog(`已删除第 ${targetPage} 页。`);
+    syncToProject();
+    return `已删除第 ${targetPage} 页`;
+  }
+
+  function updateSvgPageText(pageNumber: number, fromText: string, toText: string): string | null {
+    const targetPage = Number(pageNumber);
+    const from = String(fromText || '').trim();
+    if (!Number.isInteger(targetPage) || targetPage < 1 || !from) return null;
+
+    const page = svgPages.value.find((item) => item.pageNumber === targetPage);
+    if (!page?.svg) return null;
+
+    const escapedFrom = escapeSvgText(from);
+    const escapedTo = escapeSvgText(String(toText || ''));
+    let nextSvg = page.svg;
+    if (nextSvg.includes(escapedFrom)) {
+      nextSvg = nextSvg.split(escapedFrom).join(escapedTo);
+    } else if (nextSvg.includes(from)) {
+      nextSvg = nextSvg.split(from).join(escapedTo);
+    } else {
+      return null;
+    }
+
+    svgPages.value = svgPages.value.map((item) =>
+      item.pageNumber === targetPage ? { ...item, svg: nextSvg } : item
+    );
+    pushLog(`已修改第 ${targetPage} 页 SVG 文本。`);
+    syncToProject();
+    return `已将第 ${targetPage} 页中的「${from}」替换为「${toText}」`;
   }
 
   function upsertSvgPage(page: { pageNumber: number; svg: string; speakerNotes: string }) {
@@ -1656,6 +1834,61 @@ export const useAgentStore = defineStore('agent', () => {
     return /constraint|config|rule|约束|配置|规则|提示词/.test(text);
   }
 
+  function wantsWebSearch(text: string) {
+    return /联网|网络|网页|网上|搜索|检索|查找|查资料|资料收集|最新|新闻|趋势|案例|竞品|web\s*search|google|bing/i.test(text);
+  }
+
+  function wantsFileParsing(files: string[]) {
+    return files.length > 0;
+  }
+
+  function skillSelectionReason(skill: SkillDefinition, category: string, autoSelected: boolean) {
+    if (skill.enabled) return '用户已选择';
+    if (!autoSelected) return '';
+    if (category === '资料收集') return '根据输入中的联网/搜索意图自动选择';
+    if (category === '文件解析') return '根据上传文件自动选择';
+    if (category === '主题提炼') return '根据主题自动提炼需求自动选择';
+    if (category === '生成约束') return '根据提示词、模板或配置自动选择';
+    return '系统自动选择';
+  }
+
+  function autoSelectSkillsByCategory(
+    category: string,
+    options: {
+      userText: string;
+      files: string[];
+      hasSkillContext: boolean;
+      hasGenerationControls: boolean;
+    }
+  ) {
+    const categorySkills = runnableSkills.value
+      .filter((skill) => Number.isFinite(Number(skill.id)))
+      .filter((skill) => normalizeInputSkillCategory(skill.category) === category);
+    const selected = categorySkills.filter((skill) => skill.enabled);
+    const unselected = categorySkills.filter((skill) => !skill.enabled);
+
+    let shouldAutoSelect = false;
+    if (category === '资料收集') shouldAutoSelect = wantsWebSearch(options.userText);
+    if (category === '文件解析') shouldAutoSelect = wantsFileParsing(options.files);
+    if (category === '主题提炼') shouldAutoSelect = Boolean(options.userText || options.files.length || options.hasSkillContext);
+    if (category === '生成约束') shouldAutoSelect = options.hasGenerationControls;
+
+    const autoSelected = shouldAutoSelect
+      ? unselected.filter((skill) => {
+          if (category === '资料收集') return isSearchSkill(skill);
+          if (category === '文件解析') return isFileParseSkill(skill);
+          if (category === '主题提炼') return isTopicSkill(skill);
+          if (category === '生成约束') return isConstraintSkill(skill);
+          return true;
+        }).slice(0, category === '资料收集' ? 2 : 1)
+      : [];
+
+    return [...selected, ...autoSelected].map((skill) => ({
+      skill,
+      reason: skillSelectionReason(skill, category, autoSelected.some((item) => item.id === skill.id)),
+    }));
+  }
+
   function stripSkillContextBlock(content: string) {
     const pattern = new RegExp(`\\n*${SKILL_CONTEXT_START}[\\s\\S]*?${SKILL_CONTEXT_END}\\n*`, 'g');
     return content.replace(pattern, '\n\n').trim();
@@ -1680,6 +1913,15 @@ export const useAgentStore = defineStore('agent', () => {
   function compactMultiline(value: string, maxLength = 900) {
     const normalized = value.trim().replace(/\n{3,}/g, '\n\n');
     return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+  }
+
+  function inputStepById(id: InputProcessStep['id']) {
+    return inputProcessSteps.value.find((step) => step.id === id);
+  }
+
+  function appendInputStepLog(id: InputProcessStep['id'], message: string) {
+    const current = inputStepById(id)?.logs || '';
+    return [current, message].filter(Boolean).join('\n');
   }
 
   function buildUploadedFileContext() {
@@ -1782,7 +2024,11 @@ export const useAgentStore = defineStore('agent', () => {
         titles.length ? `重点结果：${titles.join('；')}` : '',
       ].filter(Boolean).join('\n');
     }
-    if (stepId === 'file-parse') return '已解析上传文件，并将可用内容合并到资料上下文。';
+    if (stepId === 'file-parse') {
+      return outputText
+        ? `已解析上传文件：${compactMultiline(outputText, 260)}`
+        : '已解析上传文件，并将可用内容合并到资料上下文。';
+    }
     if (stepId === 'topic') return outputText ? `已提炼主题线索：${compactMultiline(outputText, 220)}` : '已完成主题提炼。';
     if (stepId === 'constraints') return outputText ? `已整理生成约束：${compactMultiline(outputText, 220)}` : '已完成生成约束整理。';
     return outputText ? compactMultiline(outputText, 220) : `${skill.name} 已完成。`;
@@ -1812,41 +2058,48 @@ export const useAgentStore = defineStore('agent', () => {
   async function runInputSkill(
     skill: SkillDefinition,
     stepId: InputProcessStep['id'],
-    inputPayload: Record<string, any>
+    inputPayload: Record<string, any>,
+    ctx: RunContext = currentRunContext()
   ) {
+    assertRunContextActive(ctx);
+    const projectId = ctx.projectId || activePpt.value?.id;
     setInputProcessStep(stepId, {
       status: 'running',
       progress: 18,
       detail: `准备 ${skill.name} 的输入`,
       skillId: skill.id,
       skillName: skill.name,
-      logs: '',
+      logs: appendInputStepLog(stepId, `准备 ${skill.name} 的输入。`),
       output: '',
       processedText: '',
       error: undefined,
     });
     await new Promise((resolve) => window.setTimeout(resolve, 120));
+    assertRunContextActive(ctx);
 
     setInputProcessStep(stepId, {
       progress: 38,
       detail: `正在启动 ${skill.name}`,
-      logs: `输入已整理：${compactMultiline(JSON.stringify(inputPayload), 180)}`,
+      logs: appendInputStepLog(stepId, `输入已整理：${compactMultiline(JSON.stringify(inputPayload), 180)}`),
     });
 
     const response = await skillApi.run(Number(skill.id), {
-      projectId: activePpt.value?.id,
+      projectId: projectId || undefined,
       phase: 'input',
       input: inputPayload,
     });
+    assertRunContextActive(ctx);
 
     setInputProcessStep(stepId, {
       progress: 76,
       detail: `正在处理 ${skill.name} 返回内容`,
+      logs: appendInputStepLog(stepId, `${skill.name} 已返回，正在提取可用内容。`),
     });
 
     if (!response.success || !response.data) {
       throw new Error(response.message || `${skill.name} 执行失败`);
     }
+    assertRunContextActive(ctx);
 
     const outputText = extractSkillOutputText(response.data.output);
     const runLogs = response.data.logs || '';
@@ -1920,13 +2173,20 @@ export const useAgentStore = defineStore('agent', () => {
     return true;
   }
 
-  async function runInputStage() {
+  async function runInputStage(options: { advance?: boolean } = {}) {
+    const advance = options.advance !== false;
     const toastStore = useToastStore();
+    const ctx = createRunContext();
     resetInputProcessSteps();
     activeStep.value = 'input';
     setStepStatus('input', 'running', 5);
 
     const ready = await ensureInputProject();
+    if (ready && !ctx.projectId && activePptId.value) {
+      ctx.projectId = activePptId.value;
+      runningProjectId.value = activePptId.value;
+    }
+    assertRunContextActive(ctx);
     if (!ready) {
       setStepStatus('input', 'idle', 0);
       return;
@@ -1939,31 +2199,79 @@ export const useAgentStore = defineStore('agent', () => {
     const content = buildInputSourceContext(userContent);
     processedInputContent.value = '';
     const files = [...input.value.files];
-    const activeSkills = enabledSkills.value.filter((skill) => Number.isFinite(Number(skill.id)));
-    const collectSkills = activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '资料收集' || isSearchSkill(skill));
+    const blockedSkills = enabledSkills.value.filter((skill) =>
+      Number.isFinite(Number(skill.id)) &&
+      skill.runtime !== 'prompt-only' &&
+      skill.type !== 'prompt-only' &&
+      skill.testStatus !== 'passed'
+    );
+    if (blockedSkills.length > 0) {
+      const message = `以下 Skill 未通过可用性测试：${blockedSkills.map((skill) => skill.name).join('、')}。请先在 Skill 管理中测试通过后再运行。`;
+      setInputProcessStep('collect', {
+        status: 'failed',
+        progress: 100,
+        detail: message,
+        error: message,
+      });
+      setStepStatus('input', 'idle', 0);
+      pushLog(message);
+      syncToProject();
+      throw new Error(message);
+    }
+
+    const hasGenerationControls = Boolean(
+      selectedPromptId.value ||
+      selectedTemplate.value ||
+      parameters.value.slideCount > 0 ||
+      parameters.value.summaryLength !== 'auto' ||
+      parameters.value.tone !== 'auto' ||
+      parameters.value.imageStyle !== 'auto'
+    );
+    const selectionOptions = {
+      userText: `${userContent}\n${input.value.topic}`.trim(),
+      files,
+      hasSkillContext: false,
+      hasGenerationControls,
+    };
+    const searchIntent = wantsWebSearch(selectionOptions.userText);
+    const collectSkills = autoSelectSkillsByCategory('资料收集', selectionOptions);
     const fileParseSkills = files.length
-      ? activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '文件解析' || isFileParseSkill(skill))
+      ? autoSelectSkillsByCategory('文件解析', selectionOptions)
       : [];
-    const topicSkills = activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '主题提炼' || isTopicSkill(skill));
-    const constraintSkills = activeSkills.filter((skill) => normalizeInputSkillCategory(skill.category) === '生成约束' || isConstraintSkill(skill));
+    const topicSkills = autoSelectSkillsByCategory('主题提炼', selectionOptions);
+    const constraintSkills = autoSelectSkillsByCategory('生成约束', selectionOptions);
     const skillContextChunks: string[] = [];
 
     try {
       setInputProcessStep('collect', {
         status: 'running',
         progress: 45,
-        detail: collectSkills.length ? `正在执行 ${collectSkills.length} 个资料收集 Skill` : files.length ? `已接收 ${files.length} 个文件，正在整理资料` : '正在整理输入资料',
+        detail: collectSkills.length ? `自动选择 ${collectSkills.length} 个资料收集 Skill` : files.length ? `已接收 ${files.length} 个文件，正在整理资料` : '正在整理输入资料',
+        logs: collectSkills.length
+          ? collectSkills.map((item) => `${item.skill.name}：${item.reason}`).join('\n')
+          : searchIntent
+            ? '检测到联网/搜索意图，但当前没有可用的资料收集 Skill。'
+            : '',
       });
 
       if (collectSkills.length) {
-        for (const skill of collectSkills) {
+        for (const item of collectSkills) {
+          const skill = item.skill;
           try {
+            setInputProcessStep('collect', {
+              status: 'running',
+              progress: 50,
+              detail: `${item.reason}，正在执行 ${skill.name}`,
+              logs: collectSkills.map((plan) => `${plan.skill.name}：${plan.reason}`).join('\n'),
+            });
             const result = await runInputSkill(skill, 'collect', {
               content,
               query: input.value.topic || inferInputTitle(userContent || content, files),
               files,
-              purpose: 'collect and enrich source materials before PPT generation',
-            });
+              purpose: wantsWebSearch(selectionOptions.userText)
+                ? 'web search and enrich source materials before PPT generation'
+                : 'collect and enrich source materials before PPT generation',
+            }, ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '资料收集 Skill 执行失败';
@@ -1978,6 +2286,9 @@ export const useAgentStore = defineStore('agent', () => {
           }
         }
       } else {
+        if (searchIntent) {
+          pushLog('检测到联网/搜索意图，但没有可用的资料收集 Skill，本次将使用现有输入资料继续。');
+        }
         await new Promise((resolve) => window.setTimeout(resolve, 120));
       }
 
@@ -1988,6 +2299,8 @@ export const useAgentStore = defineStore('agent', () => {
           ? inputProcessSteps.value.find(step => step.id === 'collect')?.detail
           : collectSkills.length
             ? `${collectSkills.length} 个资料收集 Skill 已完成`
+            : searchIntent
+              ? '未找到可用资料收集 Skill，已使用现有资料继续'
             : content
               ? `${content.length} 字资料已进入上下文`
               : `${files.length} 个文件已记录`,
@@ -1995,14 +2308,33 @@ export const useAgentStore = defineStore('agent', () => {
       setStepStatus('input', 'running', 20);
 
       if (files.length && fileParseSkills.length) {
-        for (const skill of fileParseSkills) {
+        setInputProcessStep('file-parse', {
+          status: 'running',
+          progress: 45,
+          detail: `自动选择 ${fileParseSkills.length} 个文件解析 Skill`,
+          logs: [
+            `待解析文件：${files.join('、')}`,
+            ...fileParseSkills.map((item) => `${item.skill.name}：${item.reason}`),
+          ].join('\n'),
+        });
+        for (const item of fileParseSkills) {
+          const skill = item.skill;
           try {
+            setInputProcessStep('file-parse', {
+              status: 'running',
+              progress: 58,
+              detail: `${item.reason}，正在执行 ${skill.name}`,
+              logs: [
+                `待解析文件：${files.join('、')}`,
+                ...fileParseSkills.map((plan) => `${plan.skill.name}：${plan.reason}`),
+              ].join('\n'),
+            });
             const result = await runInputSkill(skill, 'file-parse', {
               content,
               fileContents: uploadedFileContents.value,
               files,
               purpose: 'parse uploaded files before PPT generation',
-            });
+            }, ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '文件解析 Skill 执行失败';
@@ -2018,6 +2350,15 @@ export const useAgentStore = defineStore('agent', () => {
         }
       } else {
         setInputProcessStep('file-parse', {
+          status: files.length ? 'running' : 'skipped',
+          progress: files.length ? 55 : 100,
+          detail: files.length ? '未找到可用文件解析 Skill，正在使用内置读取流程' : '未上传文件，跳过',
+          logs: files.length ? '当前没有可用的文件解析 Skill，上传文件会通过内置读取结果进入资料上下文。' : '',
+        });
+        if (files.length) {
+          await new Promise((resolve) => window.setTimeout(resolve, 180));
+        }
+        setInputProcessStep('file-parse', {
           status: files.length ? 'done' : 'skipped',
           progress: 100,
           detail: files.length ? '上传文件已通过内置读取流程合并到资料' : '未上传文件，跳过',
@@ -2028,16 +2369,26 @@ export const useAgentStore = defineStore('agent', () => {
       setInputProcessStep('topic', {
         status: 'running',
         progress: 60,
-        detail: topicSkills.length ? `正在执行 ${topicSkills.length} 个主题提炼 Skill` : '正在提炼主题、受众和表达目标',
+        detail: topicSkills.length ? `自动选择 ${topicSkills.length} 个主题提炼 Skill` : '正在提炼主题、受众和表达目标',
+        logs: topicSkills.length
+          ? topicSkills.map((item) => `${item.skill.name}：${item.reason}`).join('\n')
+          : '',
       });
       if (topicSkills.length) {
-        for (const skill of topicSkills) {
+        for (const item of topicSkills) {
+          const skill = item.skill;
           try {
+            setInputProcessStep('topic', {
+              status: 'running',
+              progress: 68,
+              detail: `${item.reason}，正在执行 ${skill.name}`,
+              logs: topicSkills.map((plan) => `${plan.skill.name}：${plan.reason}`).join('\n'),
+            });
             const result = await runInputSkill(skill, 'topic', {
               content: buildSkillContextContent(content, skillContextChunks),
               files,
               purpose: 'extract topic and audience before PPT generation',
-            });
+            }, ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '主题提炼 Skill 执行失败';
@@ -2069,11 +2420,21 @@ export const useAgentStore = defineStore('agent', () => {
       setInputProcessStep('constraints', {
         status: 'running',
         progress: 70,
-        detail: constraintSkills.length ? `正在执行 ${constraintSkills.length} 个生成约束 Skill` : '正在整理提示词、参考模板和配置参数',
+        detail: constraintSkills.length ? `自动选择 ${constraintSkills.length} 个生成约束 Skill` : '正在整理提示词、参考模板和配置参数',
+        logs: constraintSkills.length
+          ? constraintSkills.map((item) => `${item.skill.name}：${item.reason}`).join('\n')
+          : '',
       });
       if (constraintSkills.length) {
-        for (const skill of constraintSkills) {
+        for (const item of constraintSkills) {
+          const skill = item.skill;
           try {
+            setInputProcessStep('constraints', {
+              status: 'running',
+              progress: 78,
+              detail: `${item.reason}，正在执行 ${skill.name}`,
+              logs: constraintSkills.map((plan) => `${plan.skill.name}：${plan.reason}`).join('\n'),
+            });
             const result = await runInputSkill(skill, 'constraints', {
               content: buildSkillContextContent(content, skillContextChunks),
               files,
@@ -2081,7 +2442,7 @@ export const useAgentStore = defineStore('agent', () => {
               templateName: selectedTemplate.value?.name || '',
               parameters: { ...parameters.value },
               purpose: 'prepare generation constraints before PPT generation',
-            });
+            }, ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '生成约束 Skill 执行失败';
@@ -2135,8 +2496,12 @@ export const useAgentStore = defineStore('agent', () => {
       setStepStatus('input', 'done', 100);
       pushLog('输入阶段处理完成。');
       await syncToProjectNow();
-      activeStep.value = 'outline';
+      assertRunContextActive(ctx);
+      if (advance) {
+        activeStep.value = 'outline';
+      }
     } catch (error) {
+      if (!isRunContextActive(ctx)) return;
       const message = error instanceof Error ? error.message : '输入阶段处理失败';
       setInputProcessStep('ready', {
         status: 'failed',
@@ -2266,6 +2631,7 @@ export const useAgentStore = defineStore('agent', () => {
 
   function deletePptProject(id: string) {
     const project = pptProjects.value.find((item) => item.id === id);
+    deletedPptProjectIds.value = new Set([...deletedPptProjectIds.value, id]);
     pptProjects.value = pptProjects.value.filter((item) => item.id !== id);
 
     if (activePptId.value === id) {
@@ -2288,6 +2654,7 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function selectPptProject(id: string) {
+    if (deletedPptProjectIds.value.has(id)) return;
     if (activePpt.value && activePpt.value.id === id) return;
 
     if (activePpt.value) {
@@ -2582,7 +2949,7 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   // ---- Chat action execution ----
-  function executeChatAction(action: { type: string; params: Record<string, string> }, projectId?: string): string | null {
+  async function executeChatAction(action: { type: string; params: Record<string, string> }, projectId?: string): Promise<string | null> {
     if (projectId && activePptId.value !== projectId) return null;
 
     const newOutline = outline.value.map(s => ({ ...s, bullets: [...s.bullets] }));
@@ -2590,6 +2957,10 @@ export const useAgentStore = defineStore('agent', () => {
       outline.value = newOutline;
       syncToProject();
     };
+    const pageIndex = Number.parseInt(action.params.pageNumber || action.params.page || action.params.index || '', 10) - 1;
+    const slideIdFromPage = Number.isInteger(pageIndex) && pageIndex >= 0
+      ? (designSpec.value?.outline[pageIndex]?.id || outline.value[pageIndex]?.id)
+      : '';
 
     switch (action.type) {
       case 'updateSlideTitle': {
@@ -2633,6 +3004,13 @@ export const useAgentStore = defineStore('agent', () => {
         }
         return null;
       }
+      case 'updateNotes': {
+        const slide = newOutline.find(s => s.id === action.params.slideId) || (pageIndex >= 0 ? newOutline[pageIndex] : undefined);
+        if (!slide) return null;
+        slide.speakerNotes = action.params.text || '';
+        commitOutline();
+        return `已更新「${slide.title}」的演讲备注`;
+      }
       case 'addSlide': {
         const newSlide: SlideOutline = {
           id: `slide-${Date.now()}`,
@@ -2644,6 +3022,106 @@ export const useAgentStore = defineStore('agent', () => {
         newOutline.push(newSlide);
         commitOutline();
         return `已添加新幻灯片「${newSlide.title}」`;
+      }
+      case 'selectPrompt':
+      case 'select_prompt': {
+        const promptId = action.params.promptId || action.params.id;
+        if (!promptId) return null;
+        const prompt = prompts.value.find((item) => item.id === promptId || item.title === promptId);
+        if (!prompt) return null;
+        selectPrompt(prompt.id);
+        return `已选择提示词「${prompt.title}」`;
+      }
+      case 'clearPrompt':
+      case 'clear_prompt': {
+        selectPrompt('');
+        return '已清除提示词选择';
+      }
+      case 'selectTemplate':
+      case 'select_template': {
+        const templateId = action.params.templateId || action.params.id;
+        if (!templateId || templateId === 'auto') {
+          clearGalleryTemplate();
+          return '已清除参考模板';
+        }
+        const template = templates.value.find((item) => item.id === templateId || item.name === templateId);
+        if (!template) return null;
+        applyGalleryTemplate(template);
+        return `已应用模板「${template.name}」`;
+      }
+      case 'toggleSkill':
+      case 'toggle_skill': {
+        const skillId = action.params.skillId || action.params.id;
+        const skill = skills.value.find((item) => item.id === skillId || item.name === skillId);
+        if (!skill) return null;
+        const rawEnabled = action.params.enabled;
+        if (rawEnabled === undefined) {
+          toggleSkill(skill.id);
+        } else {
+          skill.enabled = ['true', '1', 'yes', '启用', '开启'].includes(rawEnabled.toLowerCase());
+          pushLog(`${skill.name} 已${skill.enabled ? '加入本次输入处理' : '从本次输入处理移除'}。`);
+          syncToProject();
+        }
+        return `${skill.enabled ? '已启用' : '已停用'} Skill「${skill.name}」`;
+      }
+      case 'setParameter':
+      case 'set_parameter': {
+        const key = action.params.key;
+        const value = action.params.value;
+        if (!isConfigOptionKey(key) || value === undefined) return null;
+        setConfigOptionValue(key, value);
+        return `已更新配置「${CONFIG_META[key].name}」`;
+      }
+      case 'retryImage':
+      case 'retry_image': {
+        const slideId = action.params.slideId || slideIdFromPage;
+        if (!slideId) return null;
+        await retrySlideImage(slideId);
+        return '已触发该页图片重试';
+      }
+      case 'retryPage':
+      case 'retry_page': {
+        const pageNumber = Number.parseInt(action.params.pageNumber || action.params.page || action.params.index || '', 10);
+        if (!Number.isInteger(pageNumber) || pageNumber < 1) return null;
+        await retrySlidePage(pageNumber);
+        return `已触发第 ${pageNumber} 页重新生成`;
+      }
+      case 'editSvgText':
+      case 'edit_svg_text': {
+        const pageNumber = Number.parseInt(action.params.pageNumber || action.params.page || action.params.index || '', 10);
+        return updateSvgPageText(pageNumber, action.params.from || action.params.oldText || '', action.params.to || action.params.newText || '');
+      }
+      case 'saveWorkflow':
+      case 'save_workflow': {
+        await saveWorkflow();
+        return '已保存当前 PPT 工作流';
+      }
+      case 'pauseWorkflow':
+      case 'pause_workflow': {
+        await requestPauseWorkflow();
+        return '已请求暂停当前 PPT 工作流';
+      }
+      case 'continueWorkflow':
+      case 'continue_workflow': {
+        await continueWorkflow();
+        return '已继续当前 PPT 工作流';
+      }
+      case 'restoreVersion':
+      case 'restore_version': {
+        const versionId = action.params.versionId || action.params.id;
+        if (!versionId || !activePptId.value) return null;
+        const success = await restoreVersion(activePptId.value, versionId);
+        return success ? '已切换到指定历史版本' : null;
+      }
+      case 'deleteImage':
+      case 'delete_image': {
+        const slideId = action.params.slideId || slideIdFromPage;
+        return slideId ? deleteSlideImage(slideId) : null;
+      }
+      case 'deletePage':
+      case 'delete_page': {
+        const pageNumber = Number.parseInt(action.params.pageNumber || action.params.page || action.params.index || '', 10);
+        return deleteSvgPage(pageNumber);
       }
       default:
         return null;
@@ -3440,7 +3918,18 @@ export const useAgentStore = defineStore('agent', () => {
     if (!checkActivePpt()) return;
     if (outline.value.length === 0) return;
 
-    const activeSkills = enabledSkills.value;
+    const blockedSkills = enabledSkills.value.filter((skill) =>
+      skill.runtime !== 'prompt-only' &&
+      skill.type !== 'prompt-only' &&
+      skill.testStatus !== 'passed'
+    );
+    if (blockedSkills.length > 0) {
+      const message = `以下 Skill 未通过可用性测试：${blockedSkills.map((skill) => skill.name).join('、')}。请先在 Skill 管理中测试通过后再运行。`;
+      pushLog(message);
+      throw new Error(message);
+    }
+
+    const activeSkills = runnableEnabledSkills.value;
     if (activeSkills.length === 0) {
       pushLog('本次未选择 Skill，跳过。');
       return;
@@ -3766,42 +4255,81 @@ export const useAgentStore = defineStore('agent', () => {
     if (!files || files.length === 0) return;
 
     const fileList = Array.from(files);
-    input.value.files = fileList.map((file) => file.name);
-    const parsedFiles: UploadedFileContent[] = [];
+    const existingFileNames = new Set(input.value.files);
+    const existingParsedByName = new Map(uploadedFileContents.value.map((file) => [file.name, file]));
+    const acceptedNames: string[] = [];
     const skippedFiles: string[] = [];
+    const binarySkillFiles: string[] = [];
 
     for (const file of fileList) {
+      if (existingFileNames.has(file.name)) continue;
       const isTextFile = file.type.startsWith('text/') || TEXT_FILE_PATTERN.test(file.name);
       const isDocxFile = DOCX_FILE_PATTERN.test(file.name);
-      if (!isTextFile && !isDocxFile) {
+      const isSkillParseFile = PARSE_WITH_SKILL_FILE_PATTERN.test(file.name);
+      if (!isTextFile && !isDocxFile && !isSkillParseFile) {
         skippedFiles.push(file.name);
         continue;
       }
 
       try {
+        acceptedNames.push(file.name);
+        existingFileNames.add(file.name);
+        if (isSkillParseFile) {
+          existingParsedByName.set(file.name, {
+            name: file.name,
+            text: '',
+            dataBase64: await fileToBase64(file),
+            mimeType: file.type || 'application/octet-stream',
+            extension: file.name.split('.').pop()?.toLowerCase() || '',
+          });
+          binarySkillFiles.push(file.name);
+          continue;
+        }
+
         const text = isDocxFile ? await readDocxText(file) : await file.text();
         const clippedText = text.length > MAX_FILE_TEXT_CHARS
           ? `${text.slice(0, MAX_FILE_TEXT_CHARS)}\n\n[文件内容较长，已截取前 ${MAX_FILE_TEXT_CHARS} 字符]`
           : text;
         if (clippedText.trim()) {
-          parsedFiles.push({ name: file.name, text: clippedText.trim() });
+          existingParsedByName.set(file.name, {
+            name: file.name,
+            text: clippedText.trim(),
+            mimeType: file.type || 'text/plain',
+            extension: file.name.split('.').pop()?.toLowerCase() || '',
+          });
         }
       } catch {
         skippedFiles.push(file.name);
       }
     }
 
-    uploadedFileContents.value = parsedFiles;
+    input.value.files = [...input.value.files, ...acceptedNames];
+    uploadedFileContents.value = input.value.files
+      .map((name) => existingParsedByName.get(name))
+      .filter(Boolean) as UploadedFileContent[];
     processedInputContent.value = '';
 
-    pushLog(parsedFiles.length > 0
-      ? `已读取 ${parsedFiles.length} 个资料文件，文件正文将进入输入阶段处理流。`
+    const readableAddedCount = acceptedNames.length - binarySkillFiles.length;
+    pushLog(readableAddedCount > 0
+      ? `已读取 ${readableAddedCount} 个资料文件，文件正文将进入输入阶段处理流。`
       : `已记录 ${input.value.files.length} 个资料文件。`);
+
+    if (binarySkillFiles.length > 0) {
+      pushLog(`已接收 ${binarySkillFiles.join('、')}，将交给可用的文件解析 Skill 处理。`);
+    }
 
     if (skippedFiles.length > 0) {
       pushLog(`以下文件暂未解析正文：${skippedFiles.join('、')}。`);
     }
 
+    syncToProject();
+  }
+
+  function removeAttachedFile(fileName: string) {
+    input.value.files = input.value.files.filter((name) => name !== fileName);
+    uploadedFileContents.value = uploadedFileContents.value.filter((file) => file.name !== fileName);
+    processedInputContent.value = '';
+    pushLog(`已删除上传文件：${fileName}`);
     syncToProject();
   }
 
@@ -3849,7 +4377,10 @@ export const useAgentStore = defineStore('agent', () => {
           entry: s.entry || null,
           installStatus: s.install_status || 'not_required',
           installLog: s.install_log || '',
-          dependencyFile: s.dependency_file || null
+          dependencyFile: s.dependency_file || null,
+          testStatus: s.test_status || 'not_tested',
+          testLog: s.test_log || null,
+          lastTestedAt: s.last_tested_at || null
         }));
       }
     } catch (error) {
@@ -3913,22 +4444,24 @@ export const useAgentStore = defineStore('agent', () => {
     try {
       const response = await projectApi.getAll();
       if (response.success && response.data) {
-        const remoteProjects: PptProject[] = response.data.map((project: any) => {
-          const projectState = project.state
-            ? (typeof project.state === 'string' ? JSON.parse(project.state) : project.state)
-            : null;
+        const remoteProjects: PptProject[] = response.data
+          .filter((project: any) => !deletedPptProjectIds.value.has(String(project.id)))
+          .map((project: any) => {
+            const projectState = project.state
+              ? (typeof project.state === 'string' ? JSON.parse(project.state) : project.state)
+              : null;
 
-          return {
-            id: String(project.id),
-            title: project.title || '未命名 PPT',
-            topic: project.topic || '',
-            description: project.content || '',
-            templateId: 'auto',
-            createdAt: new Date(project.created_at).getTime(),
-            updatedAt: new Date(project.updated_at).getTime(),
-            state: projectState || makeDefaultProjectState(),
-          };
-        });
+            return {
+              id: String(project.id),
+              title: project.title || '未命名 PPT',
+              topic: project.topic || '',
+              description: project.content || '',
+              templateId: 'auto',
+              createdAt: new Date(project.created_at).getTime(),
+              updatedAt: new Date(project.updated_at).getTime(),
+              state: projectState || makeDefaultProjectState(),
+            };
+          });
         pptProjects.value = mergePptProjects([...remoteProjects, ...pptProjects.value], activePptId.value);
       }
     } catch (error) {
@@ -4138,6 +4671,7 @@ export const useAgentStore = defineStore('agent', () => {
     selectPrompt,
     applyPrompt,
     attachFiles,
+    removeAttachedFile,
     exportCurrentDeck,
     runFullWorkflow,
     runInputStage,
@@ -4146,11 +4680,15 @@ export const useAgentStore = defineStore('agent', () => {
     updateConfigOption,
     deleteConfigOption,
     requestPauseWorkflow,
+    clearPauseState,
     continueWorkflow,
     resumeRecoveredWorkflow,
     runImages: () => runImages(),
     retrySlideImage,
     retrySlidePage,
+    deleteSlideImage,
+    deleteSvgPage,
+    updateSvgPageText,
     retryingPageNumbers,
     runLayout,
     runOutline,

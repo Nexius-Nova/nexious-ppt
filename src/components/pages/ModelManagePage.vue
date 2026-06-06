@@ -24,6 +24,7 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
+import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useApiKeyStore } from '@/stores/apiKeyStore';
 import { useToastStore } from '@/stores/toastStore';
 import { aiApi } from '@/services/api';
@@ -270,10 +271,7 @@ function getProviderLabel(model: ManagedModel) {
           </div>
         </div>
 
-        <div v-if="loading" class="loading-state">
-          <Loader2 :size="16" class="animate-spin" />
-          正在加载模型配置
-        </div>
+        <PageLoadingState v-if="loading" compact title="正在加载模型配置" description="正在同步文本和图像模型连接" />
 
         <div v-else-if="currentModels.length === 0" class="empty-models">
           <component :is="activeTab === 'text' ? Cpu : Image" :size="28" />

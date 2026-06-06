@@ -730,6 +730,17 @@ export async function cancelQueuedJob(id: string, userId: number) {
   return snapshotJob(job);
 }
 
+export async function cancelQueuedJobsByProject(userId: number, projectId: string) {
+  const cancelledJobs: QueuedJobSnapshot[] = [];
+  for (const job of jobs.values()) {
+    if (job.userId !== userId || job.projectId !== projectId) continue;
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') continue;
+    await cancelJob(job, '项目已删除，任务已取消');
+    cancelledJobs.push(snapshotJob(job));
+  }
+  return cancelledJobs;
+}
+
 export function getExportArtifact(id: string, userId: number) {
   const job = jobs.get(id);
   if (!job || job.userId !== userId || job.kind !== 'export' || job.status !== 'completed') return null;

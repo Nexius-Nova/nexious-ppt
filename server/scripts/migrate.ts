@@ -132,6 +132,21 @@ async function migrate(): Promise<void> {
       'last_installed_at',
       'ALTER TABLE `skills` ADD COLUMN `last_installed_at` TIMESTAMP NULL DEFAULT NULL AFTER `install_log`'
     );
+    await ensureColumn(
+      'skills',
+      'test_status',
+      "ALTER TABLE `skills` ADD COLUMN `test_status` VARCHAR(50) NOT NULL DEFAULT 'not_tested' AFTER `last_installed_at`"
+    );
+    await ensureColumn(
+      'skills',
+      'test_log',
+      'ALTER TABLE `skills` ADD COLUMN `test_log` MEDIUMTEXT DEFAULT NULL AFTER `test_status`'
+    );
+    await ensureColumn(
+      'skills',
+      'last_tested_at',
+      'ALTER TABLE `skills` ADD COLUMN `last_tested_at` TIMESTAMP NULL DEFAULT NULL AFTER `test_log`'
+    );
 
     await connection.query(`
       UPDATE \`skills\`
@@ -139,7 +154,8 @@ async function migrate(): Promise<void> {
         \`type\` = COALESCE(NULLIF(\`type\`, ''), 'prompt-only'),
         \`runtime\` = COALESCE(NULLIF(\`runtime\`, ''), 'prompt-only'),
         \`install_status\` = COALESCE(NULLIF(\`install_status\`, ''), 'not_required'),
-        \`install_log\` = COALESCE(\`install_log\`, 'No dependency initialization is required.')
+        \`install_log\` = COALESCE(\`install_log\`, 'No dependency initialization is required.'),
+        \`test_status\` = COALESCE(NULLIF(\`test_status\`, ''), 'not_tested')
     `);
     console.log('skills package fields normalized');
 

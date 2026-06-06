@@ -10,6 +10,7 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiAlert from '@/components/ui/UiAlert.vue';
 import UiDivider from '@/components/ui/UiDivider.vue';
+import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useApiKeyStore } from '@/stores/apiKeyStore';
 import { useToastStore } from '@/stores/toastStore';
 import { aiApi } from '@/services/api';
@@ -302,9 +303,7 @@ async function testImageModel() {
     </div>
 
     <template v-if="activeTab === 'text'">
-      <div v-if="loading" class="loading-state">
-        加载中...
-      </div>
+      <PageLoadingState v-if="loading" compact title="正在加载文本模型" description="正在同步文本模型配置" />
       
       <div v-else class="model-list">
         <div 
@@ -539,9 +538,7 @@ async function testImageModel() {
     </template>
 
     <template v-if="activeTab === 'image'">
-      <div v-if="loading" class="loading-state">
-        加载中...
-      </div>
+      <PageLoadingState v-if="loading" compact title="正在加载图像模型" description="正在同步图像模型配置" />
       
       <div v-else class="model-list">
         <div 

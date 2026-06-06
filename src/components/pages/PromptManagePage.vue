@@ -6,6 +6,7 @@ import UiInput from '@/components/ui/UiInput.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
 import UiField from '@/components/ui/UiField.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
+import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { promptApi, type Prompt } from '@/services/api';
 
@@ -32,13 +33,13 @@ const formData = ref({
 const apiBaseUrl = (import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
 
 const filteredPrompts = computed(() => {
-  if (!searchQuery.value) return prompts.value;
   const query = searchQuery.value.toLowerCase();
-  return prompts.value.filter(p => 
-    p.title.toLowerCase().includes(query) ||
-    (p.scene && p.scene.toLowerCase().includes(query)) ||
-    p.content.toLowerCase().includes(query)
-  );
+  return prompts.value.filter(p => {
+    return !query ||
+      p.title.toLowerCase().includes(query) ||
+      (p.scene && p.scene.toLowerCase().includes(query)) ||
+      p.content.toLowerCase().includes(query);
+  });
 });
 
 function resolvePreviewUrl(url?: string | null) {
@@ -239,14 +240,12 @@ onMounted(() => {
     <div class="search-bar">
       <UiInput
         v-model="searchQuery"
-        placeholder="搜索提示词..."
+        placeholder="输入关键词搜索标题、适用场景或提示词内容..."
         :prefix-icon="Search"
       />
     </div>
 
-    <div v-if="loading && prompts.length === 0" class="loading-state">
-      加载中...
-    </div>
+    <PageLoadingState v-if="loading && prompts.length === 0" title="正在加载提示词" description="正在读取提示词和效果图信息" />
 
     <div v-else-if="filteredPrompts.length === 0" class="empty-state">
       <UiEmpty
@@ -458,7 +457,9 @@ onMounted(() => {
 }
 
 .search-bar {
-  max-width: 420px;
+  display: grid;
+  gap: 10px;
+  max-width: 720px;
 }
 
 .loading-state {

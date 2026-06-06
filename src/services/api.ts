@@ -368,7 +368,7 @@ export const projectApi = {
     content?: string;
     status?: 'draft' | 'generating' | 'completed';
     state?: any;
-  }) => api.put<{ id?: number; replacedMissingId?: number }>(`/api/projects/${id}`, data),
+  }) => api.put<{ id?: number }>(`/api/projects/${id}`, data),
 
   delete: (id: number) => api.delete(`/api/projects/${id}`),
 };
@@ -847,6 +847,9 @@ export interface Skill {
   install_status: 'not_required' | 'pending' | 'installing' | 'ready' | 'failed' | string;
   install_log: string | null;
   last_installed_at: string | null;
+  test_status?: 'not_tested' | 'testing' | 'passed' | 'failed' | 'skipped' | string;
+  test_log?: string | null;
+  last_tested_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -871,6 +874,7 @@ export interface SkillPackagePreview {
   fileCount: number;
   totalSize: number;
   instructionPreview: string;
+  adaptationPlan: string[];
   files: SkillPackagePreviewFile[];
 }
 
@@ -965,7 +969,7 @@ export const skillApi = {
     return api.get<SkillRun[]>(`/api/skills/runs${params}`);
   },
 
-  uploadPackage: (data: { filename: string; dataBase64: string }) =>
+  uploadPackage: (data: { filename: string; dataBase64: string; category?: string }) =>
     api.post<Skill>('/api/skills/upload-package', data),
 
   previewPackage: (data: { filename: string; dataBase64: string }) =>
@@ -994,6 +998,8 @@ export const skillApi = {
   toggle: (id: number) => api.post(`/api/skills/${id}/toggle`),
 
   reinstall: (id: number) => api.post(`/api/skills/${id}/reinstall`),
+
+  test: (id: number) => api.post(`/api/skills/${id}/test`),
 
   run: (id: number, data: { projectId?: string; phase?: string; input?: Record<string, any> }) =>
     api.post<SkillRun>(`/api/skills/${id}/run`, data, { timeoutMs: 150000 })

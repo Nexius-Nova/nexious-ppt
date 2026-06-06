@@ -4,11 +4,11 @@ import { useRoute } from 'vue-router';
 import {
   Eye,
   FileText,
+  FileUp,
   Layers,
   ListTree,
   Palette,
   Pencil,
-  Plus,
   Search,
   Trash2,
   X,
@@ -20,10 +20,12 @@ import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
+import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { templateApi, type Template } from '@/services/api';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
-import type { TemplateAssetSettings } from '@/types/agent';
+import { buildTemplatePayloadFromProject } from '@/utils/templateFromProject';
+import type { AgentParameters, PptProjectState, SlideOutline, TemplateAssetSettings } from '@/types/agent';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
@@ -50,6 +52,18 @@ type EditorForm = {
 };
 
 type EditorSectionId = 'basic' | 'style' | 'layout' | 'outline' | 'rules';
+type ImportedPptSlide = {
+  pageNumber: number;
+  title: string;
+  bullets: string[];
+  description: string;
+  layout: string;
+};
+type ImportedPptParseResult = {
+  slideCount: number;
+  slides: ImportedPptSlide[];
+  allText: string;
+};
 
 const toastStore = useToastStore();
 const agentStore = useAgentStore();
@@ -69,6 +83,16 @@ const showDeleteModal = ref(false);
 const zoomPreviewSlide = ref<NonNullable<TemplateAssetSettings['previewSlides']>[number] | null>(null);
 const activeEditorSection = ref<EditorSectionId>('basic');
 const focusedTemplateId = ref<string | null>(null);
+const importFileInput = ref<HTMLInputElement | null>(null);
+const importingPpt = ref(false);
+const importDraft = ref<{
+  name: string;
+  category: string;
+  description: string;
+  slide_count: number;
+  accent: string;
+  settings: TemplateAssetSettings;
+} | null>(null);
 
 const editorForm = ref<EditorForm>(createEmptyForm());
 
@@ -392,11 +416,326 @@ function focusTemplateFromRoute() {
   toastStore.info('已打开模板详情', template.name);
 }
 
-function openCreateModal() {
-  editingTemplate.value = null;
-  editorForm.value = createEmptyForm();
-  activeEditorSection.value = 'basic';
-  showEditor.value = true;
+function triggerPptImport() {
+  if (importingPpt.value) return;
+  importFileInput.value?.click();
+}
+
+function decodeXmlText(value: string) {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+function escapeSvgText(value: unknown) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function clampText(value: unknown, maxLength: number) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function inferImportedSlideLayout(index: number, total: number, texts: string[]) {
+  if (index === 0) return 'cover';
+  if (index === total - 1 && total > 1) return 'ending';
+  if (texts.some((text) => /[%％]|同比|环比|增长|下降|数据|指标|表格|图表|趋势|矩阵/.test(text))) return 'content-chart';
+  if (texts.length >= 5) return 'content-image';
+  return 'content';
+}
+
+function buildImportedSlideSvg(slide: ImportedPptSlide, accent = '#334155') {
+  const title = escapeSvgText(clampText(slide.title, 34));
+  const bullets = slide.bullets.length
+    ? slide.bullets.slice(0, 4)
+    : [slide.description].filter(Boolean).slice(0, 1);
+  const bulletRows = bullets.map((bullet, index) => {
+    const y = 220 + index * 54;
+    return `
+      <circle cx="110" cy="${y - 6}" r="5" fill="${accent}" opacity="0.72" />
+      <text x="130" y="${y}" font-size="25" fill="#334155">${escapeSvgText(clampText(bullet, 34))}</text>
+    `;
+  }).join('');
+  const label = escapeSvgText(formatLayoutLabel(slide.layout));
+  const pageNumber = String(slide.pageNumber).padStart(2, '0');
+  const visualBlock = slide.layout === 'content-chart'
+    ? `
+      <rect x="724" y="250" width="60" height="150" rx="8" fill="${accent}" opacity="0.72" />
+      <rect x="808" y="198" width="60" height="202" rx="8" fill="#C9A227" opacity="0.82" />
+      <rect x="892" y="296" width="60" height="104" rx="8" fill="#172026" opacity="0.72" />
+      <path d="M724 438H980" stroke="#CBD5E1" stroke-width="3" />
+    `
+    : `
+      <rect x="720" y="212" width="270" height="192" rx="18" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="2" />
+      <path d="M750 360L810 302L858 342L910 282L960 360Z" fill="${accent}" opacity="0.24" />
+      <circle cx="792" cy="268" r="24" fill="#C9A227" opacity="0.82" />
+    `;
+
+  return `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 630" role="img" aria-label="${title}">
+  <rect width="1120" height="630" fill="#FFFFFF" />
+  <rect x="34" y="34" width="1052" height="562" rx="24" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="2" />
+  <rect x="68" y="68" width="132" height="8" rx="4" fill="${accent}" />
+  <text x="68" y="124" font-size="24" font-weight="700" fill="${accent}">${pageNumber}</text>
+  <text x="68" y="184" font-size="46" font-weight="800" fill="#172026">${title}</text>
+  <text x="68" y="546" font-size="18" font-weight="700" fill="#64748B">${label}</text>
+  ${slide.layout === 'cover' || slide.layout === 'ending'
+    ? `<text x="68" y="278" font-size="28" fill="#475569">${escapeSvgText(clampText(slide.description, 38))}</text>
+       <rect x="68" y="420" width="420" height="10" rx="5" fill="${accent}" opacity="0.16" />
+       <rect x="68" y="450" width="310" height="10" rx="5" fill="#CBD5E1" />`
+    : `${bulletRows}${visualBlock}`}
+</svg>`.trim();
+}
+
+function createFallbackImportedSlides(slideCount: number, baseName: string): ImportedPptSlide[] {
+  const count = Math.max(3, Math.min(slideCount || 3, 6));
+  return Array.from({ length: count }, (_, index) => {
+    const pageNumber = index + 1;
+    const layout = index === 0 ? 'cover' : index === count - 1 ? 'ending' : 'content';
+    const title = index === 0 ? baseName : index === count - 1 ? '总结页' : `内容页 ${pageNumber}`;
+    return {
+      pageNumber,
+      title,
+      bullets: ['参考原 PPT 的页面节奏', '保留版式结构用于生成新内容'],
+      description: '从导入 PPT 生成的模板参考页',
+      layout,
+    };
+  });
+}
+
+function buildImportedProjectState(baseName: string, fileName: string, parsed: ImportedPptParseResult): PptProjectState {
+  const slides = parsed.slides.length ? parsed.slides : createFallbackImportedSlides(parsed.slideCount, baseName);
+  const parameters: AgentParameters = {
+    summaryLength: 'auto',
+    slideCount: parsed.slideCount || slides.length,
+    tone: 'auto',
+    imageStyle: 'auto',
+    template: 'auto',
+    skillIntensity: 0,
+  };
+  const outline: SlideOutline[] = slides.map((slide) => ({
+    id: `imported-slide-${slide.pageNumber}`,
+    title: slide.title,
+    bullets: slide.bullets,
+    speakerNotes: slide.description,
+    visualPrompt: '参考导入 PPT 的页面布局与视觉层级，不复用原业务文案。',
+    chartHint: slide.layout === 'content-chart' ? 'content-chart' : undefined,
+    layout: 'text-only',
+  }));
+  const specOutline = slides.map((slide) => ({
+    id: `imported-slide-${slide.pageNumber}`,
+    pageNumber: slide.pageNumber,
+    title: slide.title,
+    bullets: slide.bullets,
+    speakerNotes: slide.description,
+    visualPrompt: '参考导入 PPT 的页面布局与视觉层级，不复用原业务文案。',
+    layout: slide.layout,
+    rhythm: slide.layout === 'cover' || slide.layout === 'ending' ? 'anchor' as const : 'dense' as const,
+    chartHint: slide.layout === 'content-chart' ? 'content-chart' : undefined,
+  }));
+  const colors = {
+    primary: '#172026',
+    secondary: '#334155',
+    accent: '#C9A227',
+    background: '#FFFFFF',
+    surface: '#F8FAFC',
+    text: '#172026',
+    muted: '#64748B',
+    border: '#E2E8F0',
+  };
+  const typography = {
+    fontFamily: 'Microsoft YaHei, PingFang SC, sans-serif',
+    titleFamily: 'Microsoft YaHei, PingFang SC, sans-serif',
+    bodyFamily: 'Microsoft YaHei, PingFang SC, sans-serif',
+    emphasisFamily: 'Microsoft YaHei, PingFang SC, sans-serif',
+    codeFamily: 'Consolas, monospace',
+    bodySize: 24,
+    titleSize: 44,
+    subtitleSize: 28,
+    annotationSize: 16,
+  };
+
+  return {
+    input: { topic: baseName, content: parsed.allText || baseName, files: [fileName] },
+    uploadedFileContents: [],
+    processedInputContent: parsed.allText || '',
+    parameters,
+    selectedTemplate: null,
+    outline,
+    images: [],
+    exportArtifacts: [],
+    enabledSkillIds: [],
+    selectedPromptId: '',
+    inputProcessSteps: [],
+    activityLog: [],
+    steps: [],
+    designSpec: {
+      projectInfo: {
+        title: baseName,
+        topic: baseName,
+        audience: '通用汇报受众',
+        occasion: '导入 PPT 模板复用',
+      },
+      canvas: { format: 'ppt169', width: 1120, height: 630 },
+      visualTheme: {
+        mode: 'versatile',
+        style: '沿用导入 PPT 的整体版式节奏与表达风格',
+        colors,
+      },
+      typography,
+      iconStyle: '匹配导入 PPT 的图标与装饰风格',
+      imageUsage: '仅参考图片区域和视觉占位，不复用原始图片内容。',
+      outline: specOutline,
+      skillExtensions: [],
+    },
+    specLock: {
+      colors,
+      typography,
+      iconStyle: '匹配导入 PPT 的图标与装饰风格',
+      imageStyle: 'template-reference',
+      canvas: { format: 'ppt169', width: 1120, height: 630 },
+      pageRhythm: Object.fromEntries(specOutline.map((slide) => [String(slide.pageNumber), slide.rhythm])),
+      pageLayouts: Object.fromEntries(specOutline.map((slide) => [String(slide.pageNumber), slide.layout])),
+      pageCharts: Object.fromEntries(specOutline.filter((slide) => slide.chartHint).map((slide) => [String(slide.pageNumber), slide.chartHint!])),
+      skillExtensions: [],
+      forbidden: ['不要照搬原 PPT 的具体业务文案', '仅将导入 PPT 作为设计样式参考'],
+    },
+    svgPages: slides.map((slide) => ({
+      pageNumber: slide.pageNumber,
+      svg: buildImportedSlideSvg(slide, colors.accent),
+      speakerNotes: slide.description,
+    })),
+    paused: false,
+    resumeStage: null,
+    executorCursor: 0,
+    workflowActive: false,
+    lastActiveStep: null,
+    waitingForImageRetry: false,
+  };
+}
+
+async function parsePptxPreview(file: File): Promise<ImportedPptParseResult> {
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const slideFiles = Object.keys(zip.files)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((a, b) => Number(a.match(/slide(\d+)\.xml/i)?.[1] || 0) - Number(b.match(/slide(\d+)\.xml/i)?.[1] || 0));
+
+  const slides: ImportedPptSlide[] = [];
+  const allTexts: string[] = [];
+  for (const [index, slidePath] of slideFiles.entries()) {
+    const xml = await zip.file(slidePath)?.async('string');
+    const texts = Array.from((xml || '').matchAll(/<a:t>([\s\S]*?)<\/a:t>/g))
+      .map((match) => decodeXmlText(match[1]).trim())
+      .filter(Boolean);
+    allTexts.push(...texts);
+    const pageNumber = index + 1;
+    slides.push({
+      pageNumber,
+      title: texts[0] || `示例页 ${pageNumber}`,
+      bullets: texts.slice(1, 5),
+      description: texts.slice(1, 4).join(' / ') || '从导入 PPT 中提取的示例页',
+      layout: inferImportedSlideLayout(index, slideFiles.length, texts),
+    });
+  }
+
+  return {
+    slideCount: slideFiles.length || 10,
+    slides,
+    allText: allTexts.join('\n'),
+  };
+}
+
+async function handlePptImport(event: Event) {
+  const inputEl = event.target as HTMLInputElement;
+  const file = inputEl.files?.[0];
+  inputEl.value = '';
+  if (!file) return;
+
+  const lowerName = file.name.toLowerCase();
+  if (!lowerName.endsWith('.pptx') && !lowerName.endsWith('.ppt')) {
+    toastStore.warning('文件格式不支持', '请上传 .ppt 或 .pptx 文件');
+    return;
+  }
+
+  importingPpt.value = true;
+  try {
+    const parsed = lowerName.endsWith('.pptx')
+      ? await parsePptxPreview(file)
+      : { slideCount: 10, slides: [], allText: '' };
+    const baseName = file.name.replace(/\.(pptx?|PPTX?)$/, '').trim() || '导入 PPT 模板';
+    const importedState = buildImportedProjectState(baseName, file.name, parsed);
+    const payload = buildTemplatePayloadFromProject(
+      {
+        id: `import-${Date.now()}`,
+        title: baseName,
+        topic: baseName,
+        description: parsed.allText || `由 ${file.name} 导入生成的模板方案`,
+        content: parsed.allText,
+        state: importedState,
+      },
+      {
+        name: baseName,
+        category: '导入模板',
+        isPublic: false,
+      }
+    );
+    importDraft.value = {
+      name: payload.name,
+      category: '导入模板',
+      description: `由 ${file.name} 生成的模板草稿，确认后可在 PPT 输入页作为参考模板使用。`,
+      slide_count: payload.slide_count,
+      accent: payload.accent,
+      settings: {
+        ...payload.settings,
+        sourceProjectTitle: file.name,
+        constraints: {
+          ...payload.settings.constraints,
+          suitableFor: ['导入 PPT 同类场景', baseName, ...(payload.settings.constraints?.suitableFor || [])],
+          avoid: ['不要照搬原 PPT 文案', '仅参考版式和视觉风格'],
+        },
+      },
+    };
+  } catch (error) {
+    toastStore.error('导入失败', error instanceof Error ? error.message : '无法读取 PPT 模板');
+  } finally {
+    importingPpt.value = false;
+  }
+}
+
+async function confirmImportTemplate() {
+  if (!importDraft.value) return;
+  saving.value = true;
+  try {
+    const response = await templateApi.create({
+      name: importDraft.value.name,
+      category: importDraft.value.category,
+      description: importDraft.value.description,
+      slide_count: importDraft.value.slide_count,
+      accent: importDraft.value.accent,
+      settings: importDraft.value.settings,
+      is_public: false,
+    });
+    if (response.success) {
+      toastStore.success('模板已添加', importDraft.value.name);
+      importDraft.value = null;
+      await fetchTemplates();
+      await agentStore.fetchTemplates();
+    } else {
+      toastStore.error(response.message || '添加模板失败');
+    }
+  } catch (error: any) {
+    toastStore.error('添加模板失败', error.message || '未知错误');
+  } finally {
+    saving.value = false;
+  }
 }
 
 function openEditModal(template: Template) {
@@ -550,10 +889,17 @@ onMounted(fetchTemplates);
         <h2>模板广场</h2>
         <p>管理可复用的主题风格、排版布局、大纲结构和示例预览。模板会在具体 PPT 的输入页中选择使用。</p>
       </div>
-      <UiButton variant="primary" @click="openCreateModal">
-        <Plus :size="15" />
-        新建方案
+      <UiButton variant="primary" :loading="importingPpt" @click="triggerPptImport">
+        <FileUp :size="15" />
+        导入 PPT 生成模板
       </UiButton>
+      <input
+        ref="importFileInput"
+        class="hidden-input"
+        type="file"
+        accept=".ppt,.pptx"
+        @change="handlePptImport"
+      />
     </header>
 
     <section class="toolbar">
@@ -571,12 +917,12 @@ onMounted(fetchTemplates);
       </div>
     </section>
 
-    <div v-if="loading && templates.length === 0" class="loading-state">正在加载模板方案...</div>
+    <PageLoadingState v-if="loading && templates.length === 0" title="正在加载模板方案" description="正在同步模板预览和排版规则" />
     <UiEmpty
       v-else-if="filteredTemplates.length === 0"
       class="empty-state"
       :title="searchQuery ? '没有匹配的模板方案' : '暂无模板方案'"
-      :description="searchQuery ? '换个关键词或清空分类后再试。' : '新建一个方案，保存你的 PPT 主题、布局、大纲结构和示例预览。'"
+      :description="searchQuery ? '换个关键词或清空分类后再试。' : '导入一个已有 PPT，确认预览后生成可复用模板。'"
     />
 
     <section v-else class="template-grid">
@@ -800,12 +1146,74 @@ onMounted(fetchTemplates);
         @confirm="confirmDeleteTemplate"
       />
 
+      <div v-if="importDraft" class="modal-overlay" @click.self="importDraft = null">
+        <div class="modal modal--preview">
+          <header class="modal-header">
+            <div>
+              <p class="modal-kicker">导入预览</p>
+              <h3>{{ importDraft.name }}</h3>
+            </div>
+            <button class="modal-close" :disabled="saving" @click="importDraft = null">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <div class="modal-body">
+            <div class="detail-hero" :style="{ '--accent': importDraft.accent }">
+              <div>
+                <UiBadge tone="neutral" size="sm">{{ importDraft.category }}</UiBadge>
+                <p>{{ importDraft.description }}</p>
+              </div>
+              <strong>{{ importDraft.slide_count }} 页参考</strong>
+            </div>
+
+            <section class="detail-block detail-block--preview">
+              <h4><FileText :size="15" /> 示例 PPT 预览</h4>
+              <div class="ppt-preview-grid" :style="{ '--accent': importDraft.accent }">
+                <div
+                  v-for="(slide, index) in importDraft.settings.previewSlides"
+                  :key="`${slide.title}-${index}`"
+                  class="ppt-preview-slide"
+                  :class="[`ppt-preview-slide--${slide.layout}`, { 'ppt-preview-slide--svg': slide.svg }]"
+                >
+                  <button class="ppt-preview-slide__stage" type="button" @click="openZoomPreview(slide)">
+                    <div
+                      v-if="slide.svg"
+                      class="ppt-preview-slide__svg"
+                      role="img"
+                      :aria-label="slide.title"
+                      v-html="normalizePreviewSvg(slide.svg)"
+                    />
+                    <template v-else>
+                      <span class="ppt-preview-slide__number">{{ slide.pageNumber || index + 1 }}</span>
+                      <strong>{{ slide.title }}</strong>
+                      <div class="ppt-preview-slide__body">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                      </div>
+                      <p v-if="slide.description">{{ slide.description }}</p>
+                    </template>
+                  </button>
+                  <div class="ppt-preview-slide__meta">{{ formatLayoutLabel(slide.layout) }}</div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <footer class="modal-footer">
+            <UiButton variant="secondary" :disabled="saving" @click="importDraft = null">取消</UiButton>
+            <UiButton variant="primary" :loading="saving" @click="confirmImportTemplate">确认添加模板</UiButton>
+          </footer>
+        </div>
+      </div>
+
       <div v-if="showEditor" class="modal-overlay" @click.self="showEditor = false">
         <div class="modal modal--editor">
           <header class="modal-header">
             <div>
-              <p class="modal-kicker">{{ editingTemplate ? '编辑方案' : '新建方案' }}</p>
-              <h3>{{ editingTemplate ? editorForm.name : '模板方案' }}</h3>
+              <p class="modal-kicker">编辑方案</p>
+              <h3>{{ editorForm.name }}</h3>
             </div>
             <button class="modal-close" @click="showEditor = false">
               <X :size="18" />
@@ -999,7 +1407,7 @@ onMounted(fetchTemplates);
           <footer class="modal-footer">
             <UiButton variant="secondary" @click="showEditor = false">取消</UiButton>
             <UiButton variant="primary" :loading="saving" :disabled="!editorForm.name.trim() || isTemplateNameDuplicated" @click="saveTemplate">
-              {{ editingTemplate ? '保存方案' : '创建方案' }}
+              保存方案
             </UiButton>
           </footer>
         </div>
@@ -1024,6 +1432,10 @@ onMounted(fetchTemplates);
   gap: 18px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--color-border);
+}
+
+.hidden-input {
+  display: none;
 }
 
 .page-kicker,

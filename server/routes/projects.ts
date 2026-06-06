@@ -7,8 +7,10 @@ import {
   createProject,
   updateProject,
   deleteProject,
+  cleanupProjectRelations,
   getProjectStats
 } from '../models/project.js';
+import { cancelQueuedJobsByProject } from '../services/generationQueue.js';
 
 const router = Router();
 
@@ -31,28 +33,6 @@ function duplicateProjectNameResponse(res: Response, title: unknown) {
     code: 'PROJECT_NAME_DUPLICATED',
     message: `项目名称「${projectTitle}」已存在，请换一个名称`
   });
-}
-
-function isSameProjectIdentity(
-  left: { title: unknown; topic: unknown },
-  right: { title: unknown; topic: unknown }
-): boolean {
-  const leftTitle = normalizeProjectText(left.title);
-  const rightTitle = normalizeProjectText(right.title);
-  if (!leftTitle || leftTitle !== rightTitle) return false;
-
-  const leftTopic = normalizeProjectText(left.topic);
-  const rightTopic = normalizeProjectText(right.topic);
-  return leftTopic === rightTopic || !leftTopic || !rightTopic;
-}
-
-async function findReusableProjectId(userId: number, title: unknown, topic: unknown): Promise<number | null> {
-  if (!normalizeProjectText(title)) return null;
-
-  const projects = await getProjectsByUserId(userId);
-  const match = projects.find((project) => isSameProjectIdentity(project, { title, topic }));
-
-  return match?.id || null;
 }
 
 async function findDuplicateProjectId(userId: number, title: unknown, excludeId?: number): Promise<number | null> {
@@ -245,34 +225,9 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const existingProject = await getProjectById(projectId);
     if (!existingProject || existingProject.user_id !== req.userId) {
-      const { title, topic, content, status, state } = req.body;
-      const compactState = state !== undefined ? compactProjectState(state) : undefined;
-      const syncedContent = getProjectContentFromState(compactState) ?? content;
-      const fallbackTitle = title || state?.input?.topic || topic || '未命名 PPT';
-      const fallbackTopic = topic || state?.input?.topic || '';
-      const reusableProjectId = await findReusableProjectId(req.userId, fallbackTitle, fallbackTopic);
-
-      if (reusableProjectId) {
-        return res.json({
-          success: true,
-          data: { id: reusableProjectId, replacedMissingId: projectId, reused: true },
-          message: '原项目不存在，已复用已有项目'
-        });
-      }
-
-      const newProjectId = await createProject({
-        user_id: req.userId,
-        title: fallbackTitle,
-        topic: fallbackTopic,
-        content: syncedContent || '',
-        status: status || 'draft',
-        state: compactState
-      });
-
-      return res.status(201).json({
-        success: true,
-        data: { id: newProjectId, replacedMissingId: projectId },
-        message: '原项目不存在，已创建新项目'
+      return res.status(404).json({
+        success: false,
+        message: '项目不存在或已删除'
       });
     }
 
@@ -352,6 +307,7 @@ router.delete('/:id', authMiddleware, async (req: AuthRequest, res: Response) =>
       });
     }
 
+    await cancelQueuedJobsByProject(req.userId, String(projectId));
     const success = await deleteProject(projectId);
     if (!success) {
       return res.status(400).json({
@@ -359,6 +315,8 @@ router.delete('/:id', authMiddleware, async (req: AuthRequest, res: Response) =>
         message: '删除失败'
       });
     }
+
+    await cleanupProjectRelations(req.userId, projectId);
 
     res.json({
       success: true,

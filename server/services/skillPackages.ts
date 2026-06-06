@@ -6,6 +6,7 @@ import { query } from '../db/connection.js';
 
 export type SkillRuntime = 'prompt-only' | 'python' | 'node';
 export type SkillInstallStatus = 'not_required' | 'pending' | 'installing' | 'ready' | 'failed';
+export type SkillTestStatus = 'not_tested' | 'testing' | 'passed' | 'failed' | 'skipped';
 
 interface SkillManifest {
   name?: string;
@@ -36,6 +37,16 @@ interface PackageAnalysis {
   files: Array<{ relativePath: string; data: Buffer }>;
 }
 
+interface CommandSkillAdapter {
+  runtime: SkillRuntime;
+  entry: string;
+  dependencyFile: string | null;
+  title: string;
+  description: string;
+  plan: string[];
+  script: string;
+}
+
 export interface SkillPackagePreviewFile {
   path: string;
   size: number;
@@ -56,6 +67,7 @@ export interface SkillPackagePreview {
   fileCount: number;
   totalSize: number;
   instructionPreview: string;
+  adaptationPlan: string[];
   files: SkillPackagePreviewFile[];
 }
 
@@ -63,7 +75,13 @@ const MAX_PACKAGE_BYTES = 20 * 1024 * 1024;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
 const RUN_TIMEOUT_MS = 2 * 60 * 1000;
+const HEALTH_TEST_PROJECT_ID = '__skill_health_check__';
 const storageRoot = path.join(process.cwd(), '.generated', 'skills');
+
+function isPathInside(childPath: string, parentPath: string) {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
 
 function stripDataUrl(value: string) {
   const commaIndex = value.indexOf(',');
@@ -195,6 +213,10 @@ function inferPythonDependencies(files: Map<string, Buffer>) {
     }
   }
 
+  if (dependencies.has('duckduckgo-search')) {
+    dependencies.add('ddgs');
+  }
+
   return Array.from(dependencies).sort((a, b) => a.localeCompare(b));
 }
 
@@ -322,6 +344,7 @@ function packageAnalysisToPreview(analysis: PackageAnalysis): SkillPackagePrevie
     fileCount: analysis.files.length,
     totalSize: analysis.files.reduce((sum, file) => sum + file.data.byteLength, 0),
     instructionPreview: instruction.length > 360 ? `${instruction.slice(0, 360)}...` : instruction,
+    adaptationPlan: detectPackageAdaptationPlan(analysis),
     files: analysis.files
       .map((file) => ({
         path: file.relativePath,
@@ -352,17 +375,227 @@ async function writePackageFiles(baseDir: string, files: PackageAnalysis['files'
   }
 }
 
+function detectSkillCommandAdapter(instruction: string): CommandSkillAdapter | null {
+  const lower = instruction.toLowerCase();
+  if (/\buvx\s+markitdown\b/.test(lower) || /\bmarkitdown\b/.test(lower)) {
+    return {
+      runtime: 'python' as SkillRuntime,
+      entry: 'scripts/markitdown_adapter.py',
+      dependencyFile: null,
+      title: 'MarkItDown 文件解析适配器',
+      description: '将上传文件转换为 Markdown，供 PPT 输入阶段继续处理。',
+      plan: [
+        '识别到 SKILL.md 中的 markitdown/uvx markitdown 命令',
+        '自动创建 Python 执行入口，读取输入阶段上传文件',
+        '执行 uvx markitdown 并把转换结果合并为 Markdown 输出',
+      ],
+      script: `#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+
+def read_payload():
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def collect_files(payload):
+    input_data = payload.get("input", {}) if isinstance(payload, dict) else {}
+    package_dir = os.path.abspath(os.environ.get("SKILL_PACKAGE_DIR") or os.getcwd())
+    paths = []
+    env_files = os.environ.get("SKILL_INPUT_FILES", "")
+    if env_files:
+        paths.extend([item for item in env_files.split(os.pathsep) if item])
+    paths.extend(input_data.get("filePaths") or [])
+    safe_paths = []
+    for raw_path in paths:
+        absolute_path = os.path.abspath(raw_path)
+        if not absolute_path.startswith(package_dir + os.sep):
+            raise RuntimeError(f"禁止读取 Skill 包外文件：{raw_path}")
+        if os.path.isfile(absolute_path):
+            safe_paths.append(absolute_path)
+    seen = set()
+    return [path for path in safe_paths if path and not (path in seen or seen.add(path))]
+
+
+def convert(path):
+    result = subprocess.run(
+        ["uvx", "markitdown", path],
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        timeout=240,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or f"markitdown failed: {path}")
+    return result.stdout.strip()
+
+
+def main():
+    files = collect_files(read_payload())
+    if not files:
+        raise RuntimeError("未收到可转换的上传文件。")
+    parts = []
+    for path in files:
+        name = os.path.basename(path)
+        markdown = convert(path)
+        parts.append(f"# 文件：{name}\\n\\n{markdown}")
+    print("\\n\\n---\\n\\n".join(parts))
+
+
+if __name__ == "__main__":
+    main()
+`,
+    };
+  }
+  return null;
+}
+
+function buildSkillMdWorkflowNote(adapter: CommandSkillAdapter) {
+  return [
+    '',
+    '## Nexious PPT 工作流适配',
+    '',
+    '> 本节由系统在导入 Skill 包时自动补充，用于让 Skill 可以在 PPT 输入阶段稳定执行；原始核心说明保留不变。',
+    '',
+    `- 适配类型：${adapter.title}`,
+    `- 执行入口：\`${adapter.entry}\``,
+    '- 输入来源：系统会把用户上传文件写入临时目录，并通过 `SKILL_INPUT_DIR`、`SKILL_INPUT_FILES` 和 stdin JSON 传给执行入口。',
+    '- 输出要求：执行入口需要将可用于生成 PPT 的文本内容输出到 stdout。',
+    '',
+  ].join('\n');
+}
+
+async function appendSkillWorkflowNote(packagePath: string, skillMdPath: string, adapter: CommandSkillAdapter) {
+  const absolutePath = path.join(packagePath, skillMdPath);
+  const source = await fs.readFile(absolutePath, 'utf8');
+  if (source.includes('## Nexious PPT 工作流适配')) return false;
+  await fs.writeFile(absolutePath, `${source.trimEnd()}\n${buildSkillMdWorkflowNote(adapter)}`, 'utf8');
+  return true;
+}
+
+function detectPackageAdaptationPlan(analysis: PackageAnalysis) {
+  const instruction = String(analysis.parameters.instruction || '');
+  const commandAdapter = !analysis.entry ? detectSkillCommandAdapter(instruction) : null;
+  const plan: string[] = [];
+
+  if (commandAdapter) {
+    plan.push(...commandAdapter.plan);
+  } else if (analysis.entry) {
+    plan.push('已识别执行入口，测试前会初始化依赖并应用兼容补丁。');
+  } else {
+    plan.push('未识别执行入口，将作为提示词型 Skill 使用。');
+  }
+
+  if (analysis.inferredDependencies.length) {
+    plan.push(`自动识别 Python 依赖：${analysis.inferredDependencies.join('、')}`);
+  }
+
+  return plan;
+}
+
+async function adaptSkillPackageForWorkflow(packagePath: string) {
+  const analysis = await analyzePackageDirectory(packagePath);
+  const logs: string[] = [];
+  const instruction = parseSkillInstruction(
+    await fs.readFile(path.join(packagePath, analysis.manifest.skillMdPath || 'SKILL.md'), 'utf8')
+  );
+  const commandAdapter = !analysis.entry ? detectSkillCommandAdapter(instruction) : null;
+
+  if (commandAdapter) {
+    const entryPath = path.join(packagePath, commandAdapter.entry);
+    await fs.mkdir(path.dirname(entryPath), { recursive: true });
+    await fs.writeFile(entryPath, commandAdapter.script, 'utf8');
+    logs.push(`自动适配：检测到命令行型 Skill，已生成执行入口 ${commandAdapter.entry}`);
+    if (await appendSkillWorkflowNote(packagePath, analysis.manifest.skillMdPath || 'SKILL.md', commandAdapter)) {
+      logs.push('自动适配：已在 SKILL.md 追加 Nexious PPT 工作流适配说明，原核心内容保持不变');
+    }
+  }
+
+  const nextAnalysis = await analyzePackageDirectory(packagePath);
+  return {
+    analysis: nextAnalysis,
+    logs,
+  };
+}
+
+async function patchSkillPackageCompatibility(packagePath: string) {
+  const patchedFiles: string[] = [];
+  const ddgsFallbackImport = `try:
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError as e:
+        print(f"Error: Missing required dependency: {e}", file=sys.stderr)
+        print("Install with: pip install ddgs", file=sys.stderr)
+        sys.exit(1)`;
+
+  async function walk(currentDir: string) {
+    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.venv' || entry.name === '__pycache__') continue;
+      const absolutePath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(absolutePath);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.py')) continue;
+
+      const source = await fs.readFile(absolutePath, 'utf8');
+      let nextSource = source;
+      if (source.includes('from duckduckgo_search import DDGS') && !source.includes('from ddgs import DDGS')) {
+        nextSource = source.replace(
+          /^try:\s*\r?\n[ \t]+from duckduckgo_search import DDGS\s*\r?\nexcept ImportError as e:\s*\r?\n[ \t]+print\(f["']Error: Missing required dependency: \{e\}["'], file=sys\.stderr\)\s*\r?\n[ \t]+print\(["']Install with: pip install duckduckgo-search["'], file=sys\.stderr\)\s*\r?\n[ \t]+sys\.exit\(1\)/m,
+          ddgsFallbackImport
+        );
+        nextSource = nextSource.replace(
+          /^from duckduckgo_search import DDGS$/m,
+          ddgsFallbackImport
+        );
+      }
+      if (nextSource.includes('from ddgs import DDGS')) {
+        nextSource = nextSource.replace(/\.text\(\s*\r?\n\s*keywords=/g, '.text(\n                    query=');
+        nextSource = nextSource.replace(/\.news\(\s*\r?\n\s*keywords=/g, '.news(\n                    query=');
+        nextSource = nextSource.replace(/\.images\(\s*\r?\n\s*keywords=/g, '.images(\n                    query=');
+        nextSource = nextSource.replace(/\.videos\(\s*\r?\n\s*keywords=/g, '.videos(\n                    query=');
+      }
+
+      if (nextSource !== source) {
+        await fs.writeFile(absolutePath, nextSource, 'utf8');
+        patchedFiles.push(path.relative(packagePath, absolutePath));
+      }
+    }
+  }
+
+  await walk(packagePath);
+  return patchedFiles;
+}
+
 function runProcess(
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; input?: string }
+  options: { cwd: string; timeoutMs: number; input?: string; env?: Record<string, string> }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       shell: false,
       windowsHide: true,
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+        LC_ALL: process.env.LC_ALL || 'C.UTF-8',
+        ...(options.env || {}),
+      },
     });
     let stdout = '';
     let stderr = '';
@@ -495,6 +728,48 @@ async function updateSkillInstallStatus(skillId: number, status: SkillInstallSta
   );
 }
 
+async function updateSkillTestStatus(skillId: number, status: SkillTestStatus, log: string) {
+  await query(
+    `UPDATE skills
+     SET test_status = ?, test_log = ?, last_tested_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [status, log.slice(-12000), skillId]
+  );
+}
+
+function buildSkillHealthInput(skill: any) {
+  const categoryText = String(skill?.category || '').toLowerCase();
+  const nameText = String(skill?.name || '').toLowerCase();
+  const isSearch = /search|web|collect|资料收集|搜索|联网/.test(`${categoryText} ${nameText}`);
+  const isFileParse = /file|parse|文件|解析/.test(`${categoryText} ${nameText}`);
+
+  if (isSearch) {
+    return {
+      purpose: '资料收集',
+      query: '手机发展历程',
+      topic: '手机发展历程',
+      content: '请联网搜索手机发展历程，并返回可用于 PPT 的简要资料。',
+    };
+  }
+
+  if (isFileParse) {
+    const sampleFile = { name: 'sample.txt', text: '手机发展历程：从功能机到智能手机，再到 AI 终端。' };
+    return {
+      purpose: '文件解析',
+      topic: 'Skill 健康测试',
+      content: '这是一个用于测试文件解析 Skill 的短文本资料，请提取主题和关键要点。',
+      fileContents: [sampleFile],
+      files: [sampleFile],
+    };
+  }
+
+  return {
+    purpose: 'Skill 健康测试',
+    topic: '手机发展历程',
+    content: '请把“手机发展历程”整理为 3 条可用于 PPT 的资料要点。',
+  };
+}
+
 function parseJsonRecord(value: unknown): Record<string, unknown> {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -520,10 +795,14 @@ export async function initializeSkillEnvironment(skillId: number) {
   let runtime = skill.runtime as SkillRuntime;
   let dependencyFile = skill.dependency_file ? String(skill.dependency_file) : null;
   let inferredDependencies: string[] = [];
+  let adaptationLogs: string[] = [];
 
   if (packagePath) {
     try {
-      const analysis = await analyzePackageDirectory(packagePath);
+      await updateSkillInstallStatus(skillId, 'installing', '正在自动适配 Skill 包到输入阶段工作流...');
+      const adaptation = await adaptSkillPackageForWorkflow(packagePath);
+      adaptationLogs = adaptation.logs;
+      const analysis = adaptation.analysis;
       runtime = analysis.runtime;
       dependencyFile = analysis.dependencyFile;
       inferredDependencies = analysis.inferredDependencies;
@@ -534,7 +813,7 @@ export async function initializeSkillEnvironment(skillId: number) {
       };
       await query(
         `UPDATE skills
-         SET runtime = ?, entry = ?, dependency_file = ?, manifest = ?, parameters = ?
+         SET runtime = ?, entry = ?, dependency_file = ?, manifest = ?, parameters = ?, install_log = ?
          WHERE id = ?`,
         [
           analysis.runtime,
@@ -542,6 +821,11 @@ export async function initializeSkillEnvironment(skillId: number) {
           analysis.dependencyFile,
           JSON.stringify(analysis.manifest),
           JSON.stringify(nextParameters),
+          [
+            '正在自动适配 Skill 包到输入阶段工作流...',
+            ...adaptationLogs,
+            adaptationLogs.length ? '自动适配完成，准备初始化依赖。' : '未发现需要生成的新执行入口，准备初始化依赖。',
+          ].join('\n'),
           skillId,
         ]
       );
@@ -552,14 +836,35 @@ export async function initializeSkillEnvironment(skillId: number) {
   }
 
   if (runtime === 'prompt-only') {
-    await updateSkillInstallStatus(skillId, 'not_required', 'No dependency initialization is required.', true);
+    await updateSkillInstallStatus(
+      skillId,
+      'not_required',
+      [
+        ...adaptationLogs,
+        '未识别到可执行入口，将作为提示词型 Skill 使用；无需依赖初始化。',
+      ].filter(Boolean).join('\n'),
+      true
+    );
     return;
   }
 
-  await updateSkillInstallStatus(skillId, 'installing', 'Initializing runtime environment...');
+  await updateSkillInstallStatus(
+    skillId,
+    'installing',
+    [
+      ...adaptationLogs,
+      '正在初始化运行环境...',
+    ].filter(Boolean).join('\n')
+  );
 
   try {
-    let log = '';
+    let log = adaptationLogs.length ? `${adaptationLogs.join('\n')}\n` : '';
+    if (packagePath) {
+      const patchedFiles = await patchSkillPackageCompatibility(packagePath);
+      if (patchedFiles.length) {
+        log += `已应用 Skill 兼容补丁：${patchedFiles.join(', ')}\n`;
+      }
+    }
     if (runtime === 'python') {
       const pythonBin = process.env.PYTHON_BIN || 'python';
       const venvPython = pythonExecutable(packagePath);
@@ -599,33 +904,43 @@ export async function initializeSkillEnvironment(skillId: number) {
       log += result.stdout + result.stderr;
     }
 
-    await updateSkillInstallStatus(skillId, 'ready', log.trim() || 'Runtime environment is ready.', true);
+    await updateSkillInstallStatus(skillId, 'ready', log.trim() || '运行环境已就绪。', true);
   } catch (error) {
     await updateSkillInstallStatus(skillId, 'failed', error instanceof Error ? error.message : 'Runtime initialization failed.');
   }
 }
 
-export async function createSkillFromPackage(userId: number, filename: string, dataBase64: string) {
+export async function createSkillFromPackage(userId: number, filename: string, dataBase64: string, overrides: { category?: string } = {}) {
   const analysis = await analyzePackage(filename, dataBase64);
-  const initialStatus: SkillInstallStatus = analysis.runtime === 'prompt-only' ? 'not_required' : 'pending';
+  const category = String(overrides.category || analysis.category || '').trim() || analysis.category;
+  const commandAdaptable = analysis.runtime === 'prompt-only'
+    ? Boolean(detectSkillCommandAdapter(String(analysis.parameters.instruction || '')))
+    : false;
+  const initialStatus: SkillInstallStatus = analysis.runtime === 'prompt-only' && !commandAdaptable ? 'not_required' : 'pending';
+  const initialType = initialStatus === 'not_required' ? 'prompt-only' : 'package';
+  const initialLog = initialStatus === 'not_required'
+    ? '未识别到可执行入口，将作为提示词型 Skill 使用；无需依赖初始化。'
+    : 'Skill 包已保存，等待自动适配、初始化依赖并执行健康测试。';
   const result = await query<any>(
     `INSERT INTO skills
-      (user_id, name, description, icon, category, parameters, is_enabled, type, runtime, entry, manifest, dependency_file, install_status, install_log)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      (user_id, name, description, icon, category, parameters, is_enabled, type, runtime, entry, manifest, dependency_file, install_status, install_log, test_status, test_log)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       userId,
       analysis.name,
       analysis.description,
       analysis.icon,
-      analysis.category,
+      category,
       JSON.stringify(analysis.parameters),
-      analysis.runtime === 'prompt-only' ? 'prompt-only' : 'package',
+      initialType,
       analysis.runtime,
       analysis.entry,
       JSON.stringify(analysis.manifest),
       analysis.dependencyFile,
       initialStatus,
-      analysis.runtime === 'prompt-only' ? 'No dependency initialization is required.' : 'Package saved. Runtime initialization is pending.',
+      initialLog,
+      'not_tested',
+      '等待自动测试。',
     ]
   );
 
@@ -634,11 +949,16 @@ export async function createSkillFromPackage(userId: number, filename: string, d
   await writePackageFiles(packagePath, analysis.files);
   await query('UPDATE skills SET package_path = ? WHERE id = ?', [packagePath, skillId]);
 
-  void initializeSkillEnvironment(skillId).catch((error) => {
-    console.error('Skill runtime initialization failed', error);
+  void initializeAndTestSkill(userId, skillId).catch((error) => {
+    console.error('Skill runtime initialization or health test failed', error);
   });
 
   return skillId;
+}
+
+export async function initializeAndTestSkill(userId: number, skillId: number) {
+  await initializeSkillEnvironment(skillId);
+  await testSkillPackage(userId, skillId);
 }
 
 export async function runSkillPackage(
@@ -670,17 +990,24 @@ export async function runSkillPackage(
     ]
   );
   const runId = Number((runResult as any).insertId);
+  const packagePath = String(skill.package_path || '');
+  let inputFiles: { inputDir: string; savedFiles: Array<{ name: string; path: string }>; runDir: string; workDir: string } | null = null;
 
   try {
     const runtime = skill.runtime as SkillRuntime;
     const skillParameters = typeof skill.parameters === 'string' ? JSON.parse(skill.parameters || '{}') : skill.parameters || {};
+    inputFiles = await prepareSkillInputFiles(packagePath, runId, payload.input);
     const inputJson = JSON.stringify({
       skill: {
         id: String(skill.id),
         name: skill.name,
         parameters: skillParameters,
       },
-      input: payload.input || {},
+      input: {
+        ...(extractInputRecord(payload.input)),
+        fileDirectory: inputFiles.inputDir,
+        filePaths: inputFiles.savedFiles.map((file) => file.path),
+      },
     });
 
     if (runtime === 'prompt-only' || !skill.entry) {
@@ -728,18 +1055,29 @@ export async function runSkillPackage(
       throw new Error(skill.install_status === 'failed' ? 'Skill runtime initialization failed.' : 'Skill runtime is still initializing.');
     }
 
-    const packagePath = String(skill.package_path || '');
     const entry = safeRelativePath(String(skill.entry || ''));
     const entryPath = path.join(packagePath, entry);
+    if (!isPathInside(entryPath, packagePath)) {
+      throw new Error('Skill entry must be inside package directory.');
+    }
     const command = runtime === 'python' ? pythonExecutable(packagePath) : 'node';
     const args = runtime === 'python'
       ? [entryPath, ...buildPythonSkillArgs(payload.input)]
       : [entryPath];
     const readableArgs = args.slice(1).map((item) => item.includes(' ') ? `"${item}"` : item).join(' ');
     const result = await runProcess(command, args, {
-      cwd: packagePath,
+      cwd: inputFiles.workDir || packagePath,
       timeoutMs: RUN_TIMEOUT_MS,
       input: inputJson,
+      env: {
+        SKILL_PACKAGE_DIR: packagePath,
+        SKILL_RUN_DIR: inputFiles.runDir,
+        SKILL_WORK_DIR: inputFiles.workDir,
+        SKILL_INPUT_DIR: inputFiles.inputDir,
+        SKILL_INPUT_FILES: inputFiles.savedFiles.map((file) => file.path).join(path.delimiter),
+        SKILL_PROJECT_ID: payload.projectId || '',
+        SKILL_RUN_ID: String(runId),
+      },
     });
     const outputText = result.stdout.trim();
     const stderrText = result.stderr.trim();
@@ -802,9 +1140,55 @@ export async function runSkillPackage(
        WHERE id = ?`,
       [message, message, runId]
     );
+  } finally {
+    if (inputFiles?.runDir) {
+      await cleanupSkillRunDirectory(packagePath, inputFiles.runDir);
+    }
   }
 
   return runId;
+}
+
+export async function testSkillPackage(userId: number, skillId: number) {
+  const rows = await query<any>('SELECT * FROM skills WHERE id = ? AND user_id = ?', [skillId, userId]);
+  const skill = rows[0];
+  if (!skill) throw new Error('Skill not found.');
+
+  if (skill.runtime !== 'prompt-only') {
+    await updateSkillTestStatus(skillId, 'testing', '正在等待依赖初始化完成。');
+    await initializeSkillEnvironment(skillId);
+  }
+
+  const nextRows = await query<any>('SELECT * FROM skills WHERE id = ? AND user_id = ?', [skillId, userId]);
+  const currentSkill = nextRows[0] || skill;
+  if (currentSkill.install_status === 'failed') {
+    const log = String(currentSkill.install_log || 'Skill 依赖初始化失败。');
+    await updateSkillTestStatus(skillId, 'failed', log);
+    return { ok: false, runId: null, log };
+  }
+
+  const runHealthCheck = () => runSkillPackage(userId, skillId, {
+    projectId: HEALTH_TEST_PROJECT_ID,
+    phase: 'health-check',
+    input: buildSkillHealthInput(currentSkill),
+  });
+
+  await updateSkillTestStatus(skillId, 'testing', '正在使用示例输入测试 Skill 是否可用。');
+  let runId = await runHealthCheck();
+
+  let runs = await query<any>('SELECT * FROM skill_runs WHERE id = ? AND user_id = ?', [runId, userId]);
+  let run = runs[0];
+  let failed = run?.status === 'failed';
+  const output = run?.output ? (typeof run.output === 'string' ? run.output : JSON.stringify(run.output)) : '';
+  const log = [
+    failed ? `测试失败：${run?.error_message || 'Skill 未通过健康测试。'}` : '测试通过：Skill 可以使用示例输入正常返回内容。',
+    failed ? '测试阶段不会修改 Skill 包文件；请根据日志调整包后重新初始化。' : '',
+    run?.logs,
+    output ? `输出摘要：${compactRunText(output, 500)}` : '',
+  ].filter(Boolean).join('\n');
+
+  await updateSkillTestStatus(skillId, failed ? 'failed' : 'passed', log);
+  return { ok: !failed, runId, log };
 }
 
 function extractInputRecord(input: unknown): Record<string, any> {
@@ -829,6 +1213,44 @@ function buildPythonSkillArgs(input: unknown) {
     return [query, '--max-results', '5', '--format', 'markdown'];
   }
   return [];
+}
+
+async function prepareSkillInputFiles(packagePath: string, runId: number, input: unknown) {
+  if (!packagePath) return { inputDir: '', savedFiles: [], runDir: '', workDir: '' };
+  const record = extractInputRecord(input);
+  const files = Array.isArray(record.fileContents)
+    ? record.fileContents
+    : Array.isArray(record.files)
+      ? record.files
+      : [];
+  const runDir = path.join(packagePath, '.runs', String(runId));
+  const inputDir = path.join(runDir, 'files');
+  const workDir = path.join(runDir, 'work');
+  const savedFiles: Array<{ name: string; path: string }> = [];
+
+  await fs.mkdir(inputDir, { recursive: true });
+  await fs.mkdir(workDir, { recursive: true });
+
+  for (const [index, file] of files.entries()) {
+    const name = safeRelativePath(String(file?.name || `file-${index + 1}.txt`)).split('/').pop() || `file-${index + 1}.txt`;
+    const target = path.join(inputDir, name);
+    if (typeof file?.dataBase64 === 'string' && file.dataBase64.trim()) {
+      const raw = file.dataBase64.includes(',') ? file.dataBase64.split(',').pop() || '' : file.dataBase64;
+      await fs.writeFile(target, Buffer.from(raw, 'base64'));
+    } else {
+      const text = String(file?.text ?? file?.content ?? file?.markdown ?? '');
+      await fs.writeFile(target, text, 'utf8');
+    }
+    savedFiles.push({ name, path: target });
+  }
+
+  return { inputDir, savedFiles, runDir, workDir };
+}
+
+async function cleanupSkillRunDirectory(packagePath: string, runDir: string) {
+  if (!packagePath || !runDir) return;
+  if (!isPathInside(runDir, packagePath)) return;
+  await fs.rm(runDir, { recursive: true, force: true });
 }
 
 export async function removeSkillPackage(userId: number, skillId: number) {

@@ -45,6 +45,7 @@ import GlobalSearch from '@/components/common/GlobalSearch.vue';
 import ShortcutsHelp from '@/components/common/ShortcutsHelp.vue';
 import AiChatPanel from '@/components/panels/AiChatPanel.vue';
 import VersionHistory from '@/components/common/VersionHistory.vue';
+import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useShortcuts } from '@/composables/useShortcuts';
 import { slideNeedsImage } from '@/utils/slideVisuals';
@@ -218,6 +219,13 @@ const outlineBulletCount = computed(() => outline.value.reduce((sum, slide) => s
 const outlineStepStatus = computed(() => workflowDisplaySteps.value.find((step) => step.id === 'outline')?.status || 'idle');
 const pausedStageId = computed<WorkflowStepId | null>(() => {
   if (!isPaused.value) return null;
+  if (isWorkflowTab(activeStep.value) && stepState(activeStep.value)?.status === 'running') {
+    return activeStep.value;
+  }
+  const runningStage = [...workflowTabs]
+    .reverse()
+    .find((id) => stepState(id)?.status === 'running');
+  if (runningStage) return runningStage;
   const stage = resumeStage.value || activeStep.value;
   return isWorkflowTab(stage) ? stage : null;
 });
@@ -229,8 +237,20 @@ const outlineStatusText = computed(() => {
   if (outline.value.length > 0 || designSpec.value) return '已生成';
   return '待生成';
 });
+const canRunCurrentStage = computed(() => {
+  if (isRunning.value) return false;
+  if (!isWorkflowTab(activeStep.value)) return false;
+  if (activeStep.value === 'input') return true;
+  return canOpenWorkflowStep(activeStep.value);
+});
 const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
   steps.value.map((step) => {
+    if (isPaused.value && step.status === 'running') {
+      return {
+        ...step,
+        status: 'idle'
+      };
+    }
     if (step.id !== 'input' || !hasInputContent()) return step;
     return {
       ...step,
@@ -493,9 +513,12 @@ function returnToMyPpt() {
 
 async function runFromCurrentStep() {
   try {
+    if (isPaused.value) {
+      store.clearPauseState();
+    }
     switch (activeStep.value) {
       case 'input':
-        await store.runInputStage();
+        await store.runInputStage({ advance: false });
         break;
       case 'outline':
         await store.runOutline();
@@ -603,8 +626,7 @@ async function retryImage(slideId: string) {
 
     <main class="workspace-main">
       <div v-if="!routeReady" class="workspace-route-loading">
-        <Loader2 class="spin" :size="18" />
-        <span>正在打开页面...</span>
+        <PageLoadingState compact title="正在打开页面" description="正在准备工作区和项目上下文" />
       </div>
 
       <template v-else-if="isPageView">
@@ -643,7 +665,7 @@ async function retryImage(slideId: string) {
               <Play :size="14" />
               继续
             </UiButton>
-            <UiButton variant="secondary" :disabled="isRunning || isPaused" @click="runFromCurrentStep">
+            <UiButton variant="secondary" :disabled="!canRunCurrentStage" @click="runFromCurrentStep">
               <Play :size="14" />
               运行当前阶段
             </UiButton>
@@ -688,7 +710,7 @@ async function retryImage(slideId: string) {
                       <span>{{ stage.action }}</span>
                     </span>
                   </span>
-                  <span v-if="stage.status === 'running'" class="pipeline-stage__bar">
+                  <span v-if="stage.status === 'running' && !stage.paused" class="pipeline-stage__bar">
                     <span :style="{ width: `${stage.progress}%` }" />
                   </span>
                 </button>
@@ -696,10 +718,7 @@ async function retryImage(slideId: string) {
 
               <section class="workspace-panel">
                 <div v-show="activeStep === 'input'" class="stage-panel">
-                  <div v-if="!isDataLoaded" class="loading-placeholder">
-                    <Loader2 :size="18" class="spin" />
-                    正在加载项目数据...
-                  </div>
+                  <PageLoadingState v-if="!isDataLoaded" compact title="正在加载项目数据" description="正在恢复当前 PPT 工作流状态" />
                   <InputComposer
                     v-else
                     v-model="input"
@@ -717,6 +736,7 @@ async function retryImage(slideId: string) {
                     @select-template="selectInputTemplate"
                     @clear-template="store.clearGalleryTemplate()"
                     @attach="store.attachFiles"
+                    @remove-file="store.removeAttachedFile"
                     @run="store.runFullWorkflow()"
                   />
                 </div>
@@ -1056,13 +1076,10 @@ async function retryImage(slideId: string) {
 }
 
 .workspace-route-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
+  display: grid;
+  place-items: center;
   min-height: 100%;
-  color: var(--color-subtle);
-  font-size: 14px;
+  padding: 24px;
 }
 
 .workspace-step-header {

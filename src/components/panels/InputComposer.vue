@@ -32,6 +32,7 @@ const emit = defineEmits<{
   'select-prompt': [promptId: string];
   'toggle-skill': [skillId: string];
   attach: [files: FileList | null];
+  'remove-file': [fileName: string];
   run: [];
 }>();
 
@@ -217,7 +218,8 @@ function resultPreview(value?: string, maxLength = 420) {
 }
 
 function canUseSkill(skill: SkillDefinition) {
-  return ['ready', 'not_required', undefined, ''].includes(skill.installStatus || 'not_required');
+  if (skill.runtime === 'prompt-only' || skill.type === 'prompt-only') return true;
+  return skill.installStatus === 'ready' && skill.testStatus === 'passed';
 }
 
 function skillRuntimeLabel(skill: SkillDefinition) {
@@ -227,6 +229,9 @@ function skillRuntimeLabel(skill: SkillDefinition) {
 }
 
 function skillStatusLabel(skill: SkillDefinition) {
+  if (skill.testStatus === 'testing') return '测试中';
+  if (skill.testStatus === 'failed') return '测试失败';
+  if (skill.runtime !== 'prompt-only' && skill.type !== 'prompt-only' && skill.testStatus !== 'passed') return '待测试';
   if (skill.installStatus === 'ready') return '依赖就绪';
   if (skill.installStatus === 'installing' || skill.installStatus === 'pending') return '初始化中';
   if (skill.installStatus === 'failed') return '初始化失败';
@@ -483,6 +488,9 @@ function handleFileChange(event: Event) {
               <span v-for="file in modelValue.files" :key="file" class="input-composer__file-tag">
                 <component :is="getFileIcon(file)" :size="12" />
                 {{ file }}
+                <button type="button" title="删除文件" @click="$emit('remove-file', file)">
+                  <X :size="12" />
+                </button>
               </span>
             </div>
 
@@ -493,7 +501,7 @@ function handleFileChange(event: Event) {
                   <input
                     type="file"
                     multiple
-                    accept=".txt,.md,.markdown,.csv,.json,.log,.docx,image/*"
+                    accept=".txt,.md,.markdown,.csv,.json,.log,.docx,.pdf,.ppt,.pptx,image/*"
                     @change="handleFileChange"
                   />
                 </label>
@@ -1418,6 +1426,23 @@ function handleFileChange(event: Event) {
   color: var(--color-muted);
   font-size: 11px;
   background: var(--color-panel);
+}
+
+.input-composer__file-tag button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--color-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.input-composer__file-tag button:hover {
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
 }
 
 .template-preview-modal {

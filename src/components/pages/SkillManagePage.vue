@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
-import { CheckCircle2, Edit3, FileArchive, Loader2, RotateCw, Trash2, UploadCloud, XCircle, Zap } from 'lucide-vue-next';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { CheckCircle2, FileArchive, Loader2, RotateCw, Sparkles, Trash2, UploadCloud, XCircle, Zap } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
-import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
-import UiField from '@/components/ui/UiField.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
-import UiTextarea from '@/components/ui/UiTextarea.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
+import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { skillApi, type Skill, type SkillPackagePreview, type SkillPackagePreviewFile } from '@/services/api';
 import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
@@ -20,29 +18,24 @@ const emit = defineEmits<{
 
 const skills = ref<Skill[]>([]);
 const loading = ref(false);
-const saving = ref(false);
 const uploading = ref(false);
 const deleting = ref(false);
-const showModal = ref(false);
+const testingSkillIds = ref<Set<number>>(new Set());
 const showPackagePreview = ref(false);
-const editingSkill = ref<Skill | null>(null);
 const deleteTarget = ref<Skill | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const packageFileName = ref('');
 const pendingPackage = ref<{ filename: string; dataBase64: string } | null>(null);
 const packagePreview = ref<SkillPackagePreview | null>(null);
-const formData = ref({
-  name: '',
-  description: '',
-  instruction: '',
-  icon: 'Zap',
-  category: '资料收集',
-  parameters: {} as Record<string, any>
-});
+const packageCategory = ref('资料收集');
 
 const readyCount = computed(() =>
   skills.value.filter((skill) => ['ready', 'not_required'].includes(skill.install_status || 'not_required')).length
 );
+const passedCount = computed(() =>
+  skills.value.filter((skill) => skill.test_status === 'passed').length
+);
+let statusPollTimer: ReturnType<typeof setInterval> | null = null;
 const categoryOptions = computed(() =>
   INPUT_SKILL_CATEGORIES.map((category) => ({
     label: category,
@@ -60,6 +53,13 @@ async function fetchSkills() {
         ...skill,
         category: normalizeInputSkillCategory(skill.category)
       }));
+      const activeTestingIds = new Set(
+        skills.value
+          .filter((skill) => skill.test_status === 'testing' || ['pending', 'installing'].includes(skill.install_status || ''))
+          .map((skill) => skill.id)
+      );
+      testingSkillIds.value = new Set([...testingSkillIds.value].filter((id) => activeTestingIds.has(id)));
+      emit('changed');
     } else {
       toastStore.error('加载失败', response.message || '获取 Skill 列表失败');
     }
@@ -68,6 +68,39 @@ async function fetchSkills() {
   } finally {
     loading.value = false;
   }
+}
+
+function needsStatusPolling() {
+  return skills.value.some((skill) =>
+    ['pending', 'installing'].includes(skill.install_status || '') ||
+    skill.test_status === 'testing' ||
+    testingSkillIds.value.has(skill.id)
+  );
+}
+
+function startStatusPolling() {
+  if (statusPollTimer) return;
+  statusPollTimer = setInterval(async () => {
+    await fetchSkills();
+    if (!needsStatusPolling()) stopStatusPolling();
+  }, 2500);
+}
+
+function stopStatusPolling() {
+  if (!statusPollTimer) return;
+  clearInterval(statusPollTimer);
+  statusPollTimer = null;
+}
+
+function markSkillTesting(id: number) {
+  testingSkillIds.value = new Set([...testingSkillIds.value, id]);
+  startStatusPolling();
+}
+
+function clearSkillTesting(id: number) {
+  const next = new Set(testingSkillIds.value);
+  next.delete(id);
+  testingSkillIds.value = next;
 }
 
 function fileToBase64(file: File) {
@@ -82,45 +115,12 @@ function fileToBase64(file: File) {
   });
 }
 
-function openCreateModal() {
-  editingSkill.value = null;
-  packageFileName.value = '';
-  formData.value = {
-    name: '',
-    description: '',
-    instruction: '',
-    icon: 'Zap',
-    category: '资料收集',
-    parameters: {},
-  };
-  showModal.value = true;
-}
-
-function openEditModal(skill: Skill) {
-  editingSkill.value = skill;
-  packageFileName.value = '';
-  formData.value = {
-    name: skill.name,
-    description: skill.description || '',
-    instruction: String(skill.parameters?.instruction || ''),
-    icon: skill.icon || 'Zap',
-    category: normalizeInputSkillCategory(skill.category),
-    parameters: skill.parameters || {},
-  };
-  showModal.value = true;
-}
-
-function closeModal() {
-  showModal.value = false;
-  editingSkill.value = null;
-  packageFileName.value = '';
-}
-
 function closePackagePreview() {
   if (uploading.value) return;
   showPackagePreview.value = false;
   packagePreview.value = null;
   pendingPackage.value = null;
+  packageCategory.value = '资料收集';
   packageFileName.value = '';
 }
 
@@ -154,6 +154,7 @@ async function handlePackageSelect(event: Event) {
       ...response.data,
       category: normalizeInputSkillCategory(response.data.category)
     };
+    packageCategory.value = packagePreview.value.category;
     showPackagePreview.value = true;
   } catch (error) {
     toastStore.error('解析失败', error instanceof Error ? error.message : '解析 Skill 包失败');
@@ -169,16 +170,21 @@ async function confirmPackageUpload() {
   if (!pendingPackage.value) return;
   uploading.value = true;
   try {
-    const response = await skillApi.uploadPackage(pendingPackage.value);
+    const response = await skillApi.uploadPackage({
+      ...pendingPackage.value,
+      category: normalizeInputSkillCategory(packageCategory.value)
+    });
     if (!response.success) {
       throw new Error(response.message || '上传 Skill 包失败');
     }
-    toastStore.success('添加成功', '已保存完整 Skill 包，后端会自动初始化依赖环境');
+    toastStore.success('添加成功', '已保存完整 Skill 包，后端会自动适配、初始化依赖并测试可用性');
     showPackagePreview.value = false;
     packagePreview.value = null;
     pendingPackage.value = null;
+    packageCategory.value = '资料收集';
     packageFileName.value = '';
     await fetchSkills();
+    if (response.data?.id) markSkillTesting(response.data.id);
     emit('changed');
   } catch (error) {
     toastStore.error('上传失败', error instanceof Error ? error.message : '上传 Skill 包失败');
@@ -187,50 +193,27 @@ async function confirmPackageUpload() {
   }
 }
 
-async function saveSkill() {
-  if (!formData.value.name.trim()) {
-    toastStore.warning('请填写名称', 'Skill 名称不能为空');
-    return;
-  }
-
-  saving.value = true;
-  try {
-    const payload = {
-      name: formData.value.name.trim(),
-      description: formData.value.description.trim(),
-      icon: formData.value.icon,
-      category: normalizeInputSkillCategory(formData.value.category),
-      parameters: {
-        ...formData.value.parameters,
-        instruction: formData.value.instruction.trim(),
-      },
-      is_enabled: true,
-    };
-
-    const response = editingSkill.value
-      ? await skillApi.update(editingSkill.value.id, payload)
-      : await skillApi.create(payload);
-
-    if (!response.success) throw new Error(response.message || '保存 Skill 失败');
-    toastStore.success('保存成功', editingSkill.value ? 'Skill 已更新' : '已创建提示词型 Skill');
-    closeModal();
-    await fetchSkills();
-    emit('changed');
-  } catch (error) {
-    toastStore.error('保存失败', error instanceof Error ? error.message : '保存 Skill 失败');
-  } finally {
-    saving.value = false;
-  }
-}
-
 async function reinstallSkill(skill: Skill) {
   const response = await skillApi.reinstall(skill.id);
   if (response.success) {
-    toastStore.info('正在初始化', '后端正在自动初始化 Skill 运行环境');
+    toastStore.info('正在初始化和测试', '后端正在自动初始化依赖并用示例输入测试 Skill');
+    markSkillTesting(skill.id);
     await fetchSkills();
     emit('changed');
   } else {
     toastStore.error('操作失败', response.message || '重新初始化失败');
+  }
+}
+
+async function testSkill(skill: Skill) {
+  const response = await skillApi.test(skill.id);
+  if (response.success) {
+    toastStore.info('正在测试 Skill', '系统会使用示例输入验证该 Skill 是否可用');
+    markSkillTesting(skill.id);
+    await fetchSkills();
+    emit('changed');
+  } else {
+    toastStore.error('测试启动失败', response.message || '请稍后重试');
   }
 }
 
@@ -281,6 +264,74 @@ function statusIcon(status?: string) {
   return CheckCircle2;
 }
 
+function testStatusLabel(status?: string) {
+  if (status === 'testing') return '测试中';
+  if (status === 'passed') return '测试通过';
+  if (status === 'failed') return '测试失败';
+  if (status === 'skipped') return '跳过测试';
+  return '未测试';
+}
+
+function testStatusTone(status?: string): 'neutral' | 'success' | 'warning' | 'danger' | 'info' {
+  if (status === 'passed') return 'success';
+  if (status === 'testing') return 'warning';
+  if (status === 'failed') return 'danger';
+  if (status === 'skipped') return 'info';
+  return 'neutral';
+}
+
+function testStatusIcon(status?: string) {
+  if (status === 'testing') return Loader2;
+  if (status === 'failed') return XCircle;
+  return CheckCircle2;
+}
+
+function skillProgress(skill: Skill) {
+  if (skill.test_status === 'passed') return 100;
+  if (skill.test_status === 'failed') return 100;
+  if (skill.test_status === 'testing') return 75;
+  if (skill.install_status === 'ready' || skill.install_status === 'not_required') return 45;
+  if (skill.install_status === 'installing') return 30;
+  if (skill.install_status === 'pending') return 15;
+  if (skill.install_status === 'failed') return 100;
+  return 8;
+}
+
+function skillFlowSteps(skill: Skill) {
+  const installLog = skill.install_log || '';
+  const packageSkill = Boolean(skill.package_path || skill.type === 'package');
+  const needsRuntime = packageSkill || skill.runtime !== 'prompt-only';
+  const adapting = ['pending', 'installing'].includes(skill.install_status || '') && /自动适配|等待自动适配/.test(installLog);
+  const adaptationDone = /自动适配完成|已生成执行入口|未发现需要生成的新执行入口|无需依赖初始化/.test(installLog) || (!needsRuntime && skill.install_status === 'not_required');
+  const installFailed = skill.install_status === 'failed';
+  return [
+    {
+      label: '解析包',
+      done: Boolean(skill.package_path || skill.type === 'prompt-only'),
+      active: skill.install_status === 'pending',
+      failed: false,
+    },
+    {
+      label: '智能适配',
+      done: adaptationDone || skill.install_status === 'ready',
+      active: adapting,
+      failed: installFailed && !adaptationDone,
+    },
+    {
+      label: '初始化依赖',
+      done: ['ready', 'not_required'].includes(skill.install_status || ''),
+      active: ['pending', 'installing'].includes(skill.install_status || ''),
+      failed: installFailed,
+    },
+    {
+      label: '健康测试',
+      done: skill.test_status === 'passed',
+      active: skill.test_status === 'testing',
+      failed: skill.test_status === 'failed',
+    },
+  ];
+}
+
 function previewDependencyLabel(preview: SkillPackagePreview) {
   if (preview.dependencyFile) return preview.dependencyFile;
   if (preview.inferredDependencies?.length) return `自动识别：${preview.inferredDependencies.join('、')}`;
@@ -322,7 +373,12 @@ function fileRoleTone(role: SkillPackagePreviewFile['role']): 'neutral' | 'succe
   return 'neutral';
 }
 
-onMounted(fetchSkills);
+onMounted(async () => {
+  await fetchSkills();
+  if (needsStatusPolling()) startStatusPolling();
+});
+
+onBeforeUnmount(stopStatusPolling);
 </script>
 
 <template>
@@ -330,15 +386,12 @@ onMounted(fetchSkills);
     <header class="page-header">
       <div class="page-header__info">
         <h2>Skill 管理</h2>
-        <p>上传 Skill 包后，系统会自动识别说明、入口脚本和依赖文件，并初始化运行环境。</p>
+        <p>导入可执行 Skill 包，系统会自动适配输入阶段、初始化依赖并完成可用性测试。</p>
       </div>
       <div class="page-header__actions">
         <UiBadge tone="info">共 {{ skills.length }} 个</UiBadge>
         <UiBadge tone="success">可用 {{ readyCount }} 个</UiBadge>
-        <UiButton variant="secondary" @click="openCreateModal">
-          <Edit3 :size="14" />
-          新建提示词 Skill
-        </UiButton>
+        <UiBadge tone="success">测试通过 {{ passedCount }} 个</UiBadge>
         <UiButton variant="primary" :loading="uploading" @click="triggerPackageUpload">
           <UploadCloud :size="15" />
           上传 Skill 包
@@ -358,20 +411,17 @@ onMounted(fetchSkills);
         <FileArchive :size="22" />
       </div>
       <div>
-        <strong>{{ uploading ? `正在上传 ${packageFileName}` : 'Skill 包规范' }}</strong>
-        <p>包内只需要包含 SKILL.md；skill.json、requirements.txt、package.json、run.py、index.js 等文件都是可选识别项。依赖由后端自动初始化，用户只需要上传 Skill 包。</p>
+        <strong>{{ uploading ? `正在上传 ${packageFileName}` : 'Skill 包导入规范' }}</strong>
+        <p>上传 .zip、.skill 或单个 SKILL.md。包内必须包含 SKILL.md；入口脚本和依赖文件可选，系统会在确认后自动适配、安装依赖并测试。</p>
       </div>
     </section>
 
-    <div v-if="loading && skills.length === 0" class="loading-state">
-      <Loader2 :size="18" class="spin" />
-      正在加载 Skill...
-    </div>
+    <PageLoadingState v-if="loading && skills.length === 0" title="正在加载 Skill" description="正在读取 Skill 包和依赖状态" />
 
     <UiEmpty
       v-else-if="skills.length === 0"
       title="还没有 Skill"
-      description="上传一个 Skill 包，或先创建一个纯提示词型 Skill。"
+      description="上传一个 Skill 包后，输入阶段会按用户资料和文件自动选择可用 Skill。"
     />
 
     <div v-else class="skill-list">
@@ -391,8 +441,33 @@ onMounted(fetchSkills);
                 />
                 {{ statusLabel(skill.install_status) }}
               </UiBadge>
+              <UiBadge :tone="testStatusTone(skill.test_status)" size="sm">
+                <component
+                  :is="testStatusIcon(skill.test_status)"
+                  :size="12"
+                  :class="{ spin: skill.test_status === 'testing' }"
+                />
+                {{ testStatusLabel(skill.test_status) }}
+              </UiBadge>
             </div>
             <p>{{ skill.description || '暂无说明' }}</p>
+            <div class="skill-test-progress" :class="{ 'skill-test-progress--failed': skill.test_status === 'failed', 'skill-test-progress--passed': skill.test_status === 'passed' }">
+              <span :style="{ width: `${skillProgress(skill)}%` }" />
+            </div>
+            <ol class="skill-flow">
+              <li
+                v-for="item in skillFlowSteps(skill)"
+                :key="item.label"
+                :class="{
+                  'skill-flow__item--done': item.done,
+                  'skill-flow__item--active': item.active,
+                  'skill-flow__item--failed': item.failed
+                }"
+              >
+                <span />
+                <strong>{{ item.label }}</strong>
+              </li>
+            </ol>
             <dl class="skill-meta">
               <div>
                 <dt>运行时</dt>
@@ -415,16 +490,20 @@ onMounted(fetchSkills);
               <summary>查看初始化日志</summary>
               <pre>{{ skill.install_log }}</pre>
             </details>
+            <details v-if="skill.test_log" class="skill-log">
+              <summary>查看测试日志</summary>
+              <pre>{{ skill.test_log }}</pre>
+            </details>
           </div>
         </div>
         <div class="skill-card__actions">
           <UiButton v-if="skill.runtime !== 'prompt-only'" size="sm" variant="secondary" @click="reinstallSkill(skill)">
             <RotateCw :size="13" />
-            重试初始化
+            重试初始化并测试
           </UiButton>
-          <UiButton size="sm" variant="ghost" @click="openEditModal(skill)">
-            <Edit3 :size="13" />
-            编辑
+          <UiButton size="sm" variant="secondary" :loading="skill.test_status === 'testing' || testingSkillIds.has(skill.id)" @click="testSkill(skill)">
+            <CheckCircle2 :size="13" />
+            测试
           </UiButton>
           <UiButton size="sm" variant="danger" @click="requestDelete(skill)">
             <Trash2 :size="13" />
@@ -433,43 +512,6 @@ onMounted(fetchSkills);
         </div>
       </article>
     </div>
-
-    <Teleport to="body">
-      <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
-        <div class="modal">
-          <header class="modal__header">
-            <h3>{{ editingSkill ? '编辑 Skill' : '新建提示词 Skill' }}</h3>
-            <button type="button" class="modal__close" @click="closeModal">×</button>
-          </header>
-          <div class="modal__body">
-            <UiField label="Skill 名称" required>
-              <UiInput v-model="formData.name" placeholder="例如：资料摘要、Web 搜索、文件解析" />
-            </UiField>
-            <UiField label="分类">
-              <UiSelect
-                v-model="formData.category"
-                :options="categoryOptions"
-                placeholder="选择输入阶段分类"
-              />
-            </UiField>
-            <UiField label="说明">
-              <UiInput v-model="formData.description" placeholder="描述这个 Skill 适合在什么场景使用" />
-            </UiField>
-            <UiField label="提示词 / 使用说明" required>
-              <UiTextarea
-                v-model="formData.instruction"
-                :rows="9"
-                placeholder="写清楚 Skill 的用途、触发条件、输入输出要求。纯提示词 Skill 不需要额外依赖。"
-              />
-            </UiField>
-          </div>
-          <footer class="modal__footer">
-            <UiButton variant="secondary" :disabled="saving" @click="closeModal">取消</UiButton>
-            <UiButton variant="primary" :loading="saving" @click="saveSkill">保存</UiButton>
-          </footer>
-        </div>
-      </div>
-    </Teleport>
 
     <Teleport to="body">
       <div v-if="showPackagePreview && packagePreview" class="modal-overlay" @click.self="closePackagePreview">
@@ -494,7 +536,11 @@ onMounted(fetchSkills);
               </div>
               <div>
                 <span>分类</span>
-                <strong>{{ packagePreview.category }}</strong>
+                <UiSelect
+                  v-model="packageCategory"
+                  :options="categoryOptions"
+                  placeholder="选择 Skill 分类"
+                />
               </div>
               <div>
                 <span>文件</span>
@@ -524,6 +570,18 @@ onMounted(fetchSkills);
             <section v-if="packagePreview.description || packagePreview.instructionPreview" class="package-copy">
               <strong>{{ packagePreview.description || '已读取 SKILL.md 内容' }}</strong>
               <p>{{ packagePreview.instructionPreview || '暂无说明内容' }}</p>
+            </section>
+
+            <section class="package-adapt-hint">
+              <Loader2 v-if="uploading" :size="14" class="spin" />
+              <Sparkles v-else :size="14" />
+              <div>
+                <strong>确认后会先智能适配</strong>
+                <p>系统会保留 SKILL.md 核心说明，必要时补充执行入口、识别依赖，并在测试失败后自动修复一次再重试。</p>
+                <ul v-if="packagePreview.adaptationPlan?.length">
+                  <li v-for="item in packagePreview.adaptationPlan" :key="item">{{ item }}</li>
+                </ul>
+              </div>
             </section>
 
             <section class="package-tree" aria-label="Skill 包目录结构">
@@ -707,6 +765,97 @@ onMounted(fetchSkills);
   color: var(--color-muted);
   font-size: 13px;
   line-height: 1.55;
+}
+
+.skill-test-progress {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+
+.skill-test-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--color-warning);
+  transition: width var(--transition-normal);
+}
+
+.skill-test-progress--passed span {
+  background: var(--color-success);
+}
+
+.skill-test-progress--failed span {
+  background: var(--color-danger);
+}
+
+.skill-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skill-flow__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.skill-flow__item span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-border-strong);
+}
+
+.skill-flow__item strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-flow__item--done {
+  border-color: color-mix(in srgb, var(--color-success) 42%, var(--color-border));
+  color: var(--color-success);
+  background: var(--color-success-soft);
+}
+
+.skill-flow__item--done span {
+  background: var(--color-success);
+}
+
+.skill-flow__item--active {
+  border-color: color-mix(in srgb, var(--color-accent) 42%, var(--color-border));
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.skill-flow__item--active span {
+  background: var(--color-accent);
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+.skill-flow__item--failed {
+  border-color: color-mix(in srgb, var(--color-danger) 42%, var(--color-border));
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
+}
+
+.skill-flow__item--failed span {
+  background: var(--color-danger);
 }
 
 .skill-meta {
@@ -925,6 +1074,50 @@ onMounted(fetchSkills);
   line-height: 1.55;
 }
 
+.package-adapt-hint {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 36%, var(--color-border));
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.package-adapt-hint > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.package-adapt-hint strong,
+.package-adapt-hint p,
+.package-adapt-hint ul {
+  margin: 0;
+}
+
+.package-adapt-hint strong {
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.package-adapt-hint p {
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.package-adapt-hint ul {
+  display: grid;
+  gap: 5px;
+  padding-left: 16px;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .package-tree {
   overflow: hidden;
 }
@@ -987,6 +1180,17 @@ onMounted(fetchSkills);
   }
 }
 
+@keyframes pulse-dot {
+  0%, 100% {
+    transform: scale(0.82);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+
 @media (max-width: 860px) {
   .skill-card,
   .skill-card__main {
@@ -998,6 +1202,10 @@ onMounted(fetchSkills);
   }
 
   .skill-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .skill-flow {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1013,6 +1221,7 @@ onMounted(fetchSkills);
   }
 
   .upload-guide,
+  .skill-flow,
   .skill-meta,
   .package-summary,
   .package-detected {

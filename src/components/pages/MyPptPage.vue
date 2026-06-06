@@ -6,6 +6,8 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
+import PageLoadingState from '@/components/common/PageLoadingState.vue';
+import NexiousLoader from '@/components/common/NexiousLoader.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
 import { projectApi, templateApi, type Project, type Template } from '@/services/api';
@@ -26,6 +28,7 @@ const projectToDelete = ref<Project | null>(null);
 const showCreateModal = ref(false);
 const newProjectTitle = ref('');
 const savingTemplateIds = ref<Set<number>>(new Set());
+const deletedProjectIds = ref<Set<number>>(new Set());
 
 type ProjectDisplayStatus = 'draft' | 'paused' | 'generating' | 'completed';
 type TemplateSaveState = 'unsaved' | 'saved' | 'stale';
@@ -274,7 +277,7 @@ async function fetchProjects() {
   try {
     const response = await projectApi.getAll();
     if (response.success && response.data) {
-      projects.value = response.data;
+      projects.value = response.data.filter((project) => !deletedProjectIds.value.has(project.id));
     } else {
       toastStore.error('加载项目失败', response.message || '请稍后重试');
     }
@@ -340,6 +343,9 @@ async function confirmDelete() {
   try {
     const response = await projectApi.delete(projectToDelete.value.id);
     if (response.success) {
+      const deletedId = projectToDelete.value.id;
+      deletedProjectIds.value = new Set([...deletedProjectIds.value, deletedId]);
+      projects.value = projects.value.filter((project) => project.id !== deletedId);
       toastStore.success('删除成功', '项目已删除');
       showDeleteModal.value = false;
       projectToDelete.value = null;
@@ -482,7 +488,7 @@ onMounted(() => {
       </div>
       <div class="stat-card stat-card--generating">
         <div class="stat-card__icon">
-          <div class="spinner"></div>
+          <NexiousLoader size="sm" inverse />
         </div>
         <div class="stat-card__content">
           <span class="stat-card__value">{{ stats.generating }}</span>
@@ -517,9 +523,7 @@ onMounted(() => {
       />
     </div>
 
-    <div v-if="loading && projects.length === 0" class="loading-state">
-      加载中...
-    </div>
+    <PageLoadingState v-if="loading && projects.length === 0" title="正在加载项目" description="正在同步我的 PPT 列表" />
 
     <div v-else-if="filteredProjects.length === 0 && !loading" class="empty-state">
       <UiEmpty
@@ -758,21 +762,6 @@ onMounted(() => {
 .stat-card__label {
   font-size: 13px;
   color: var(--color-muted);
-}
-
-.spinner {
-  width: 20px;
-  height: 20px;
-  border: 2px solid color-mix(in srgb, var(--color-inverse) 35%, transparent);
-  border-top-color: var(--color-inverse);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .search-bar {
