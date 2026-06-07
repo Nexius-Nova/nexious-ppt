@@ -35,7 +35,7 @@ async function initializeDatabase(): Promise<void> {
 
     // 读取 SQL 文件
     const sqlFilePath = path.join(__dirname, '../../database/init.sql');
-    const sqlContent = fs.readFileSync(sqlFilePath, 'utf-8');
+    const sqlContent = fs.readFileSync(sqlFilePath, 'utf-8').replace(/^\uFEFF/, '');
 
     console.log('📄 正在读取 SQL 初始化文件...');
 
@@ -45,7 +45,7 @@ async function initializeDatabase(): Promise<void> {
     console.log('✅ 数据库初始化成功！');
     console.log('📊 数据库名称: nexious-ppt');
     console.log('📋 已创建表: users, api_keys, projects, prompts, skills, templates, run_configs, workflow_snapshots, version_snapshots, generation_jobs');
-    console.log('✨ 已插入测试数据');
+    console.log('✨ 已补充已有用户的默认运行配置');
 
     // 验证表是否创建成功
     const [tables] = await connection.query(
