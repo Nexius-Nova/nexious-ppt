@@ -11,6 +11,7 @@ import {
   deletePptxPreviewImport,
 } from '../utils/generatedAssets.js';
 import { generatedImagesRoot } from '../utils/storage.js';
+import { assertZipUploadSafe, decodeBase64Upload } from '../utils/uploadSecurity.js';
 
 const router = Router();
 
@@ -122,6 +123,22 @@ async function deleteTemplateGeneratedUrlsForUser(
 }
 
 const FALLBACK_TEMPLATE_COLORS = ['#334155', '#172026', '#C9A227', '#F8FAFC'];
+const MAX_IMPORT_PPTX_BYTES = Math.max(1024 * 1024, Number(process.env.TEMPLATE_IMPORT_MAX_BYTES || 50 * 1024 * 1024));
+
+function assertPptxUploadSafe(filename: string, dataBase64: string) {
+  const lowerName = filename.toLowerCase();
+  if (!lowerName.endsWith('.pptx')) {
+    throw new Error('仅支持 .pptx 文件，请先将 .ppt 另存为 .pptx 后导入');
+  }
+
+  const buffer = decodeBase64Upload(dataBase64, 'PPTX 文件');
+  assertZipUploadSafe(buffer, {
+    label: 'PPTX 文件',
+    maxBytes: MAX_IMPORT_PPTX_BYTES,
+    filename,
+    extensions: ['pptx'],
+  });
+}
 
 function normalizeHexColor(value: string) {
   const raw = String(value || '').trim();
@@ -311,7 +328,22 @@ async function attachNativePreviewSlides(
   const nativePrefix = `${mediaUrlPrefix}/native`;
   const nativePreview = await renderPptxWithPowerPoint(filename, dataBase64, nativeDir, nativePrefix);
   if (!nativePreview?.slides.length) {
-    return { draft, previewMode: 'lightweight' as const };
+    draft.settings.styleGuide = {
+      ...draft.settings.styleGuide,
+      visualTone: `${draft.settings.styleGuide?.visualTone || '从导入 PPT 提取的设计 DNA'} 当前环境未启用 PowerPoint 原生预览，模板会提取配色、版式比例、组件节奏和文本层级作为生成约束，不承诺 100% 复刻原 PPT。`,
+    };
+    draft.settings.constraints = {
+      ...draft.settings.constraints,
+      avoid: Array.from(new Set([
+        ...(draft.settings.constraints?.avoid || []),
+        '不要承诺 100% 复刻原 PPT 外观；云端无 PowerPoint 时仅使用设计 DNA 作为参考',
+      ])),
+    };
+    return {
+      draft,
+      previewMode: 'lightweight' as const,
+      fallbackReason: '当前环境未启用 PowerPoint 原生预览，已降级为设计 DNA 提取。',
+    };
   }
 
   const slideByPage = new Map(result.slides.map((slide) => [slide.pageNumber, slide]));
@@ -406,6 +438,7 @@ router.post('/import-pptx/preview', async (req: AuthRequest, res: Response) => {
     if (!filename || !dataBase64) {
       return res.status(400).json({ success: false, message: '请上传 PPTX 文件' });
     }
+    assertPptxUploadSafe(String(filename), String(dataBase64));
 
     const safeUserId = String(req.userId || 'anonymous');
     importId = `${Date.now()}-${crypto.randomUUID()}`;
@@ -437,6 +470,7 @@ router.post('/import-pptx/preview', async (req: AuthRequest, res: Response) => {
           colorCount: previewResult.draft.settings.styleGuide?.colorPalette?.length || 0,
           layoutCount: new Set(result.slides.map((slide) => slide.layout)).size,
           previewMode: previewResult.previewMode,
+          fallbackReason: previewResult.previewMode === 'lightweight' ? previewResult.fallbackReason : undefined,
           nativePreview: previewResult.previewMode === 'powerpoint' ? previewResult.nativePreview : undefined,
         },
       },

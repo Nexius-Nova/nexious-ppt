@@ -6,6 +6,7 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
+import UiFeedbackState from '@/components/ui/UiFeedbackState.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import NexiousLoader from '@/components/common/NexiousLoader.vue';
 import PrivateSvg from '@/components/common/PrivateSvg.vue';
@@ -15,6 +16,7 @@ import { projectApi, templateApi, type Project, type Template } from '@/services
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import type { PptProjectState, WorkflowStep } from '@/types/agent';
 import { buildTemplatePayloadFromProject } from '@/utils/templateFromProject';
+import { translateErrorMessage } from '@/utils/errorMessages';
 
 const router = useRouter();
 const agentStore = useAgentStore();
@@ -23,6 +25,7 @@ const toastStore = useToastStore();
 const projects = ref<Project[]>([]);
 const templates = ref<Template[]>([]);
 const loading = ref(false);
+const loadError = ref('');
 const searchQuery = ref('');
 const showDeleteModal = ref(false);
 const projectToDelete = ref<Project | null>(null);
@@ -281,13 +284,15 @@ async function fetchProjects(options: { silent?: boolean } = {}) {
   try {
     const response = await projectApi.getAll();
     if (response.success && response.data) {
+      loadError.value = '';
       projects.value = response.data.filter((project) => !deletedProjectIds.value.has(project.id));
     } else {
-      toastStore.error('加载项目失败', response.message || '请稍后重试');
+      loadError.value = translateErrorMessage(response.message, '加载项目失败，请稍后重试');
+      toastStore.error('加载项目失败', loadError.value);
     }
   } catch (error) {
-    console.error('Failed to fetch projects:', error);
-    toastStore.error('加载项目失败', error instanceof Error ? error.message : '未知错误');
+    loadError.value = translateErrorMessage(error, '加载项目失败，请稍后重试');
+    toastStore.error('加载项目失败', loadError.value);
   } finally {
     if (!options.silent) loading.value = false;
   }
@@ -437,7 +442,7 @@ async function saveProjectAsTemplate(project: Project) {
 function getStatusBadge(tone: ProjectDisplayStatus) {
   const map = {
     draft: { label: '草稿', tone: 'neutral' as const },
-    paused: { label: '已暂停', tone: 'danger' as const },
+    paused: { label: '已暂停', tone: 'warning' as const },
     generating: { label: '生成中', tone: 'warning' as const },
     completed: { label: '已完成', tone: 'success' as const }
   };
@@ -539,6 +544,16 @@ onBeforeUnmount(() => {
     </div>
 
     <PageLoadingState v-if="loading && projects.length === 0" title="正在加载项目" description="正在同步我的 PPT 列表" />
+
+    <UiFeedbackState
+      v-else-if="loadError && projects.length === 0"
+      tone="error"
+      title="项目列表加载失败"
+      :description="loadError"
+      action-label="重试"
+      :loading="loading"
+      @action="fetchProjects"
+    />
 
     <div v-else-if="filteredProjects.length === 0 && !loading" class="empty-state">
       <UiEmpty

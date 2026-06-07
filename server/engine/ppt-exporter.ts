@@ -4,6 +4,7 @@ import type { DesignSpec, SpecLock } from './spec.js';
 import { inlineRemoteImages } from './svg-to-pptx.js';
 import { exportNativeEditablePptx, type NativeSvgPptxAnimationOptions } from './native-svg-pptx.js';
 import { generatedProjectsRoot } from '../utils/storage.js';
+import { sanitizeGeneratedSvg } from './executor.js';
 
 export interface PptExportPage {
   pageNumber?: number;
@@ -271,7 +272,7 @@ function extractSvg(rawSvg: string): string {
 
 function repairCommonSvgBreakage(rawSvg: string, spec: DesignSpec): string {
   const safeBodyFamily = escapeAttrValue(spec.typography.bodyFamily);
-  let svg = rawSvg;
+  let svg = sanitizeGeneratedSvg(rawSvg);
 
   svg = flattenNestedSvgRoots(svg);
   svg = svg.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');

@@ -4,17 +4,20 @@ import { Plus, Search, Edit3, Trash2, Copy, FileText, Tag, Eye, Upload, Image as
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
+import UiFeedbackState from '@/components/ui/UiFeedbackState.vue';
 import UiField from '@/components/ui/UiField.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import PrivateImage from '@/components/common/PrivateImage.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { promptApi, type Prompt } from '@/services/api';
+import { translateErrorMessage } from '@/utils/errorMessages';
 
 const toastStore = useToastStore();
 
 const prompts = ref<Prompt[]>([]);
 const loading = ref(false);
+const loadError = ref('');
 const searchQuery = ref('');
 const showModal = ref(false);
 const showPreviewModal = ref(false);
@@ -55,10 +58,15 @@ async function fetchPrompts() {
   try {
     const response = await promptApi.getAll();
     if (response.success && response.data) {
+      loadError.value = '';
       prompts.value = response.data;
+    } else {
+      loadError.value = translateErrorMessage(response.message, '获取提示词列表失败');
+      toastStore.error('加载提示词失败', loadError.value);
     }
   } catch (error) {
-    console.error('Failed to fetch prompts:', error);
+    loadError.value = translateErrorMessage(error, '获取提示词列表失败');
+    toastStore.error('加载提示词失败', loadError.value);
   } finally {
     loading.value = false;
   }
@@ -247,6 +255,16 @@ onMounted(() => {
     </div>
 
     <PageLoadingState v-if="loading && prompts.length === 0" title="正在加载提示词" description="正在读取提示词和效果图信息" />
+
+    <UiFeedbackState
+      v-else-if="loadError && prompts.length === 0"
+      tone="error"
+      title="提示词列表加载失败"
+      :description="loadError"
+      action-label="重试"
+      :loading="loading"
+      @action="fetchPrompts"
+    />
 
     <div v-else-if="filteredPrompts.length === 0" class="empty-state">
       <UiEmpty

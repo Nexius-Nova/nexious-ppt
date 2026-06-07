@@ -11,6 +11,16 @@ CREATE DATABASE IF NOT EXISTS `nexious-ppt`
 USE `nexious-ppt`;
 
 -- ============================================
+-- 0. 数据库迁移记录表
+-- ============================================
+CREATE TABLE IF NOT EXISTS `schema_migrations` (
+  `version` VARCHAR(100) NOT NULL,
+  `description` VARCHAR(255) DEFAULT NULL,
+  `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`version`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据库结构迁移记录';
+
+-- ============================================
 -- 1. 用户表
 -- ============================================
 CREATE TABLE IF NOT EXISTS `users` (
@@ -108,6 +118,11 @@ CREATE TABLE IF NOT EXISTS `skills` (
   `entry` VARCHAR(500) DEFAULT NULL,
   `package_path` VARCHAR(1000) DEFAULT NULL,
   `manifest` JSON DEFAULT NULL,
+  `capabilities` JSON DEFAULT NULL,
+  `input_contract` JSON DEFAULT NULL,
+  `output_contract` JSON DEFAULT NULL,
+  `test_sample` JSON DEFAULT NULL,
+  `sandbox_policy` JSON DEFAULT NULL,
   `dependency_file` VARCHAR(500) DEFAULT NULL,
   `install_status` VARCHAR(50) NOT NULL DEFAULT 'not_required',
   `install_log` MEDIUMTEXT DEFAULT NULL,
@@ -262,6 +277,9 @@ CREATE TABLE IF NOT EXISTS `user_sessions` (
   KEY `idx_user_sessions_user_active` (`user_id`, `revoked_at`, `expires_at`),
   CONSTRAINT `fk_user_sessions_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户登录会话表';
+
+INSERT IGNORE INTO `schema_migrations` (`version`, `description`)
+VALUES ('202606080001_baseline_workflow_auth_queue', 'Baseline schema after workflow queue, auth session, storage, skills and export migrations');
 
 -- 运行配置默认值
 -- 只为已存在用户补充缺失配置；不会创建用户，也不会覆盖用户已修改的配置。

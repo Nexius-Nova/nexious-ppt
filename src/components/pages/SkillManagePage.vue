@@ -4,12 +4,14 @@ import { CheckCircle2, Eye, FileArchive, FileText, FolderTree, Loader2, RotateCw
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
+import UiFeedbackState from '@/components/ui/UiFeedbackState.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { skillApi, type Skill, type SkillPackagePreview, type SkillPackagePreviewFile, type SkillPackageView } from '@/services/api';
 import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
+import { translateErrorMessage } from '@/utils/errorMessages';
 
 const toastStore = useToastStore();
 const emit = defineEmits<{
@@ -18,6 +20,7 @@ const emit = defineEmits<{
 
 const skills = ref<Skill[]>([]);
 const loading = ref(false);
+const loadError = ref('');
 const uploading = ref(false);
 const deleting = ref(false);
 const testingSkillIds = ref<Set<number>>(new Set());
@@ -53,6 +56,7 @@ async function fetchSkills() {
   try {
     const response = await skillApi.getAll();
     if (response.success && response.data) {
+      loadError.value = '';
       skills.value = response.data.map((skill) => ({
         ...skill,
         category: normalizeInputSkillCategory(skill.category)
@@ -65,10 +69,12 @@ async function fetchSkills() {
       testingSkillIds.value = new Set([...testingSkillIds.value].filter((id) => activeTestingIds.has(id)));
       emit('changed');
     } else {
-      toastStore.error('加载失败', response.message || '获取 Skill 列表失败');
+      loadError.value = translateErrorMessage(response.message, '获取 Skill 列表失败');
+      toastStore.error('加载失败', loadError.value);
     }
   } catch (error) {
-    toastStore.error('加载失败', error instanceof Error ? error.message : '获取 Skill 列表失败');
+    loadError.value = translateErrorMessage(error, '获取 Skill 列表失败');
+    toastStore.error('加载失败', loadError.value);
   } finally {
     loading.value = false;
   }
@@ -454,6 +460,16 @@ onBeforeUnmount(stopStatusPolling);
     </section>
 
     <PageLoadingState v-if="loading && skills.length === 0" title="正在加载 Skill" description="正在读取 Skill 包和依赖状态" />
+
+    <UiFeedbackState
+      v-else-if="loadError && skills.length === 0"
+      tone="error"
+      title="Skill 列表加载失败"
+      :description="loadError"
+      action-label="重试"
+      :loading="loading"
+      @action="fetchSkills"
+    />
 
     <UiEmpty
       v-else-if="skills.length === 0"

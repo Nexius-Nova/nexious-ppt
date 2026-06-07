@@ -7,6 +7,7 @@ import {
   buildSpecLock,
   buildExecutorSystemPrompt,
   buildExecutorPagePrompt,
+  calculateImageSlot,
   cleanSvgOutput,
   ensureImageUsedInSvg
 } from '../engine/index.js';
@@ -236,8 +237,9 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
 
     let messages: Message[];
     const safeImageUrl = normalizeExecutorImageUrl(imageUrl);
+    const imageSlot = calculateImageSlot(slide, spec);
     const systemPrompt = buildExecutorSystemPrompt(spec, effectiveLock);
-    const userPrompt = buildExecutorPagePrompt(slide, spec, effectiveLock, safeImageUrl);
+    const userPrompt = buildExecutorPagePrompt(slide, spec, effectiveLock, safeImageUrl, imageSlot);
 
     const estimatedTokens = Math.ceil((systemPrompt.length + userPrompt.length) / 3);
     console.log(`[Executor] Page ${slide.pageNumber}: systemPrompt=${systemPrompt.length}chars, userPrompt=${userPrompt.length}chars, ~${estimatedTokens}tokens`);
@@ -245,7 +247,7 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
     if (estimatedTokens > 500000) {
       console.warn(`[Executor] Page ${slide.pageNumber}: prompt too large (~${estimatedTokens}tokens), using simplified prompt`);
       const simplifiedSystem = `你是PPT SVG执行器。画布: ${spec.canvas.width}x${spec.canvas.height}。颜色: primary=${lock.colors.primary}, accent=${lock.colors.accent}, bg=${lock.colors.background}, text=${lock.colors.text}, surface=${lock.colors.surface}, muted=${lock.colors.muted}。字体: ${spec.typography.titleFamily}。输出纯SVG代码，viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"。禁止<style>,class,<foreignObject>,rgba()。`;
-      const simplifiedUser = `生成第${slide.pageNumber}页SVG。标题: ${slide.title}。要点: ${slide.bullets.slice(0, 5).join(' | ')}。布局: ${slide.layout}。${safeImageUrl ? `必须使用图片：${safeImageUrl}，写入 <image href="${safeImageUrl}" x="..." y="..." width="..." height="..." preserveAspectRatio="xMidYMid slice"/>。` : ''}输出纯SVG：`;
+      const simplifiedUser = `生成第${slide.pageNumber}页SVG。标题: ${slide.title}。要点: ${slide.bullets.slice(0, 5).join(' | ')}。布局: ${slide.layout}。${safeImageUrl ? `必须使用图片：${safeImageUrl}，图片槽位固定为 x=${imageSlot.x}, y=${imageSlot.y}, width=${imageSlot.width}, height=${imageSlot.height}，写入 <image href="${safeImageUrl}" x="${imageSlot.x}" y="${imageSlot.y}" width="${imageSlot.width}" height="${imageSlot.height}" preserveAspectRatio="xMidYMid slice"/>。` : ''}输出纯SVG：`;
       messages = [
         { role: 'system', content: simplifiedSystem },
         { role: 'user', content: simplifiedUser },

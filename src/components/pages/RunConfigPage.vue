@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-vue-next';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
+import UiAlert from '@/components/ui/UiAlert.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
@@ -129,6 +130,13 @@ async function deleteOption(key: ConfigOptionKey, value: string) {
       <UiBadge tone="info">选项管理</UiBadge>
     </header>
 
+    <UiAlert v-if="store.configLoadError" tone="warning" title="运行配置已使用默认值">
+      <div class="config-fallback">
+        <span>{{ store.configLoadError }}</span>
+        <UiButton variant="secondary" size="sm" @click="store.fetchConfigs">重试同步</UiButton>
+      </div>
+    </UiAlert>
+
     <div class="param-list">
       <section
         v-for="def in paramDefs"
@@ -240,6 +248,13 @@ async function deleteOption(key: ConfigOptionKey, value: string) {
 
 .param-list {
   display: grid;
+  gap: 12px;
+}
+
+.config-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 

@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+const CURRENT_SCHEMA_VERSION = '202606080001_baseline_workflow_auth_queue';
+
 async function migrate(): Promise<void> {
   let connection: mysql.Connection | null = null;
 
@@ -65,6 +67,16 @@ async function migrate(): Promise<void> {
       console.log(`${tableName}.${indexName} index added`);
     };
 
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS \`schema_migrations\` (
+        \`version\` VARCHAR(100) NOT NULL,
+        \`description\` VARCHAR(255) DEFAULT NULL,
+        \`applied_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (\`version\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据库结构迁移记录'
+    `);
+    console.log('schema_migrations table ensured');
+
     await ensureColumn(
       'prompts',
       'preview_url',
@@ -114,8 +126,33 @@ async function migrate(): Promise<void> {
     );
     await ensureColumn(
       'skills',
+      'capabilities',
+      'ALTER TABLE `skills` ADD COLUMN `capabilities` JSON DEFAULT NULL AFTER `manifest`'
+    );
+    await ensureColumn(
+      'skills',
+      'input_contract',
+      'ALTER TABLE `skills` ADD COLUMN `input_contract` JSON DEFAULT NULL AFTER `capabilities`'
+    );
+    await ensureColumn(
+      'skills',
+      'output_contract',
+      'ALTER TABLE `skills` ADD COLUMN `output_contract` JSON DEFAULT NULL AFTER `input_contract`'
+    );
+    await ensureColumn(
+      'skills',
+      'test_sample',
+      'ALTER TABLE `skills` ADD COLUMN `test_sample` JSON DEFAULT NULL AFTER `output_contract`'
+    );
+    await ensureColumn(
+      'skills',
+      'sandbox_policy',
+      'ALTER TABLE `skills` ADD COLUMN `sandbox_policy` JSON DEFAULT NULL AFTER `test_sample`'
+    );
+    await ensureColumn(
+      'skills',
       'dependency_file',
-      'ALTER TABLE `skills` ADD COLUMN `dependency_file` VARCHAR(500) DEFAULT NULL AFTER `manifest`'
+      'ALTER TABLE `skills` ADD COLUMN `dependency_file` VARCHAR(500) DEFAULT NULL AFTER `sandbox_policy`'
     );
     await ensureColumn(
       'skills',
@@ -336,6 +373,12 @@ async function migrate(): Promise<void> {
     await connection.query('DROP TABLE IF EXISTS `images`');
     await connection.query('DROP TABLE IF EXISTS `slides`');
     console.log('deprecated slides/images tables dropped');
+
+    await connection.query(
+      'INSERT IGNORE INTO `schema_migrations` (`version`, `description`) VALUES (?, ?)',
+      [CURRENT_SCHEMA_VERSION, 'Baseline schema after workflow queue, auth session, storage, skills and export migrations']
+    );
+    console.log(`schema migration recorded: ${CURRENT_SCHEMA_VERSION}`);
 
     console.log('Database migration completed.');
   } catch (error) {

@@ -89,6 +89,8 @@ pnpm run init-db
 pnpm run migrate
 ```
 
+迁移脚本会维护 `schema_migrations` 表，用于记录已应用的数据库结构版本。后续表结构变更应优先通过迁移脚本追加版本，不建议在业务请求过程中动态补字段。
+
 ## Redis 建议
 
 项目使用 Redis 支撑验证码限流、邮箱验证码和生成队列。生产环境建议启用 Redis：
@@ -118,6 +120,57 @@ docker run -d \
 ```
 
 BullMQ 更推荐 `maxmemory-policy noeviction`。如果 Redis 设置了会驱逐 key 的策略，队列可能出现任务状态丢失。
+
+生产环境默认要求 Redis 队列可用：`NODE_ENV=production` 且 `QUEUE_DRIVER` 未设置为 `memory` 时，Redis 预检失败会阻止生成任务入队，避免静默降级到内存队列导致多进程或重启后任务丢失。建议使用 Redis 6.2+，并保持：
+
+```env
+REDIS_QUEUE_STRICT=true
+```
+
+如确需临时使用内存队列，需要显式设置 `QUEUE_DRIVER=memory`，并接受任务无法跨进程恢复的限制。
+
+## 工作流上下文
+
+每个 PPT 项目会保存独立的 `workflowContext`，包含 `projectId`、`userId`、`jobId`、当前阶段、模型选择、模板、提示词和已启用 Skill。任务开始后会固化当次运行配置，后续切换默认模型、模板或 Skill 不会影响已经排队或正在运行的 PPT。
+
+服务端通过统一状态机推导 `input -> outline -> images -> pages -> export` 的运行、暂停、重试、失败和完成状态。前端页面只消费服务端状态，避免暂停、继续、刷新、重试后出现状态不一致。
+
+## Skill 与安全
+
+Skill 包支持在 `skill.json` 或 `SKILL.md` front matter 中声明能力、输入输出契约、健康测试样本和运行沙箱：
+
+```json
+{
+  "capabilities": ["web-search", "file-parse"],
+  "inputContract": { "type": "object" },
+  "outputContract": { "type": "object" },
+  "testSample": { "topic": "AI PPT", "content": "用于健康测试的示例内容" },
+  "sandbox": {
+    "network": false,
+    "timeoutMs": 120000,
+    "maxOutputBytes": 1048576,
+    "maxInputFiles": 8
+  }
+}
+```
+
+未显式声明能力时，系统会根据 Skill 名称、说明、分类、入口文件和包内文件推断能力。文件解析类 Skill 建议提供 `testSample`，否则健康测试只能使用通用样本。
+
+生产环境建议保留以下限制：
+
+```env
+SKILL_RUN_TIMEOUT_MS=120000
+SKILL_RUN_OUTPUT_BYTES=1048576
+SKILL_RUN_CONCURRENCY=2
+PROXY_IMAGE_MAX_BYTES=8388608
+TEMPLATE_IMPORT_MAX_BYTES=52428800
+AVATAR_MAX_BYTES=2097152
+PROMPT_PREVIEW_IMAGE_MAX_BYTES=8388608
+```
+
+安全边界包括：Skill 包上传前检查路径、可疑脚本和违规内容；运行时限制包外文件访问、输入文件数量、超时、输出大小、并发和声明的输入输出契约；生成 SVG 会清理脚本、事件属性、危险链接和不可信外链；头像、提示词预览图、远程图片代理会校验图片 MIME、扩展名、响应大小和真实文件头；PPTX 模板导入会校验扩展名、zip 文件头和大小。
+
+云服务器没有 PowerPoint 原生能力时，模板导入只提取配色、字体层级、版式比例、组件风格和示例页预览等设计 DNA，不承诺 100% 复刻源 PPT。
 
 ## 云端部署
 

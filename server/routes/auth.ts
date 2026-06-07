@@ -24,6 +24,7 @@ import {
 } from '../models/userSession.js';
 import { deleteGeneratedAssetUrl } from '../utils/generatedAssets.js';
 import { generatedAvatarsRoot } from '../utils/storage.js';
+import { assertImageUploadSafe, normalizeContentType } from '../utils/uploadSecurity.js';
 
 const router = Router();
 const DEFAULT_JWT_SECRET = 'your-secret-key-change-in-production';
@@ -54,13 +55,7 @@ const REDIS_URL = process.env.REDIS_URL || process.env.BULLMQ_REDIS_URL || '';
 const AUTH_REDIS_PREFIX = process.env.AUTH_REDIS_PREFIX || 'nexious:auth';
 const EMAIL_CODE_SECRET = process.env.EMAIL_CODE_SECRET || JWT_SECRET;
 
-const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
-const AVATAR_MIME_EXT: Record<string, string> = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-  'image/webp': 'webp',
-  'image/gif': 'gif',
-};
+const AVATAR_MAX_BYTES = Math.max(256 * 1024, Number(process.env.AVATAR_MAX_BYTES || 2 * 1024 * 1024));
 
 const loginAttempts = new Map<string, { count: number; firstAt: number }>();
 const authRequests = new Map<string, { count: number; firstAt: number }>();
@@ -1436,15 +1431,6 @@ router.put(
         });
       }
 
-      const mimeType = req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() || '';
-      const ext = AVATAR_MIME_EXT[mimeType];
-      if (!ext) {
-        return res.status(400).json({
-          success: false,
-          message: '仅支持 JPG、PNG、WEBP 或 GIF 图片'
-        });
-      }
-
       if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
         return res.status(400).json({
           success: false,
@@ -1452,10 +1438,25 @@ router.put(
         });
       }
 
+      let uploadInfo: { extension: string };
+      try {
+        uploadInfo = assertImageUploadSafe(req.body, {
+          label: '头像图片',
+          maxBytes: AVATAR_MAX_BYTES,
+          declaredMime: normalizeContentType(req.headers['content-type']),
+          allowSvg: false,
+        });
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: error instanceof Error ? error.message : '头像图片格式不正确'
+        });
+      }
+
       const oldUser = await getUserById(req.userId);
       const avatarDir = generatedAvatarsRoot;
       await fs.mkdir(avatarDir, { recursive: true });
-      const fileName = `${req.userId}-${Date.now()}-${randomUUID()}.${ext}`;
+      const fileName = `${req.userId}-${Date.now()}-${randomUUID()}.${uploadInfo.extension}`;
       const filePath = path.join(avatarDir, fileName);
       await fs.writeFile(filePath, req.body);
 

@@ -51,6 +51,26 @@ async function ensureSkillSchema() {
         'last_tested_at',
         'ALTER TABLE `skills` ADD COLUMN `last_tested_at` TIMESTAMP NULL DEFAULT NULL AFTER `test_log`'
       );
+      await ensureColumn(
+        'capabilities',
+        'ALTER TABLE `skills` ADD COLUMN `capabilities` JSON DEFAULT NULL AFTER `manifest`'
+      );
+      await ensureColumn(
+        'input_contract',
+        'ALTER TABLE `skills` ADD COLUMN `input_contract` JSON DEFAULT NULL AFTER `capabilities`'
+      );
+      await ensureColumn(
+        'output_contract',
+        'ALTER TABLE `skills` ADD COLUMN `output_contract` JSON DEFAULT NULL AFTER `input_contract`'
+      );
+      await ensureColumn(
+        'test_sample',
+        'ALTER TABLE `skills` ADD COLUMN `test_sample` JSON DEFAULT NULL AFTER `output_contract`'
+      );
+      await ensureColumn(
+        'sandbox_policy',
+        'ALTER TABLE `skills` ADD COLUMN `sandbox_policy` JSON DEFAULT NULL AFTER `test_sample`'
+      );
       await query(
         "UPDATE `skills` SET `test_status` = COALESCE(NULLIF(`test_status`, ''), 'not_tested') WHERE `test_status` IS NULL OR `test_status` = ''"
       );
@@ -75,6 +95,7 @@ const SKILL_SELECT = `
   SELECT
     id, name, description, icon, category, parameters, is_enabled,
     type, runtime, entry, package_path, manifest, dependency_file,
+    capabilities, input_contract, output_contract, test_sample, sandbox_policy,
     install_status, install_log, last_installed_at,
     test_status, test_log, last_tested_at,
     created_at, updated_at
@@ -99,6 +120,11 @@ function normalizeSkill(row: any) {
     is_enabled: Boolean(row.is_enabled),
     parameters: normalizeJson(row.parameters, {}),
     manifest: normalizeJson(row.manifest, null),
+    capabilities: normalizeJson(row.capabilities, []),
+    input_contract: normalizeJson(row.input_contract, null),
+    output_contract: normalizeJson(row.output_contract, null),
+    test_sample: normalizeJson(row.test_sample, null),
+    sandbox_policy: normalizeJson(row.sandbox_policy, null),
   };
 }
 

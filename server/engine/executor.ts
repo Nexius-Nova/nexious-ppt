@@ -4,6 +4,16 @@ import { renderSpecLockMarkdown } from './ppt-exporter.js';
 const IMAGE_INTENT_PATTERN =
   /(配图|图片|插图|图示|示意图|视觉|场景图|海报|照片|封面图|背景图|产品图|架构图|流程图|路线图|信息图|生成图|image|illustration|visual|photo|poster|diagram|infographic)/i;
 
+export interface ImageSlot {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  aspectRatio: number;
+  placement: 'left' | 'right' | 'center' | 'full';
+  fit: 'cover' | 'contain';
+}
+
 export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock): string {
   const { canvas } = spec;
   const specLockMarkdown = renderSpecLockMarkdown({ ...lock, skillExtensions: [] });
@@ -29,7 +39,8 @@ export function buildExecutorPagePrompt(
   slide: SpecSlide,
   spec: DesignSpec,
   lock: SpecLock,
-  imageUrl?: string
+  imageUrl?: string,
+  imageSlot: ImageSlot = calculateImageSlot(slide, spec)
 ): string {
   const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
   const rhythm = lock.pageRhythm[pageKey] || slide.rhythm;
@@ -42,7 +53,7 @@ export function buildExecutorPagePrompt(
     IMAGE_INTENT_PATTERN.test([slide.title, ...slide.bullets, slide.speakerNotes, slide.chartHint].filter(Boolean).join(' '))
   );
   const imageInstruction = imageUrl
-    ? `必须使用这张生成图片：${imageUrl}。请写入 <image href="${imageUrl}" x="..." y="..." width="..." height="..." preserveAspectRatio="xMidYMid slice"/>，并与文字排版协调。`
+    ? `必须使用这张生成图片：${imageUrl}。图片槽位固定为 x=${imageSlot.x}, y=${imageSlot.y}, width=${imageSlot.width}, height=${imageSlot.height}, aspectRatio=${imageSlot.aspectRatio.toFixed(2)}, placement=${imageSlot.placement}。请写入 <image href="${imageUrl}" x="${imageSlot.x}" y="${imageSlot.y}" width="${imageSlot.width}" height="${imageSlot.height}" preserveAspectRatio="xMidYMid ${imageSlot.fit === 'contain' ? 'meet' : 'slice'}"/>。不要改变图片槽位，不要让图片压住标题、要点、编号或图表，不要再画醒目的红色边框、遮挡层、大面积白底占位或重复示意图。`
     : needsVisual
       ? `需要视觉表达：${slide.visualPrompt || slide.title}。当前没有可用图片 URL，请用 SVG 图形、示意框、图示或抽象插画表达，不要写 <image>。`
       : '不使用图片。';
@@ -78,7 +89,24 @@ export function cleanSvgOutput(raw: string): string {
   if (endIdx >= 0 && endIdx < svg.length - 6) {
     svg = svg.slice(0, endIdx + 6);
   }
-  return svg.trim();
+  return sanitizeGeneratedSvg(svg.trim());
+}
+
+export function sanitizeGeneratedSvg(svg: string): string {
+  let result = String(svg || '');
+  result = result.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+  result = result.replace(/<foreignObject\b[\s\S]*?<\/foreignObject>/gi, '');
+  result = result.replace(/<iframe\b[\s\S]*?<\/iframe>/gi, '');
+  result = result.replace(/<object\b[\s\S]*?<\/object>/gi, '');
+  result = result.replace(/<embed\b[\s\S]*?<\/embed>/gi, '');
+  result = result.replace(/<audio\b[\s\S]*?<\/audio>/gi, '');
+  result = result.replace(/<video\b[\s\S]*?<\/video>/gi, '');
+  result = result.replace(/\s+on[a-z]+\s*=\s*(['"])[\s\S]*?\1/gi, '');
+  result = result.replace(/\s+(?:href|xlink:href)\s*=\s*(['"])\s*javascript:[\s\S]*?\1/gi, '');
+  result = result.replace(/\s+(?:href|xlink:href)\s*=\s*(['"])\s*data:(?!image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,)[\s\S]*?\1/gi, '');
+  result = result.replace(/<image\b([^>]*?)\s+(?:href|xlink:href)\s*=\s*(['"])(https?:\/\/(?!localhost(?::\d+)?\/generated-images\/)[^'"]+)\2([^>]*)\/?>/gi, '');
+  result = result.replace(/<use\b[^>]*(?:href|xlink:href)\s*=\s*(['"])\s*(?:https?:|javascript:)[\s\S]*?\1[^>]*\/?>/gi, '');
+  return result.trim();
 }
 
 function escapeAttribute(value: string): string {
@@ -89,26 +117,58 @@ function escapeAttribute(value: string): string {
     .replace(/>/g, '&gt;');
 }
 
-export function ensureImageUsedInSvg(svg: string, slide: SpecSlide, spec: DesignSpec, imageUrl?: string): string {
-  if (!imageUrl || !svg || /<image\b/i.test(svg)) return svg;
-
+export function calculateImageSlot(slide: SpecSlide, spec: DesignSpec): ImageSlot {
   const canvas = spec.canvas;
   const layout = String(slide.layout || '').toLowerCase();
-  const isFull = layout.includes('full') || layout.includes('cover');
-  const isLeftImage = layout.includes('image-text');
-  const margin = Math.round(canvas.width * 0.055);
+  const marginX = Math.round(canvas.width * 0.055);
   const top = Math.round(canvas.height * 0.19);
-  const imageWidth = isFull ? Math.round(canvas.width * 0.46) : Math.round(canvas.width * 0.34);
-  const imageHeight = isFull ? Math.round(canvas.height * 0.64) : Math.round(canvas.height * 0.52);
-  const x = isLeftImage ? margin : canvas.width - margin - imageWidth;
-  const y = isFull ? Math.round(canvas.height * 0.22) : top;
-  const imageGroup = `
-  <g id="generated-image">
-    <rect x="${x - 8}" y="${y - 8}" width="${imageWidth + 16}" height="${imageHeight + 16}" fill="${spec.visualTheme.colors.surface}" stroke="${spec.visualTheme.colors.border}" stroke-width="1"/>
-    <image href="${escapeAttribute(imageUrl)}" x="${x}" y="${y}" width="${imageWidth}" height="${imageHeight}" preserveAspectRatio="xMidYMid slice"/>
-  </g>`;
+  const contentBottom = Math.round(canvas.height * 0.88);
+  const contentHeight = contentBottom - top;
 
+  if (layout.includes('full') || layout.includes('cover')) {
+    const width = Math.round(canvas.width * 0.84);
+    const height = Math.round(canvas.height * 0.62);
+    const x = Math.round((canvas.width - width) / 2);
+    const y = Math.round(canvas.height * 0.2);
+    return { x, y, width, height, aspectRatio: width / height, placement: 'center', fit: 'cover' };
+  }
+
+  if (layout.includes('image-text')) {
+    const width = Math.round(canvas.width * 0.38);
+    const height = Math.round(contentHeight * 0.72);
+    return { x: marginX, y: top, width, height, aspectRatio: width / height, placement: 'left', fit: 'cover' };
+  }
+
+  if (layout.includes('text-image') || layout.includes('content-image')) {
+    const width = Math.round(canvas.width * 0.38);
+    const height = Math.round(contentHeight * 0.72);
+    const x = canvas.width - marginX - width;
+    return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: 'cover' };
+  }
+
+  const width = Math.round(canvas.width * 0.34);
+  const height = Math.round(contentHeight * 0.62);
+  const x = canvas.width - marginX - width;
+  return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: 'cover' };
+}
+
+function buildGeneratedImageGroup(slide: SpecSlide, spec: DesignSpec, imageUrl: string, imageSlot = calculateImageSlot(slide, spec)): string {
+  const preserveAspectRatio = imageSlot.fit === 'contain' ? 'xMidYMid meet' : 'xMidYMid slice';
+  return `
+  <g id="generated-image">
+    <rect x="${imageSlot.x - 8}" y="${imageSlot.y - 8}" width="${imageSlot.width + 16}" height="${imageSlot.height + 16}" fill="${spec.visualTheme.colors.surface}" stroke="${spec.visualTheme.colors.border}" stroke-width="1"/>
+    <image href="${escapeAttribute(imageUrl)}" x="${imageSlot.x}" y="${imageSlot.y}" width="${imageSlot.width}" height="${imageSlot.height}" preserveAspectRatio="${preserveAspectRatio}"/>
+  </g>`;
+}
+
+export function ensureImageUsedInSvg(svg: string, slide: SpecSlide, spec: DesignSpec, imageUrl?: string): string {
+  if (!imageUrl || !svg) return svg;
+  const imageGroup = buildGeneratedImageGroup(slide, spec, imageUrl);
   const closeIndex = svg.toLowerCase().lastIndexOf('</svg>');
   if (closeIndex < 0) return svg;
-  return `${svg.slice(0, closeIndex)}${imageGroup}\n${svg.slice(closeIndex)}`;
+
+  const cleanedSvg = svg.replace(/<g\b[^>]*\bid\s*=\s*(['"])generated-image\1[^>]*>[\s\S]*?<\/g>/gi, '');
+  const cleanedCloseIndex = cleanedSvg.toLowerCase().lastIndexOf('</svg>');
+  if (cleanedCloseIndex < 0) return svg;
+  return `${cleanedSvg.slice(0, cleanedCloseIndex)}${imageGroup}\n${cleanedSvg.slice(cleanedCloseIndex)}`;
 }

@@ -10,3 +10,4 @@ export { default as UiTabs } from './UiTabs.vue';
 export { default as UiAlert } from './UiAlert.vue';
 export { default as UiEmpty } from './UiEmpty.vue';
 export { default as UiDivider } from './UiDivider.vue';
+export { default as UiFeedbackState } from './UiFeedbackState.vue';

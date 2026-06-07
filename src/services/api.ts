@@ -667,6 +667,7 @@ export interface QueueJobSnapshot {
   message?: string;
   errorMessage?: string;
   result?: any;
+  projectState?: any;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -866,6 +867,7 @@ export const aiApi = {
       imageModelId?: string | null;
       templateAsset?: TemplateAsset | null;
       promptContent?: string;
+      promptId?: string | null;
       skills: Array<{ id: string; name: string; instruction?: string }>;
     },
     callbacks: StreamCallbacks
@@ -942,6 +944,7 @@ export const aiApi = {
       imageModelId?: string | null;
       templateAsset?: TemplateAsset | null;
       promptContent?: string;
+      promptId?: string | null;
       skills: Array<{ id: string; name: string; instruction?: string }>;
     };
     projectState?: any;
@@ -1109,6 +1112,11 @@ export interface Skill {
   entry: string | null;
   package_path: string | null;
   manifest: Record<string, any> | null;
+  capabilities?: string[];
+  input_contract?: Record<string, any> | null;
+  output_contract?: Record<string, any> | null;
+  test_sample?: Record<string, any> | null;
+  sandbox_policy?: Record<string, any> | null;
   dependency_file: string | null;
   install_status: 'not_required' | 'pending' | 'installing' | 'ready' | 'failed' | string;
   install_log: string | null;
@@ -1140,6 +1148,10 @@ export interface SkillPackagePreview {
   fileCount: number;
   totalSize: number;
   instructionPreview: string;
+  capabilities?: string[];
+  inputContract?: Record<string, any> | null;
+  outputContract?: Record<string, any> | null;
+  hasTestSample?: boolean;
   adaptationPlan: string[];
   files: SkillPackagePreviewFile[];
 }

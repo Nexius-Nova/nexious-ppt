@@ -13,6 +13,7 @@ import {
   buildExecutorSystemPrompt,
   buildSpecLock,
   buildStrategistPrompt,
+  calculateImageSlot,
   cleanSvgOutput,
   ensureImageUsedInSvg,
   parseStrategistOutput,
@@ -20,9 +21,10 @@ import {
 import { streamText } from './textModel.js';
 import { generateImage, persistDataImage } from '../routes/ai.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
-import type { DesignSpec, SpecLock, SpecSlide, StrategistInput } from '../engine/index.js';
+import type { DesignSpec, ImageSlot, SpecLock, SpecSlide, StrategistInput } from '../engine/index.js';
 import { exportWithNexiousPpt, type PptExportOptions, type PptExportPage } from '../engine/ppt-exporter.js';
 import { generatedExportsRoot } from '../utils/storage.js';
+import { deriveWorkflowTransition, workflowStepProgress, workflowStepStatus } from './workflowStateMachine.js';
 
 type QueuedJobKind = 'generate' | 'export';
 type QueuedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -40,6 +42,7 @@ export interface QueuedJobSnapshot {
   message?: string;
   errorMessage?: string;
   result?: any;
+  projectState?: any;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -123,6 +126,7 @@ interface ServerImage {
   attempt?: number;
   error?: boolean;
   errorMessage?: string;
+  imageSlot?: ImageSlot;
 }
 
 const jobs = new Map<string, QueuedJob>();
@@ -135,6 +139,7 @@ let activeExportJobs = 0;
 const QUEUE_DRIVER = String(process.env.QUEUE_DRIVER || '').toLowerCase();
 const REDIS_URL = process.env.REDIS_URL || process.env.BULLMQ_REDIS_URL || '';
 const USE_REDIS_QUEUE = Boolean(REDIS_URL) && QUEUE_DRIVER !== 'memory';
+const REQUIRE_REDIS_QUEUE = process.env.NODE_ENV === 'production' && QUEUE_DRIVER !== 'memory';
 const REDIS_KEY_PREFIX = process.env.REDIS_QUEUE_PREFIX || 'nexious:ppt';
 const REDIS_SNAPSHOT_TTL_SECONDS = Math.max(3600, Number(process.env.QUEUE_SNAPSHOT_TTL_SECONDS || 60 * 60 * 24));
 const REDIS_RECOMMENDED_VERSION = '6.2.0';
@@ -259,6 +264,9 @@ async function precheckRedisQueue() {
       if (REDIS_STRICT_PRECHECK) {
         redisQueuePrecheckFailed = true;
         redisQueuePrecheckRetryAt = Date.now() + 60 * 1000;
+        if (REQUIRE_REDIS_QUEUE) {
+          throw new Error(`${message}生产环境必须使用 Redis ${REDIS_RECOMMENDED_VERSION}+ 且 maxmemory-policy=noeviction。`);
+        }
         if (!redisQueuePrecheckWarningLogged) {
           redisQueuePrecheckWarningLogged = true;
           console.warn(`${message}已按 REDIS_QUEUE_STRICT=true 降级到内存队列。`);
@@ -275,6 +283,11 @@ async function precheckRedisQueue() {
   } catch (error) {
     redisQueuePrecheckFailed = true;
     redisQueuePrecheckRetryAt = Date.now() + 30 * 1000;
+    if (REQUIRE_REDIS_QUEUE) {
+      throw error instanceof Error
+        ? error
+        : new Error('生产环境 Redis 队列预检失败');
+    }
     console.warn('Redis 队列预检失败，已降级到内存队列，30 秒后会自动重试。', error);
     return false;
   } finally {
@@ -326,9 +339,19 @@ async function isRedisJobCancelled(id: string) {
 }
 
 async function ensureRedisQueueReady() {
-  if (!USE_REDIS_QUEUE) return false;
+  if (!USE_REDIS_QUEUE) {
+    if (REQUIRE_REDIS_QUEUE) {
+      throw new Error('生产环境必须配置 REDIS_URL 并启用 Redis 队列，或显式设置 QUEUE_DRIVER=memory 才允许使用内存队列。');
+    }
+    return false;
+  }
   if (redisQueueReady) return true;
-  if (redisQueuePrecheckFailed) return false;
+  if (redisQueuePrecheckFailed) {
+    if (REQUIRE_REDIS_QUEUE) {
+      throw new Error('生产环境 Redis 队列预检失败，已阻止任务入队。');
+    }
+    return false;
+  }
   if (redisQueueInitPromise) return redisQueueInitPromise;
 
   redisQueueInitPromise = initializeRedisQueue().finally(() => {
@@ -403,6 +426,12 @@ async function initializeRedisQueue() {
     return true;
   } catch (error) {
     redisQueueReady = false;
+    if (REQUIRE_REDIS_QUEUE) {
+      await shutdownRedisQueue().catch(() => {});
+      throw error instanceof Error
+        ? error
+        : new Error('生产环境 Redis 队列初始化失败');
+    }
     console.warn('Redis 队列不可用，已回退到内存队列。', error);
     await shutdownRedisQueue().catch(() => {});
     return false;
@@ -451,7 +480,11 @@ class QueueJobCancelledError extends Error {
 
 function snapshotJob(job: QueuedJob): QueuedJobSnapshot {
   const { payload: _payload, ...rest } = job as any;
-  return { ...rest };
+  const snapshot: any = { ...rest };
+  if (job.kind === 'generate') {
+    snapshot.projectState = mergeQueueProjectState((job as GenerateQueuedJob).payload.projectState, job as GenerateQueuedJob);
+  }
+  return snapshot;
 }
 
 function buildQueueJobState(job: QueuedJob) {
@@ -465,52 +498,47 @@ function buildQueueJobState(job: QueuedJob) {
   };
 }
 
-function mapWorkflowStepStatus(
-  stepId: string,
-  job: GenerateQueuedJob,
-  result: any
-): 'idle' | 'running' | 'done' {
-  if (job.status === 'failed') return 'idle';
-  if (job.status === 'completed') return 'done';
-  if (job.status === 'cancelled') return 'idle';
-
-  if (stepId === 'input') return 'done';
-  if (stepId === 'outline') {
-    if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') return 'running';
-    return result?.spec || Array.isArray(result?.outline) && result.outline.length > 0 ? 'done' : 'idle';
-  }
-  if (stepId === 'images') {
-    if (job.phase === 'images') return 'running';
-    if (job.phase === 'layout' || job.phase === 'completed') return 'done';
-    return 'idle';
-  }
-  if (stepId === 'layout') {
-    if (job.phase === 'layout') return 'running';
-    if (job.phase === 'completed') return 'done';
-    return 'idle';
-  }
-  if (stepId === 'preview') return job.phase === 'completed' ? 'done' : 'idle';
-  return 'idle';
+function normalizeWorkflowContextValue(value: unknown) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text && text !== 'auto' ? text : null;
 }
 
-function stepProgressFromQueue(step: any, job: GenerateQueuedJob, result: any) {
-  if (job.status === 'completed') return 100;
-  if (job.status === 'cancelled') return Math.max(0, Math.min(99, Number(step?.progress) || 0));
-  if (step?.id === 'input') return 100;
-  if (step?.id === 'outline') {
-    if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') return Math.min(99, job.progress);
-    return result?.spec || Array.isArray(result?.outline) && result.outline.length > 0 ? 100 : Number(step?.progress) || 0;
-  }
-  if (step?.id === 'images') {
-    if (job.phase === 'images') return Math.min(99, job.progress);
-    if (job.phase === 'layout' || job.phase === 'completed') return 100;
-  }
-  if (step?.id === 'layout') {
-    if (job.phase === 'layout') return Math.min(99, job.progress);
-    if (job.phase === 'completed') return 100;
-  }
-  if (step?.id === 'preview') return job.phase === 'completed' ? 100 : Number(step?.progress) || 0;
-  return Number(step?.progress) || 0;
+function buildQueueWorkflowContext(base: any, job: GenerateQueuedJob, currentPhase = job.phase) {
+  const existing = base?.workflowContext && typeof base.workflowContext === 'object' ? base.workflowContext : {};
+  const input = job.payload.input;
+  const selectedSkills = Array.isArray(input.skills)
+    ? input.skills
+        .map((skill: any) => normalizeWorkflowContextValue(skill?.id || skill?.name))
+        .filter((id): id is string => Boolean(id))
+    : Array.isArray(existing.selectedSkills)
+      ? existing.selectedSkills.map((id: any) => String(id)).filter(Boolean)
+      : [];
+  const templateId = normalizeWorkflowContextValue(input.templateAsset?.id)
+    || normalizeWorkflowContextValue(existing.templateId)
+    || null;
+  const templateName = normalizeWorkflowContextValue(input.templateAsset?.name)
+    || normalizeWorkflowContextValue(input.template)
+    || normalizeWorkflowContextValue(existing.templateName)
+    || null;
+
+  return {
+    ...existing,
+    projectId: job.projectId,
+    userId: job.userId,
+    jobId: job.id,
+    currentPhase,
+    modelConfig: {
+      textModelId: normalizeWorkflowContextValue(input.textModelId) || normalizeWorkflowContextValue(existing.modelConfig?.textModelId),
+      imageModelId: normalizeWorkflowContextValue(input.imageModelId) || normalizeWorkflowContextValue(existing.modelConfig?.imageModelId),
+    },
+    templateId,
+    templateName,
+    promptId: normalizeWorkflowContextValue((input as any).promptId) || normalizeWorkflowContextValue(existing.promptId),
+    selectedSkills,
+    startedAt: Number(existing.startedAt || 0) || job.createdAt,
+    updatedAt: Date.now(),
+  };
 }
 
 function mergeQueueProjectState(base: any, job: GenerateQueuedJob) {
@@ -535,10 +563,12 @@ function mergeQueueProjectState(base: any, job: GenerateQueuedJob) {
   const baseSteps = Array.isArray(base?.steps) ? base.steps : [];
   const steps = baseSteps.map((step: any) => ({
     ...step,
-    status: mapWorkflowStepStatus(String(step.id || ''), job, result),
-    progress: stepProgressFromQueue(step, job, result),
+    status: workflowStepStatus(String(step.id || ''), job, result),
+    progress: workflowStepProgress(step, job, result),
   }));
-  const terminal = job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled';
+  const transition = deriveWorkflowTransition(job);
+  const terminal = transition.terminal;
+  const workflowContext = buildQueueWorkflowContext(base, job);
 
   return {
     ...(base || {}),
@@ -546,16 +576,17 @@ function mergeQueueProjectState(base: any, job: GenerateQueuedJob) {
     images,
     designSpec: result.spec || base?.designSpec || null,
     specLock: result.lock || base?.specLock || null,
+    workflowContext,
     svgPages,
     steps,
     activeQueueJob: terminal ? null : buildQueueJobState(job),
-    workflowActive: !terminal,
-    paused: job.status === 'cancelled',
-    resumeStage: job.status === 'cancelled'
-      ? (job.phase === 'layout' || job.phase === 'images' || job.phase === 'outline' ? job.phase : base?.lastActiveStep || base?.resumeStage || null)
+    workflowActive: transition.active,
+    paused: transition.paused,
+    resumeStage: transition.paused
+      ? (transition.phase === 'layout' || transition.phase === 'images' || transition.phase === 'outline' ? transition.phase : base?.lastActiveStep || base?.resumeStage || null)
       : base?.resumeStage || null,
-    lastActiveStep: job.phase === 'completed' ? 'preview' : job.phase,
-    waitingForImageRetry: job.status === 'failed' && job.phase === 'images',
+    lastActiveStep: transition.lastActiveStep,
+    waitingForImageRetry: transition.waitingForImageRetry,
   };
 }
 
@@ -983,7 +1014,7 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   const result = { spec, lock, outline: spec.outline, images, svgPages };
   await updateProjectForUser(parseOwnedProjectId(job.projectId), job.userId, {
     status: 'completed',
-    state: mergeProjectState(job.payload.projectState, result),
+    state: mergeProjectState(job.payload.projectState, result, job),
   }).catch((error) => console.warn('保存生成结果到项目失败:', error));
 
   await updateJob(job, {
@@ -1013,8 +1044,15 @@ function slideNeedsImageServer(slide: SpecSlide) {
   return IMAGE_INTENT_PATTERN.test(text);
 }
 
-function imagePromptForSlide(slide: SpecSlide) {
-  return slide.visualPrompt || [slide.title, ...(slide.bullets || [])].filter(Boolean).join('，');
+function imagePromptForSlide(slide: SpecSlide, spec?: DesignSpec) {
+  const basePrompt = slide.visualPrompt || [slide.title, ...(slide.bullets || [])].filter(Boolean).join('，');
+  if (!spec) return basePrompt;
+  const slot = calculateImageSlot(slide, spec);
+  return [
+    basePrompt,
+    `最终用于第 ${slide.pageNumber} 页 PPT 图片槽位，槽位坐标 x=${slot.x}, y=${slot.y}, width=${slot.width}, height=${slot.height}, 比例 ${slot.aspectRatio.toFixed(2)}:1，位置 ${slot.placement}`,
+    '请按该槽位比例构图，主体居中并填满画面，避免大面积留白、边缘裁切重要内容、文字水印和截图边框'
+  ].join('。');
 }
 
 function findReadyServerImage(images: any[], slideId: string) {
@@ -1074,13 +1112,15 @@ async function loadImageModelConfig(job: GenerateQueuedJob): Promise<ImageModelC
 
 async function generateSlideImageForQueue(
   job: GenerateQueuedJob,
+  spec: DesignSpec,
   slide: SpecSlide,
   config: ImageModelConfig,
   attempt: number
 ): Promise<ServerImage> {
   await assertJobActive(job);
-  const prompt = imagePromptForSlide(slide);
-  const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, job.payload.input.imageStyle, config.baseUrl);
+  const imageSlot = calculateImageSlot(slide, spec);
+  const prompt = imagePromptForSlide(slide, spec);
+  const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, job.payload.input.imageStyle, config.baseUrl, imageSlot);
   await assertJobActive(job);
   const url = await persistDataImage(rawImageUrl, slide.id);
 
@@ -1093,11 +1133,13 @@ async function generateSlideImageForQueue(
     url,
     selected: true,
     attempt,
+    imageSlot,
   };
 }
 
 async function generateSlideImageWithAutoRetry(
   job: GenerateQueuedJob,
+  spec: DesignSpec,
   slide: SpecSlide,
   config: ImageModelConfig,
   progress: number
@@ -1112,7 +1154,7 @@ async function generateSlideImageWithAutoRetry(
         progress,
         message: attempt === 1 ? `正在生成图片：${slide.title}` : `正在自动重试图片：${slide.title}`,
       });
-      return await generateSlideImageForQueue(job, slide, config, attempt);
+      return await generateSlideImageForQueue(job, spec, slide, config, attempt);
     } catch (error) {
       lastError = error;
       if (attempt < IMAGE_GENERATION_ATTEMPTS) {
@@ -1129,12 +1171,13 @@ async function generateSlideImageWithAutoRetry(
     id: `${slide.id}-image-1`,
     slideId: slide.id,
     title: slide.title,
-    prompt: imagePromptForSlide(slide),
+    prompt: imagePromptForSlide(slide, spec),
     style: job.payload.input.imageStyle,
     url: '',
     selected: true,
     error: true,
     errorMessage: lastError instanceof Error ? lastError.message : '图片生成失败',
+    imageSlot: calculateImageSlot(slide, spec),
   };
 }
 
@@ -1161,7 +1204,7 @@ async function maybeGenerateImages(
       await assertJobActive(job);
       const slide = slides[cursor++];
       const progress = 30 + Math.round((completed / Math.max(1, slides.length)) * 12);
-      const image = await generateSlideImageWithAutoRetry(job, slide, imageConfig, progress);
+      const image = await generateSlideImageWithAutoRetry(job, spec, slide, imageConfig, progress);
       await assertJobActive(job);
       upsertServerImage(results, image);
       completed += 1;
@@ -1206,7 +1249,7 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
       message: `第 ${slide.pageNumber} 页缺少可用图片，正在自动重试：${slide.title}`,
       result: { spec, lock, outline: spec.outline, images, svgPages: [] },
     });
-    const image = await generateSlideImageWithAutoRetry(job, slide, imageConfig, 45);
+    const image = await generateSlideImageWithAutoRetry(job, spec, slide, imageConfig, 45);
     await assertJobActive(job);
     upsertServerImage(images, image);
     await updateJob(job, {
@@ -1253,7 +1296,7 @@ async function ensureServerImageForLayout(
     result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
   });
 
-  const retryImage = await generateSlideImageWithAutoRetry(job, slide, imageConfig, 45);
+  const retryImage = await generateSlideImageWithAutoRetry(job, spec, slide, imageConfig, 45);
   await assertJobActive(job);
   upsertServerImage(images, retryImage);
   await updateJob(job, {
@@ -1358,8 +1401,9 @@ async function generatePageSvg(
     forbidden: (lock as any).forbidden || DEFAULT_FORBIDDEN,
   } as any;
 
+  const imageSlot = calculateImageSlot(slide, spec);
   const systemPrompt = buildExecutorSystemPrompt(slimSpec, slimLock);
-  const userPrompt = buildExecutorPagePrompt(slide, slimSpec, slimLock, imageUrl);
+  const userPrompt = buildExecutorPagePrompt(slide, slimSpec, slimLock, imageUrl, imageSlot);
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1411,7 +1455,11 @@ async function runExportJob(job: ExportQueuedJob) {
   });
 }
 
-function mergeProjectState(base: any, result: { spec: DesignSpec; lock: SpecLock; outline: SpecSlide[]; images: any[]; svgPages: any[] }) {
+function mergeProjectState(
+  base: any,
+  result: { spec: DesignSpec; lock: SpecLock; outline: SpecSlide[]; images: any[]; svgPages: any[] },
+  job?: GenerateQueuedJob
+) {
   return {
     ...(base || {}),
     outline: result.outline.map((slide) => ({
@@ -1426,6 +1474,9 @@ function mergeProjectState(base: any, result: { spec: DesignSpec; lock: SpecLock
     images: result.images,
     designSpec: result.spec,
     specLock: result.lock,
+    workflowContext: job
+      ? buildQueueWorkflowContext(base, job, 'completed')
+      : base?.workflowContext || null,
     svgPages: result.svgPages,
     workflowActive: false,
     paused: false,

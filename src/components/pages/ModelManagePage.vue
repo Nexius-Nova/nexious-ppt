@@ -21,6 +21,7 @@ import { computed, ref, onMounted } from 'vue';
 import UiAlert from '@/components/ui/UiAlert.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
+import UiFeedbackState from '@/components/ui/UiFeedbackState.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
@@ -42,7 +43,8 @@ const {
   activeImageModel,
   isFullyConfigured,
   loading,
-  initialized
+  initialized,
+  loadError
 } = storeToRefs(apiKeyStore);
 
 const activeTab = ref<ModelType>('text');
@@ -272,6 +274,16 @@ function getProviderLabel(model: ManagedModel) {
         </div>
 
         <PageLoadingState v-if="loading" compact title="正在加载模型配置" description="正在同步文本和图像模型连接" />
+
+        <UiFeedbackState
+          v-else-if="loadError && textModels.length === 0 && imageModels.length === 0"
+          tone="error"
+          title="模型配置加载失败"
+          :description="loadError"
+          action-label="重试"
+          :loading="loading"
+          @action="apiKeyStore.fetchApiKeys"
+        />
 
         <div v-else-if="currentModels.length === 0" class="empty-models">
           <component :is="activeTab === 'text' ? Cpu : Image" :size="28" />

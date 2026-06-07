@@ -3,6 +3,7 @@ import { defineStore } from 'pinia';
 import type { ImageModelConfig, TextModelConfig } from '@/types/agent';
 import { apiKeyApi, type ApiKey } from '@/services/api';
 import { useToastStore } from './toastStore';
+import { translateErrorMessage } from '@/utils/errorMessages';
 
 function mapApiKeyToLocal(apiKey: ApiKey): TextModelConfig | ImageModelConfig {
   return {
@@ -27,6 +28,7 @@ export const useApiKeyStore = defineStore('apiKey', () => {
   const activeImageModelId = ref<string | null>(null);
   const loading = ref(false);
   const initialized = ref(false);
+  const loadError = ref('');
 
   const activeTextModel = computed(() => textModels.value.find((model) => model.id === activeTextModelId.value) || textModels.value[0]);
   const activeImageModel = computed(() => imageModels.value.find((model) => model.id === activeImageModelId.value) || imageModels.value[0]);
@@ -39,6 +41,7 @@ export const useApiKeyStore = defineStore('apiKey', () => {
     try {
       const response = await apiKeyApi.getAll();
       if (response.success && response.data) {
+        loadError.value = '';
         const serverTextModels = response.data.filter((key) => key.type === 'text').map(mapApiKeyToLocal) as TextModelConfig[];
         const serverImageModels = response.data.filter((key) => key.type === 'image').map(mapApiKeyToLocal) as ImageModelConfig[];
 
@@ -50,8 +53,11 @@ export const useApiKeyStore = defineStore('apiKey', () => {
         activeTextModelId.value = defaultText?.id || serverTextModels[0]?.id || null;
         activeImageModelId.value = defaultImage?.id || serverImageModels[0]?.id || null;
         initialized.value = true;
+      } else {
+        loadError.value = translateErrorMessage(response.message, '加载模型配置失败');
       }
     } catch (error) {
+      loadError.value = translateErrorMessage(error, '加载模型配置失败');
       console.error('获取 API Key 失败：', error);
     } finally {
       loading.value = false;
@@ -291,6 +297,7 @@ export const useApiKeyStore = defineStore('apiKey', () => {
     imageModels.value = [];
     activeTextModelId.value = null;
     activeImageModelId.value = null;
+    loadError.value = '';
     initialized.value = false;
   }
 
@@ -306,6 +313,7 @@ export const useApiKeyStore = defineStore('apiKey', () => {
     isFullyConfigured,
     loading,
     initialized,
+    loadError,
     fetchApiKeys,
     addTextModel,
     addImageModel,

@@ -9,11 +9,14 @@ import { resolveGenerationApiKey } from '../services/modelSelection.js';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { buildOpenAIEndpoint, normalizeOpenAIBaseUrl } from '../utils/openaiUrl.js';
 import { generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
+import { assertImageUploadSafe, normalizeContentType } from '../utils/uploadSecurity.js';
 
 const router = Router();
 
 const GENERATED_IMAGE_DIR = generatedImagesRoot;
 const PUBLIC_BASE_URL = publicBaseUrl();
+const MAX_PROXY_IMAGE_BYTES = Math.max(1024 * 1024, Number(process.env.PROXY_IMAGE_MAX_BYTES || 8 * 1024 * 1024));
+const IMAGE_GENERATION_SIZE = process.env.IMAGE_GENERATION_SIZE || '1024x1024';
 
 interface Message {
   role: 'system' | 'user' | 'assistant';
@@ -273,10 +276,19 @@ async function generateWithOpenAIProtocol(
   prompt: string,
   style: string,
   baseUrl: string,
-  config: ImageProviderConfig
+  config: ImageProviderConfig,
+  imageSlot?: { width: number; height: number; aspectRatio: number; placement?: string }
 ): Promise<string> {
   const url = buildOpenAIEndpoint(baseUrl, '/images/generations', config.defaultBaseUrl);
-  const fullPrompt = `${prompt}，${getStylePrompt(style)}，高质量，适合PPT展示`.slice(0, 4000);
+  const slotPrompt = imageSlot
+    ? `最终会放入 PPT 图片槽位：${Math.round(imageSlot.width)}x${Math.round(imageSlot.height)}，比例 ${imageSlot.aspectRatio.toFixed(2)}:1，位置 ${imageSlot.placement || 'content'}。请按该比例组织构图，主体居中并填满槽位，四周不要留大空白，避免重要内容贴边，适合被 cover 裁切。`
+    : '横向幻灯片插图构图，主体居中且填满画面，不要大面积空白边距。';
+  const fullPrompt = [
+    prompt,
+    getStylePrompt(style),
+    slotPrompt,
+    '高质量，适合 PPT 展示，不要文字水印，不要截图边框'
+  ].join('，').slice(0, 4000);
 
   const response = await fetchWithRetry(url, {
     method: 'POST',
@@ -288,7 +300,7 @@ async function generateWithOpenAIProtocol(
       model: model || config.defaultModel,
       prompt: fullPrompt,
       n: 1,
-      size: '1024x1024',
+      size: IMAGE_GENERATION_SIZE,
       quality: 'medium',
     }),
   });
@@ -305,13 +317,14 @@ export async function generateImage(
   model: string,
   prompt: string,
   style: string,
-  baseUrl: string
+  baseUrl: string,
+  imageSlot?: { width: number; height: number; aspectRatio: number; placement?: string }
 ): Promise<string> {
   const effectiveProvider = resolveProvider(provider, model);
   const config = IMAGE_PROVIDERS[effectiveProvider] || IMAGE_PROVIDERS.openai;
   const effectiveModel = model || config.defaultModel;
 
-  return generateWithOpenAIProtocol(apiKey, effectiveModel, prompt, style, baseUrl, config);
+  return generateWithOpenAIProtocol(apiKey, effectiveModel, prompt, style, baseUrl, config, imageSlot);
 }
 
 async function streamOpenAI(
@@ -734,13 +747,37 @@ router.get('/proxy-image', authMiddleware, async (req: AuthRequest, res: Respons
       return res.status(400).json({ success: false, message: '图片地址不允许代理' });
     }
 
-    const response = await fetch(decodedUrl);
+    const response = await fetch(decodedUrl, { signal: AbortSignal.timeout(10000) });
     if (!response.ok) {
       return res.status(502).json({ success: false, message: `Image server returned ${response.status}` });
     }
 
+    const contentType = normalizeContentType(response.headers.get('content-type') || 'image/png');
+    if (!/^image\/(?:png|jpe?g|webp|gif|svg\+xml)\b/i.test(contentType)) {
+      return res.status(415).json({ success: false, message: '代理资源不是受支持的图片类型' });
+    }
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > MAX_PROXY_IMAGE_BYTES) {
+      return res.status(413).json({ success: false, message: '图片过大，已拒绝代理' });
+    }
+
     const buffer = Buffer.from(await response.arrayBuffer());
-    const contentType = response.headers.get('content-type') || 'image/png';
+    if (buffer.byteLength > MAX_PROXY_IMAGE_BYTES) {
+      return res.status(413).json({ success: false, message: '图片过大，已拒绝代理' });
+    }
+    try {
+      assertImageUploadSafe(buffer, {
+        label: '代理图片',
+        maxBytes: MAX_PROXY_IMAGE_BYTES,
+        declaredMime: contentType,
+        allowSvg: true,
+      });
+    } catch (error) {
+      return res.status(415).json({
+        success: false,
+        message: error instanceof Error ? error.message : '代理资源不是受支持的图片类型'
+      });
+    }
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'public, max-age=86400');

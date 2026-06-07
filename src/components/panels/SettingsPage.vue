@@ -10,6 +10,7 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiAlert from '@/components/ui/UiAlert.vue';
 import UiDivider from '@/components/ui/UiDivider.vue';
+import UiFeedbackState from '@/components/ui/UiFeedbackState.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useApiKeyStore } from '@/stores/apiKeyStore';
 import { useToastStore } from '@/stores/toastStore';
@@ -32,7 +33,8 @@ const {
   isImageModelConfigured,
   isFullyConfigured,
   loading,
-  initialized
+  initialized,
+  loadError
 } = storeToRefs(apiKeyStore);
 
 const activeTab = ref<'text' | 'image'>('text');
@@ -304,6 +306,15 @@ async function testImageModel() {
 
     <template v-if="activeTab === 'text'">
       <PageLoadingState v-if="loading" compact title="正在加载文本模型" description="正在同步文本模型配置" />
+      <UiFeedbackState
+        v-else-if="loadError && textModels.length === 0 && imageModels.length === 0"
+        tone="error"
+        title="模型配置加载失败"
+        :description="loadError"
+        action-label="重试"
+        :loading="loading"
+        @action="apiKeyStore.fetchApiKeys"
+      />
       
       <div v-else class="model-list">
         <div 
@@ -539,6 +550,15 @@ async function testImageModel() {
 
     <template v-if="activeTab === 'image'">
       <PageLoadingState v-if="loading" compact title="正在加载图像模型" description="正在同步图像模型配置" />
+      <UiFeedbackState
+        v-else-if="loadError && textModels.length === 0 && imageModels.length === 0"
+        tone="error"
+        title="模型配置加载失败"
+        :description="loadError"
+        action-label="重试"
+        :loading="loading"
+        @action="apiKeyStore.fetchApiKeys"
+      />
       
       <div v-else class="model-list">
         <div 

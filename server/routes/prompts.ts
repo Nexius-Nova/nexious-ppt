@@ -6,16 +6,11 @@ import { authMiddleware, AuthRequest } from './auth.js';
 import { query } from '../db/connection.js';
 import { deleteGeneratedAssetUrl } from '../utils/generatedAssets.js';
 import { generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
+import { assertImageUploadSafe, decodeBase64Upload } from '../utils/uploadSecurity.js';
 
 const router = Router();
 const PROMPT_PREVIEW_DIR = path.join(generatedImagesRoot, 'prompt-previews');
-const MAX_PREVIEW_IMAGE_BYTES = 8 * 1024 * 1024;
-const PREVIEW_IMAGE_TYPES: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'image/gif': 'gif',
-};
+const MAX_PREVIEW_IMAGE_BYTES = Math.max(512 * 1024, Number(process.env.PROMPT_PREVIEW_IMAGE_MAX_BYTES || 8 * 1024 * 1024));
 
 function publicGeneratedImageUrl(pathname: string) {
   return `${publicBaseUrl()}${pathname.startsWith('/') ? pathname : `/${pathname}`}`;
@@ -54,24 +49,36 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 
 router.post('/preview-image', async (req: AuthRequest, res: Response) => {
   try {
-    const { dataUrl } = req.body as { filename?: string; dataUrl?: string };
+    const { filename, dataUrl } = req.body as { filename?: string; dataUrl?: string };
     if (!dataUrl || typeof dataUrl !== 'string') {
       return res.status(400).json({ success: false, message: '请上传有效的预览图' });
     }
 
-    const match = dataUrl.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
+    const match = dataUrl.match(/^data:(image\/[A-Za-z0-9.+-]+);base64,/);
     if (!match) {
       return res.status(400).json({ success: false, message: '预览图仅支持 PNG、JPG、WEBP 或 GIF 格式' });
     }
 
-    const [, mimeType, base64Data] = match;
-    const buffer = Buffer.from(base64Data, 'base64');
-    if (buffer.length === 0 || buffer.length > MAX_PREVIEW_IMAGE_BYTES) {
-      return res.status(400).json({ success: false, message: '预览图大小不能超过 8MB' });
+    let buffer: Buffer;
+    let uploadInfo: { extension: string };
+    try {
+      buffer = decodeBase64Upload(dataUrl, '预览图');
+      uploadInfo = assertImageUploadSafe(buffer, {
+        label: '预览图',
+        maxBytes: MAX_PREVIEW_IMAGE_BYTES,
+        declaredMime: match[1],
+        filename,
+        allowSvg: false,
+      });
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error instanceof Error ? error.message : '预览图格式不正确'
+      });
     }
 
     await fs.mkdir(PROMPT_PREVIEW_DIR, { recursive: true });
-    const fileName = `${req.userId || 'user'}-${Date.now()}-${randomUUID()}.${PREVIEW_IMAGE_TYPES[mimeType]}`;
+    const fileName = `${req.userId || 'user'}-${Date.now()}-${randomUUID()}.${uploadInfo.extension}`;
     await fs.writeFile(path.join(PROMPT_PREVIEW_DIR, fileName), buffer);
 
     const previewPath = `/generated-images/prompt-previews/${fileName}`;

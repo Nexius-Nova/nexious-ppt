@@ -16,6 +16,7 @@ import {
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
+import UiFeedbackState from '@/components/ui/UiFeedbackState.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
@@ -27,6 +28,7 @@ import { useAgentStore } from '@/stores/agentStore';
 import { useToastStore } from '@/stores/toastStore';
 import { buildTemplatePayloadFromProject } from '@/utils/templateFromProject';
 import type { AgentParameters, PptProjectState, SlideOutline, TemplateAssetSettings } from '@/types/agent';
+import { translateErrorMessage } from '@/utils/errorMessages';
 
 type EditorForm = {
   name: string;
@@ -88,6 +90,7 @@ const route = useRoute();
 
 const templates = ref<Template[]>([]);
 const loading = ref(false);
+const loadError = ref('');
 const saving = ref(false);
 const searchQuery = ref('');
 const selectedCategory = ref('全部');
@@ -411,12 +414,16 @@ async function fetchTemplates() {
   try {
     const response = await templateApi.getAll();
     if (response.success && response.data) {
+      loadError.value = '';
       templates.value = response.data;
       focusTemplateFromRoute();
+    } else {
+      loadError.value = translateErrorMessage(response.message, '加载模板失败，请稍后重试');
+      toastStore.error('加载模板失败', loadError.value);
     }
   } catch (error) {
-    console.error('加载模板失败:', error);
-    toastStore.error('加载模板失败');
+    loadError.value = translateErrorMessage(error, '加载模板失败，请稍后重试');
+    toastStore.error('加载模板失败', loadError.value);
   } finally {
     loading.value = false;
   }
@@ -1014,6 +1021,15 @@ onMounted(fetchTemplates);
     </section>
 
     <PageLoadingState v-if="loading && templates.length === 0" title="正在加载模板方案" description="正在同步模板预览和排版规则" />
+    <UiFeedbackState
+      v-else-if="loadError && templates.length === 0"
+      tone="error"
+      title="模板方案加载失败"
+      :description="loadError"
+      action-label="重试"
+      :loading="loading"
+      @action="fetchTemplates"
+    />
     <UiEmpty
       v-else-if="filteredTemplates.length === 0"
       class="empty-state"

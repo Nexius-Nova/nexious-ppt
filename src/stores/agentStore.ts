@@ -1,4 +1,5 @@
 ﻿import { defineStore } from 'pinia';
+import { storeToRefs } from 'pinia';
 import { computed, ref, watch } from 'vue';
 import { analyzeDeckInput, exportDeck, generateSlideImages } from '@/services/agentSimulator';
 import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi, generationJobApi, configApi } from '@/services/api';
@@ -7,6 +8,11 @@ import { applyTemplateLayoutParams, getTemplateColors } from '@/composables/temp
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import { useApiKeyStore } from './apiKeyStore';
 import { useToastStore } from './toastStore';
+import { useProjectStore } from './projectStore';
+import { useWorkflowStore, workflowSteps, cloneWorkflowSteps } from './workflowStore';
+import { useInputStore } from './inputStore';
+import { useQueueStore } from './queueStore';
+import { useAssetStore } from './assetStore';
 import { normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
 import type {
   AgentParameters,
@@ -37,44 +43,6 @@ import type {
   UploadedFileContent,
   ProjectModelSelection
 } from '@/types/agent';
-
-const workflowSteps: WorkflowStep[] = [
-  {
-    id: 'input',
-    title: '资料',
-    description: '准备资料和需求',
-    status: 'idle',
-    progress: 0
-  },
-  {
-    id: 'outline',
-    title: '大纲',
-    description: '整理页面结构',
-    status: 'idle',
-    progress: 0
-  },
-  {
-    id: 'images',
-    title: '图片',
-    description: '按需生成图片',
-    status: 'idle',
-    progress: 0
-  },
-  {
-    id: 'layout',
-    title: '页面',
-    description: '生成页面预览',
-    status: 'idle',
-    progress: 0
-  },
-  {
-    id: 'preview',
-    title: '导出',
-    description: '导出 PPTX',
-    status: 'idle',
-    progress: 0
-  }
-];
 
 const defaultSkills: SkillDefinition[] = [
   {
@@ -156,7 +124,6 @@ const exampleTemplates: PptTemplate[] = [
   }
 ];
 
-const cloneSteps = (): WorkflowStep[] => workflowSteps.map((step) => ({ ...step }));
 const cloneSkills = (): SkillDefinition[] => defaultSkills.map((skill) => ({ ...skill, params: { ...skill.params } }));
 const clonePrompts = (): PromptDefinition[] => defaultPrompts.map((prompt) => ({ ...prompt }));
 const createInputProcessSteps = (): InputProcessStep[] => [
@@ -493,84 +460,79 @@ function specSlideToOutlineSlide(slide: SpecSlide, fallbackIndex: number): Slide
 }
 
 export const useAgentStore = defineStore('agent', () => {
-  const activeStep = ref<WorkflowStepId>('input');
-  const input = ref<DeckInput>({
-    topic: '',
-    content: '',
-    files: []
-  });
-  const parameters = ref<AgentParameters>({
-    summaryLength: 'auto',
-    slideCount: 0,
-    tone: 'auto',
-    imageStyle: 'auto',
-    template: 'auto',
-    skillIntensity: 0,
-    animationEnabled: 'auto',
-    animationEffect: 'auto'
-  });
-  const steps = ref<WorkflowStep[]>(cloneSteps());
-  const outline = ref<SlideOutline[]>([]);
-  const images = ref<GeneratedImage[]>([]);
-  const skills = ref<SkillDefinition[]>(cloneSkills());
-  const prompts = ref<PromptDefinition[]>(clonePrompts());
-  const pptProjects = ref<PptProject[]>([]);
-  const templates = ref<PptTemplate[]>(cloneTemplates());
-  const selectedTemplate = ref<TemplateAsset | null>(null);
-  const activePptId = ref<string | null>(null);
-  const deletedPptProjectIds = ref<Set<string>>(new Set());
-  const exportArtifacts = ref<ExportArtifact[]>([]);
-  const activityLog = ref<string[]>(['系统就绪，等待添加 PPT 项目。']);
-  const inputProcessSteps = ref<InputProcessStep[]>(cloneInputProcessSteps());
-  const uploadedFileContents = ref<UploadedFileContent[]>([]);
-  const processedInputContent = ref('');
-  const isRunning = ref(false);
-  const isPaused = ref(false);
-  const pauseRequested = ref(false);
-  const resumeStage = ref<WorkflowStepId | null>(null);
-  const executorCursor = ref(0);
-  const streamingText = ref('');
-  const designSpec = ref<DesignSpec | null>(null);
-  const specLock = ref<SpecLock | null>(null);
-  const svgPages = ref<Array<{ pageNumber: number; svg: string; speakerNotes: string; visualSummary?: string }>>([]);
-  const selectedPromptId = ref<string>('');
-  const selectedTextModelId = ref<string | null>(null);
-  const selectedImageModelId = ref<string | null>(null);
-  const currentGeneratingSlide = ref<string | null>(null);
-  const generatedSlides = ref<Set<string>>(new Set());
-  const retryingPageNumbers = ref<Set<number>>(new Set());
-  const configOptions = ref<ConfigOptionGroups>(cloneConfigOptions());
-  const configRecords = ref<Partial<Record<ConfigOptionKey, RunConfig>>>({});
-  const isDataLoaded = ref(false);
-  const recoveredActiveWorkflow = ref(false);
-  const waitingForImageRetry = ref(false);
-  const workflowRunToken = ref(0);
-  const runningProjectId = ref<string | null>(null);
-  const activeGenerationJobId = ref<number | null>(null);
-  const activeQueueJobId = ref<string | null>(null);
-  const runningProjectJobs = ref<Record<string, {
-    projectId: string;
-    queueJobId: string;
-    dbJobId: number | null;
-    status: QueueJobSnapshot['status'];
-    phase: string;
-    progress: number;
-    updatedAt: number;
-  }>>({});
-  const subscribedQueueJobIds = new Set<string>();
+  const projectStore = useProjectStore();
+  const workflowStore = useWorkflowStore();
+  const inputStore = useInputStore();
+  const queueStore = useQueueStore();
+  const assetStore = useAssetStore();
 
-  const enabledSkills = computed(() => skills.value.filter((skill) => skill.enabled).sort((a, b) => a.order - b.order));
-  const runnableSkills = computed(() => skills.value.filter((skill) =>
-    skill.runtime === 'prompt-only' ||
-    skill.type === 'prompt-only' ||
-    skill.testStatus === 'passed'
-  ).sort((a, b) => a.order - b.order));
-  const runnableEnabledSkills = computed(() => enabledSkills.value.filter((skill) =>
-    runnableSkills.value.some((item) => item.id === skill.id)
-  ));
-  const selectedImages = computed(() => images.value.filter((image) => image.selected));
-  const activeStepMeta = computed(() => steps.value.find((step) => step.id === activeStep.value));
-  const activePpt = computed(() => pptProjects.value.find((project) => project.id === activePptId.value) || null);
+  const {
+    pptProjects,
+    templates,
+    selectedTemplate,
+    activePptId,
+    activePpt,
+    deletedPptProjectIds,
+    isDataLoaded,
+  } = storeToRefs(projectStore);
+  const {
+    activeStep,
+    activeStepMeta,
+    steps,
+    activityLog,
+    isRunning,
+    isPaused,
+    pauseRequested,
+    resumeStage,
+    executorCursor,
+    streamingText,
+    designSpec,
+    specLock,
+    recoveredActiveWorkflow,
+    waitingForImageRetry,
+    workflowRunToken,
+    runningProjectId,
+    activeGenerationJobId,
+    activeQueueJobId,
+    workflowStartedAt,
+    currentGeneratingSlide,
+    retryingPageNumbers,
+  } = storeToRefs(workflowStore);
+  const {
+    input,
+    parameters,
+    skills,
+    enabledSkills,
+    runnableSkills,
+    runnableEnabledSkills,
+    prompts,
+    inputProcessSteps,
+    uploadedFileContents,
+    processedInputContent,
+    selectedPromptId,
+    selectedTextModelId,
+    selectedImageModelId,
+    configOptions,
+    configRecords,
+    configLoadError,
+  } = storeToRefs(inputStore);
+  const { runningProjectJobs } = storeToRefs(queueStore);
+  const {
+    outline,
+    images,
+    selectedImages,
+    exportArtifacts,
+    svgPages,
+    generatedSlides,
+  } = storeToRefs(assetStore);
+  if (!skills.value.length) skills.value = cloneSkills();
+  if (!prompts.value.length) prompts.value = clonePrompts();
+  if (!templates.value.length) templates.value = cloneTemplates();
+  if (!inputProcessSteps.value.length) inputProcessSteps.value = cloneInputProcessSteps();
+  if (!Object.values(configOptions.value).some((options) => options.length > 0)) {
+    configOptions.value = cloneConfigOptions();
+  }
+  const subscribedQueueJobIds = new Set<string>();
 
   type RunContext = { token: number; projectId: string | null };
 
@@ -687,11 +649,29 @@ export const useAgentStore = defineStore('agent', () => {
     runningProjectJobs.value = next;
     const project = pptProjects.value.find(item => item.id === projectId);
     if (project) {
+      const normalizedState = normalizeProjectState(project.state);
+      if (job.projectState) {
+        const serverState = normalizeProjectState(job.projectState as Partial<PptProjectState>);
+        project.state = {
+          ...serverState,
+          activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateFromSnapshot(job),
+          workflowActive: Boolean(serverState.workflowActive),
+          paused: Boolean(serverState.paused),
+          workflowContext: serverState.workflowContext || workflowContextFromQueueSnapshot(serverState, projectId, job),
+        };
+        project.updatedAt = Date.now();
+        if (activePptId.value === projectId) {
+          restoreProjectState(project.state);
+        }
+        syncActiveRunRefsFromProject();
+        return;
+      }
       project.state = {
-        ...normalizeProjectState(project.state),
+        ...normalizedState,
         activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateForProject(projectId),
         workflowActive: !isTerminalQueueStatus(job.status),
         paused: false,
+        workflowContext: workflowContextFromQueueSnapshot(normalizedState, projectId, job),
       };
       project.updatedAt = Date.now();
     }
@@ -727,6 +707,31 @@ export const useAgentStore = defineStore('agent', () => {
       phase: job.phase,
       progress: Math.max(0, Math.min(100, Number(job.progress) || 0)),
       updatedAt: job.updatedAt || Date.now(),
+    };
+  }
+
+  function workflowContextFromQueueSnapshot(
+    state: PptProjectState,
+    projectId: string,
+    job: QueueJobSnapshot
+  ): PptProjectState['workflowContext'] {
+    const existing = state.workflowContext;
+    return {
+      ...(existing || {}),
+      projectId,
+      userId: job.userId ?? existing?.userId ?? null,
+      jobId: job.id,
+      currentPhase: job.phase,
+      modelConfig: existing?.modelConfig || state.modelSelection || {
+        textModelId: null,
+        imageModelId: null,
+      },
+      templateId: existing?.templateId || state.selectedTemplate?.id || state.parameters.template || null,
+      templateName: existing?.templateName || state.selectedTemplate?.name || null,
+      promptId: existing?.promptId || state.selectedPromptId || null,
+      selectedSkills: existing?.selectedSkills?.length ? existing.selectedSkills : state.enabledSkillIds,
+      startedAt: existing?.startedAt || (activePptId.value === projectId ? workflowStartedAt.value || undefined : undefined),
+      updatedAt: Date.now(),
     };
   }
 
@@ -823,6 +828,22 @@ export const useAgentStore = defineStore('agent', () => {
   function applyQueueJobToProjectState(projectId: string, job: QueueJobSnapshot) {
     const project = pptProjects.value.find(item => item.id === projectId);
     if (!project) return;
+    if (job.projectState) {
+      const serverState = normalizeProjectState(job.projectState as Partial<PptProjectState>);
+      project.state = {
+        ...serverState,
+        activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateFromSnapshot(job),
+        workflowActive: Boolean(serverState.workflowActive),
+        paused: Boolean(serverState.paused),
+        workflowContext: serverState.workflowContext || workflowContextFromQueueSnapshot(serverState, projectId, job),
+      };
+      project.updatedAt = Date.now();
+      if (activePptId.value === projectId) {
+        restoreProjectState(project.state);
+      }
+      return;
+    }
+
     let nextState = normalizeProjectState(project.state);
 
     if (job.phase === 'outline' && job.result) {
@@ -841,13 +862,18 @@ export const useAgentStore = defineStore('agent', () => {
       activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateFromSnapshot(job),
       workflowActive: !isTerminalQueueStatus(job.status),
       paused: false,
+      workflowContext: workflowContextFromQueueSnapshot(nextState, projectId, job),
     };
     project.updatedAt = Date.now();
   }
 
   function applyQueueJobToActiveProject(job: QueueJobSnapshot) {
-    if (job.status === 'cancelled') return;
     pushLog(job.message || `任务进度：${job.phase}`);
+    if (job.projectState) {
+      restoreProjectState(normalizeProjectState(job.projectState as Partial<PptProjectState>));
+      return;
+    }
+    if (job.status === 'cancelled') return;
     if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') {
       activeStep.value = 'outline';
       setStepStatus('outline', 'running', Math.min(99, job.progress));
@@ -1047,6 +1073,7 @@ export const useAgentStore = defineStore('agent', () => {
         textModelId: null,
         imageModelId: null,
       },
+      workflowContext: null,
       selectedTemplate: null,
       outline: [],
       images: [],
@@ -1077,6 +1104,26 @@ export const useAgentStore = defineStore('agent', () => {
       textModelId: state.modelSelection?.textModelId ? String(state.modelSelection.textModelId) : null,
       imageModelId: state.modelSelection?.imageModelId ? String(state.modelSelection.imageModelId) : null,
     };
+    const workflowContext = state.workflowContext && typeof state.workflowContext === 'object'
+      ? {
+          projectId: String(state.workflowContext.projectId || ''),
+          userId: state.workflowContext.userId ?? null,
+          jobId: state.workflowContext.jobId ? String(state.workflowContext.jobId) : null,
+          currentPhase: state.workflowContext.currentPhase ? String(state.workflowContext.currentPhase) : null,
+          modelConfig: {
+            textModelId: state.workflowContext.modelConfig?.textModelId ? String(state.workflowContext.modelConfig.textModelId) : modelSelection.textModelId,
+            imageModelId: state.workflowContext.modelConfig?.imageModelId ? String(state.workflowContext.modelConfig.imageModelId) : modelSelection.imageModelId,
+          },
+          templateId: state.workflowContext.templateId ? String(state.workflowContext.templateId) : null,
+          templateName: state.workflowContext.templateName ? String(state.workflowContext.templateName) : null,
+          promptId: state.workflowContext.promptId ? String(state.workflowContext.promptId) : null,
+          selectedSkills: Array.isArray(state.workflowContext.selectedSkills)
+            ? state.workflowContext.selectedSkills.map((id) => String(id)).filter(Boolean)
+            : [],
+          startedAt: Number(state.workflowContext.startedAt || 0) || undefined,
+          updatedAt: Number(state.workflowContext.updatedAt || 0) || undefined,
+        }
+      : null;
     return {
       ...fallback,
       ...state,
@@ -1091,6 +1138,7 @@ export const useAgentStore = defineStore('agent', () => {
       processedInputContent: String(state.processedInputContent || ''),
       parameters: normalizeAgentParameters(state.parameters || fallback.parameters),
       modelSelection,
+      workflowContext,
       selectedTemplate: state.selectedTemplate ? snapshotTemplateAsset(state.selectedTemplate) : null,
       outline: (state.outline || []).map(s => ({ ...s, bullets: [...(s.bullets || [])] })),
       images: (state.images || []).map(img => ({ ...img })),
@@ -1117,6 +1165,7 @@ export const useAgentStore = defineStore('agent', () => {
         textModelId: selectedTextModelId.value,
         imageModelId: selectedImageModelId.value,
       },
+      workflowContext: baseState.workflowContext,
     };
     activePpt.value.templateId = selectedTemplate.value?.id || 'auto';
     activePpt.value.updatedAt = Date.now();
@@ -1245,6 +1294,24 @@ export const useAgentStore = defineStore('agent', () => {
         textModelId: selectedTextModelId.value,
         imageModelId: selectedImageModelId.value,
       },
+      workflowContext: activePptId.value
+        ? {
+            projectId: activePptId.value,
+            userId: null,
+            jobId: activeQueueJobId.value,
+            currentPhase: activeStep.value,
+            modelConfig: {
+              textModelId: selectedTextModelId.value,
+              imageModelId: selectedImageModelId.value,
+            },
+            templateId: selectedTemplate.value?.id || parameters.value.template || null,
+            templateName: selectedTemplate.value?.name || null,
+            promptId: selectedPromptId.value || null,
+            selectedSkills: skills.value.filter(s => s.enabled).map(s => s.id),
+            startedAt: workflowStartedAt.value || undefined,
+            updatedAt: Date.now(),
+          }
+        : null,
       selectedTemplate: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
       outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
       images: persistable
@@ -1309,6 +1376,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     selectedPromptId.value = normalizedState.selectedPromptId || '';
     inputProcessSteps.value = cloneInputProcessSteps(normalizedState.inputProcessSteps);
+    workflowStartedAt.value = normalizedState.workflowContext?.startedAt || null;
 
     designSpec.value = normalizedState.designSpec || null;
     specLock.value = normalizedState.specLock || null;
@@ -2338,21 +2406,25 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function isSearchSkill(skill: SkillDefinition) {
+    if (skill.capabilities?.includes('web-search')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
     return /web|search|google|bing|搜索|联网|资料收集/.test(text);
   }
 
   function isFileParseSkill(skill: SkillDefinition) {
+    if (skill.capabilities?.includes('file-parse')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
     return /file|parse|docx|pdf|文件|解析|读取/.test(text);
   }
 
   function isTopicSkill(skill: SkillDefinition) {
+    if (skill.capabilities?.includes('topic-extract') || skill.capabilities?.includes('content-refine')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
     return /topic|title|主题|提炼|标题/.test(text);
   }
 
   function isConstraintSkill(skill: SkillDefinition) {
+    if (skill.capabilities?.includes('generation-constraint')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
     return /constraint|config|rule|约束|配置|规则|提示词/.test(text);
   }
@@ -3725,6 +3797,40 @@ export const useAgentStore = defineStore('agent', () => {
     return prompts.value.find((item) => item.id === selectedPromptId.value)?.content || undefined;
   }
 
+  function enabledStrategistSkills() {
+    return skills.value
+      .filter((skill) => skill.enabled)
+      .sort((left, right) => left.order - right.order)
+      .map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        instruction: skill.instruction || skill.description || undefined,
+      }));
+  }
+
+  function ensureWorkflowStartedAt() {
+    if (!workflowStartedAt.value) workflowStartedAt.value = Date.now();
+    return workflowStartedAt.value;
+  }
+
+  function buildStrategistInputSnapshot() {
+    return {
+      topic: input.value.topic,
+      content: generationInputContent(),
+      tone: parameters.value.tone,
+      summaryLength: parameters.value.summaryLength,
+      slideCount: parameters.value.slideCount,
+      imageStyle: parameters.value.imageStyle,
+      template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
+      textModelId: selectedTextModelId.value,
+      imageModelId: selectedImageModelId.value,
+      templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
+      promptContent: selectedPromptContent(),
+      promptId: selectedPromptId.value || null,
+      skills: enabledStrategistSkills(),
+    };
+  }
+
   function selectPrompt(id: string) {
     selectedPromptId.value = id;
     persistCurrentSelectionToActiveProject();
@@ -3813,20 +3919,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     try {
       const result = await aiApi.strategistStream(
-        {
-          topic: input.value.topic,
-          content: generationInputContent(),
-          tone: parameters.value.tone,
-          summaryLength: parameters.value.summaryLength,
-          slideCount: parameters.value.slideCount,
-          imageStyle: parameters.value.imageStyle,
-          template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
-          textModelId: selectedTextModelId.value,
-          imageModelId: selectedImageModelId.value,
-          templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
-          promptContent: selectedPromptContent(),
-          skills: [],
-        },
+        buildStrategistInputSnapshot(),
         {
           onStart: (message) => {
             if (!isRunContextActive(ctx)) return;
@@ -4608,8 +4701,11 @@ export const useAgentStore = defineStore('agent', () => {
     const ctx = createRunContext();
     const queuedResumeStage = options.resume ? (options.resumeStage || 'outline') : 'outline';
     if (!options.resume) {
+      workflowStartedAt.value = Date.now();
       clearPauseState();
       executorCursor.value = 0;
+    } else {
+      ensureWorkflowStartedAt();
     }
 
     try {
@@ -4630,24 +4726,12 @@ export const useAgentStore = defineStore('agent', () => {
       }
       toastStore.info('开始生成 PPT', queuedResumeStage === 'outline' ? '服务端任务已提交，正在排队处理。' : '服务端续跑任务已提交，正在排队处理。');
       pushLog(queuedResumeStage === 'outline' ? '服务端生成任务已提交。' : `服务端续跑任务已提交：${queuedResumeStage === 'images' ? '图片阶段' : '页面阶段'}。`);
+      const generationInput = buildStrategistInputSnapshot();
 
       const response = await aiApi.createGenerateJob({
         projectId: activePpt.value!.id,
         title: activePpt.value!.title,
-        input: {
-          topic: input.value.topic,
-          content: generationInputContent(),
-          tone: parameters.value.tone,
-          summaryLength: parameters.value.summaryLength,
-          slideCount: parameters.value.slideCount,
-          imageStyle: parameters.value.imageStyle,
-          template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
-          textModelId: selectedTextModelId.value,
-          imageModelId: selectedImageModelId.value,
-          templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
-          promptContent: selectedPromptContent(),
-          skills: [],
-        },
+        input: generationInput,
         projectState: snapshotProjectState({ persistable: true }),
         includeImages: true,
         resumeStage: queuedResumeStage,
@@ -4936,6 +5020,7 @@ export const useAgentStore = defineStore('agent', () => {
           params: s.parameters || {},
           instruction: s.parameters?.instruction || '',
           category: normalizeInputSkillCategory(s.category),
+          capabilities: Array.isArray(s.capabilities) ? s.capabilities.map((item: unknown) => String(item)).filter(Boolean) : [],
           type: s.type || 'prompt-only',
           runtime: s.runtime || 'prompt-only',
           entry: s.entry || null,
@@ -4986,6 +5071,7 @@ export const useAgentStore = defineStore('agent', () => {
       }
 
       if (response.success && response.data) {
+        configLoadError.value = '';
         configRecords.value = response.data.reduce<Partial<Record<ConfigOptionKey, RunConfig>>>((records, config) => {
           if (CONFIG_KEYS.includes(config.key as ConfigOptionKey)) {
             records[config.key as ConfigOptionKey] = config;
@@ -4994,10 +5080,12 @@ export const useAgentStore = defineStore('agent', () => {
         }, {});
         configOptions.value = normalizeRunConfigGroups(response.data);
       } else {
+        configLoadError.value = response.message || '运行配置加载失败，已使用默认配置';
         configOptions.value = cloneConfigOptions();
       }
     } catch (error) {
       console.error('加载运行配置失败，使用默认数据:', error);
+      configLoadError.value = error instanceof Error ? error.message : '运行配置加载失败，已使用默认配置';
       configOptions.value = cloneConfigOptions();
     } finally {
       normalizeParametersAgainstConfig();
@@ -5126,7 +5214,7 @@ export const useAgentStore = defineStore('agent', () => {
       }));
       pptProjects.value = mergePptProjects([...pptProjects.value, ...restoredProjects], snapshot.activePptId || activePptId.value);
       activePptId.value = snapshot.activePptId || null;
-      const restoredSteps = (snapshot.steps || cloneSteps()).map((s: WorkflowStep) => ({
+      const restoredSteps = (snapshot.steps || cloneWorkflowSteps()).map((s: WorkflowStep) => ({
         ...s,
         status: s.status === 'running' ? 'idle' : s.status,
         progress: s.status === 'running' ? 0 : s.progress,
@@ -5217,6 +5305,7 @@ export const useAgentStore = defineStore('agent', () => {
     specLock,
     svgPages,
     configOptions,
+    configLoadError,
     selectedPromptId,
     selectedTextModelId,
     selectedImageModelId,
@@ -5244,6 +5333,7 @@ export const useAgentStore = defineStore('agent', () => {
     runFullWorkflow,
     runInputStage,
     setConfigOptionValue,
+    fetchConfigs,
     addConfigOption,
     updateConfigOption,
     deleteConfigOption,

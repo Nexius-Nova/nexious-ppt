@@ -57,6 +57,7 @@ export interface StrategistInput {
     };
   } | null;
   promptContent?: string;
+  promptId?: string | null;
   skills: Array<{ id: string; name: string; instruction?: string }>;
 }
 

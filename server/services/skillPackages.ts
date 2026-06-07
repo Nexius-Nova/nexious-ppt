@@ -8,6 +8,7 @@ import { generatedSkillsRoot } from '../utils/storage.js';
 export type SkillRuntime = 'prompt-only' | 'python' | 'node';
 export type SkillInstallStatus = 'not_required' | 'pending' | 'installing' | 'ready' | 'failed';
 export type SkillTestStatus = 'not_tested' | 'testing' | 'passed' | 'failed' | 'skipped';
+export type SkillCapability = 'web-search' | 'file-parse' | 'content-refine' | 'image-tool' | 'topic-extract' | 'generation-constraint';
 
 interface SkillManifest {
   name?: string;
@@ -16,6 +17,11 @@ interface SkillManifest {
   category?: string;
   runtime?: SkillRuntime;
   entry?: string;
+  capabilities?: SkillCapability[];
+  inputContract?: Record<string, unknown>;
+  outputContract?: Record<string, unknown>;
+  testSample?: Record<string, unknown>;
+  sandbox?: Record<string, unknown>;
   parameters?: Record<string, unknown>;
 }
 
@@ -24,6 +30,11 @@ interface PackageAnalysis {
   description: string;
   icon: string;
   category: string;
+  capabilities: SkillCapability[];
+  inputContract: Record<string, unknown> | null;
+  outputContract: Record<string, unknown> | null;
+  testSample: Record<string, unknown> | null;
+  sandboxPolicy: Record<string, unknown>;
   parameters: Record<string, unknown>;
   runtime: SkillRuntime;
   entry: string | null;
@@ -68,6 +79,10 @@ export interface SkillPackagePreview {
   fileCount: number;
   totalSize: number;
   instructionPreview: string;
+  capabilities: SkillCapability[];
+  inputContract: Record<string, unknown> | null;
+  outputContract: Record<string, unknown> | null;
+  hasTestSample: boolean;
   adaptationPlan: string[];
   files: SkillPackagePreviewFile[];
 }
@@ -87,12 +102,16 @@ export interface SkillPackageView {
 const MAX_PACKAGE_BYTES = 20 * 1024 * 1024;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
-const RUN_TIMEOUT_MS = 2 * 60 * 1000;
+const RUN_TIMEOUT_MS = Math.max(5000, Number(process.env.SKILL_RUN_TIMEOUT_MS || 2 * 60 * 1000));
+const SKILL_RUN_OUTPUT_BYTES = Math.max(16 * 1024, Number(process.env.SKILL_RUN_OUTPUT_BYTES || 1024 * 1024));
+const SKILL_RUN_CONCURRENCY = Math.max(1, Number(process.env.SKILL_RUN_CONCURRENCY || 2));
 const HEALTH_TEST_PROJECT_ID = '__skill_health_check__';
 const storageRoot = generatedSkillsRoot;
 const TEXT_SCAN_BYTES = 512 * 1024;
 const SKILL_MD_VIEW_BYTES = 512 * 1024;
 const SECURITY_FAILURE_MESSAGE = 'Skill 包未通过安全验证。';
+let activeSkillRuns = 0;
+const skillRunWaiters: Array<() => void> = [];
 
 interface SkillPackageSecurityIssue {
   code: string;
@@ -364,6 +383,7 @@ function parseFrontMatter(content: string): SkillManifest {
     if (key === 'description') manifest.description = rawValue;
     if (key === 'icon') manifest.icon = rawValue;
     if (key === 'category') manifest.category = rawValue;
+    if (key === 'capabilities') manifest.capabilities = parseCapabilityList(rawValue);
     if (key === 'runtime' && ['prompt-only', 'python', 'node'].includes(rawValue)) {
       manifest.runtime = rawValue as SkillRuntime;
     }
@@ -390,11 +410,108 @@ function parseJsonManifest(content: string): SkillManifest {
       category: typeof data.category === 'string' ? data.category : undefined,
       runtime: ['prompt-only', 'python', 'node'].includes(data.runtime) ? data.runtime : undefined,
       entry: typeof data.entry === 'string' ? data.entry : undefined,
+      capabilities: parseCapabilityList(data.capabilities),
+      inputContract: normalizeRecord(data.inputContract || data.input_contract),
+      outputContract: normalizeRecord(data.outputContract || data.output_contract),
+      testSample: normalizeRecord(data.testSample || data.test_sample),
+      sandbox: normalizeRecord(data.sandbox || data.sandboxPolicy || data.sandbox_policy),
       parameters: data.parameters && typeof data.parameters === 'object' ? data.parameters : undefined,
     };
   } catch {
     return {};
   }
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function normalizeSkillCapability(value: unknown): SkillCapability | null {
+  const raw = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+  if (['web-search', 'search', 'web'].includes(raw)) return 'web-search';
+  if (['file-parse', 'file-parser', 'parse-file', 'document-parse'].includes(raw)) return 'file-parse';
+  if (['content-refine', 'content', 'refine', 'rewrite'].includes(raw)) return 'content-refine';
+  if (['image-tool', 'image', 'vision'].includes(raw)) return 'image-tool';
+  if (['topic-extract', 'topic', 'title'].includes(raw)) return 'topic-extract';
+  if (['generation-constraint', 'constraint', 'config', 'prompt'].includes(raw)) return 'generation-constraint';
+  return null;
+}
+
+function parseCapabilityList(value: unknown): SkillCapability[] | undefined {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[,\s]+/)
+      : [];
+  const capabilities = Array.from(new Set(values.map(normalizeSkillCapability).filter(Boolean))) as SkillCapability[];
+  return capabilities.length ? capabilities : undefined;
+}
+
+function inferSkillCapabilities(manifest: SkillManifest, instruction: string, files: Map<string, Buffer>, entry: string | null): SkillCapability[] {
+  const explicit = parseCapabilityList(manifest.capabilities);
+  if (explicit?.length) return explicit;
+
+  const text = [
+    manifest.name,
+    manifest.description,
+    manifest.category,
+    manifest.entry,
+    entry,
+    instruction,
+    ...Array.from(files.keys()),
+  ].filter(Boolean).join(' ').toLowerCase();
+  const capabilities = new Set<SkillCapability>();
+  if (/web|search|google|bing|duckduckgo|联网|搜索|资料收集|抓取/.test(text)) capabilities.add('web-search');
+  if (/file|parse|docx|pdf|pptx|xlsx|markdown|文件|解析|读取/.test(text)) capabilities.add('file-parse');
+  if (/topic|title|summary|summar|主题|标题|提炼|摘要/.test(text)) capabilities.add('topic-extract');
+  if (/constraint|config|prompt|template|rule|约束|配置|提示词|模板/.test(text)) capabilities.add('generation-constraint');
+  if (/image|vision|picture|图片|图像|视觉/.test(text)) capabilities.add('image-tool');
+  if (/refine|rewrite|polish|content|润色|改写|优化/.test(text)) capabilities.add('content-refine');
+  return Array.from(capabilities);
+}
+
+function buildSandboxPolicy(manifest: SkillManifest): Record<string, unknown> {
+  const sandbox = manifest.sandbox || {};
+  return {
+    network: sandbox.network === true,
+    timeoutMs: Math.min(RUN_TIMEOUT_MS, Math.max(5000, Number(sandbox.timeoutMs || sandbox.timeout_ms || RUN_TIMEOUT_MS))),
+    maxOutputBytes: Math.min(SKILL_RUN_OUTPUT_BYTES, Math.max(16 * 1024, Number(sandbox.maxOutputBytes || sandbox.max_output_bytes || SKILL_RUN_OUTPUT_BYTES))),
+    maxInputFiles: Math.min(20, Math.max(0, Number(sandbox.maxInputFiles || sandbox.max_input_files || 8))),
+  };
+}
+
+function parseSandboxPolicy(value: unknown): {
+  network: boolean;
+  timeoutMs: number;
+  maxOutputBytes: number;
+  maxInputFiles: number;
+} {
+  const record = parseJsonRecord(value);
+  return {
+    network: record.network === true,
+    timeoutMs: Math.min(RUN_TIMEOUT_MS, Math.max(5000, Number(record.timeoutMs || record.timeout_ms || RUN_TIMEOUT_MS))),
+    maxOutputBytes: Math.min(SKILL_RUN_OUTPUT_BYTES, Math.max(16 * 1024, Number(record.maxOutputBytes || record.max_output_bytes || SKILL_RUN_OUTPUT_BYTES))),
+    maxInputFiles: Math.min(20, Math.max(0, Number(record.maxInputFiles || record.max_input_files || 8))),
+  };
+}
+
+async function acquireSkillRunSlot() {
+  if (activeSkillRuns < SKILL_RUN_CONCURRENCY) {
+    activeSkillRuns += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    skillRunWaiters.push(resolve);
+  });
+  activeSkillRuns += 1;
+}
+
+function releaseSkillRunSlot() {
+  activeSkillRuns = Math.max(0, activeSkillRuns - 1);
+  const next = skillRunWaiters.shift();
+  if (next) next();
 }
 
 function pickFile(files: Map<string, Buffer>, candidates: string[]) {
@@ -492,17 +609,25 @@ function normalizePackage(files: Map<string, Buffer>, fallbackName: string): Pac
     ? inferPythonDependencies(files)
     : [];
   const instruction = parseSkillInstruction(skillMd);
+  const capabilities = inferSkillCapabilities(manifest, instruction, files, entry);
+  const sandboxPolicy = buildSandboxPolicy(manifest);
 
   return {
     name: manifest.name || path.parse(fallbackName).name || 'Untitled Skill',
     description: manifest.description || 'Uploaded skill package',
     icon: manifest.icon || 'Zap',
     category: manifest.category || '资料收集',
+    capabilities,
+    inputContract: manifest.inputContract || null,
+    outputContract: manifest.outputContract || null,
+    testSample: manifest.testSample || null,
+    sandboxPolicy,
     parameters: {
       ...(manifest.parameters || {}),
       instruction,
       packageFileCount: files.size,
       inferredDependencies,
+      capabilities,
     },
     runtime,
     entry: runtime === 'prompt-only' ? null : entry,
@@ -514,6 +639,11 @@ function normalizePackage(files: Map<string, Buffer>, fallbackName: string): Pac
       skillJsonPath: skillJsonPath || undefined,
       files: Array.from(files.keys()),
       inferredDependencies,
+      capabilities,
+      inputContract: manifest.inputContract,
+      outputContract: manifest.outputContract,
+      testSample: manifest.testSample,
+      sandbox: sandboxPolicy,
     },
     files: Array.from(files.entries()).map(([relativePath, data]) => ({ relativePath, data })),
   };
@@ -528,8 +658,19 @@ async function analyzePackage(filename: string, dataBase64: string): Promise<Pac
   const files = new Map<string, Buffer>();
 
   if (lowerName.endsWith('.md')) {
+    const markdown = readTextForSecurityScan(buffer);
+    if (!markdown.trim() || !/(^|\n)#|\bname\s*:|skill/i.test(markdown.slice(0, 4096))) {
+      throw new Error('SKILL.md 内容无效，请上传文本格式的 Skill 说明文件。');
+    }
     files.set('SKILL.md', buffer);
     return normalizePackage(files, filename);
+  }
+
+  if (!lowerName.endsWith('.zip') && !lowerName.endsWith('.skill')) {
+    throw new Error('Skill package must be a .zip, .skill or SKILL.md file.');
+  }
+  if (buffer.subarray(0, 4).toString('hex') !== '504b0304') {
+    throw new Error('Skill package content is not a valid zip archive.');
   }
 
   const zip = await JSZip.loadAsync(buffer);
@@ -599,6 +740,10 @@ function packageAnalysisToPreview(analysis: PackageAnalysis): SkillPackagePrevie
     fileCount: analysis.files.length,
     totalSize: analysis.files.reduce((sum, file) => sum + file.data.byteLength, 0),
     instructionPreview: instruction.length > 360 ? `${instruction.slice(0, 360)}...` : instruction,
+    capabilities: analysis.capabilities,
+    inputContract: analysis.inputContract,
+    outputContract: analysis.outputContract,
+    hasTestSample: Boolean(analysis.testSample),
     adaptationPlan: detectPackageAdaptationPlan(analysis),
     files: analysis.files
       .map((file) => ({
@@ -851,7 +996,7 @@ except ImportError:
 function runProcess(
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; input?: string; env?: Record<string, string> }
+  options: { cwd: string; timeoutMs: number; input?: string; env?: Record<string, string>; maxOutputBytes?: number }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -862,7 +1007,9 @@ function runProcess(
     });
     let stdout = '';
     let stderr = '';
+    let outputBytes = 0;
     let settled = false;
+    const maxOutputBytes = Math.max(16 * 1024, Number(options.maxOutputBytes || SKILL_RUN_OUTPUT_BYTES));
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -871,9 +1018,25 @@ function runProcess(
     }, options.timeoutMs);
 
     child.stdout.on('data', (chunk) => {
+      outputBytes += Buffer.byteLength(chunk);
+      if (outputBytes > maxOutputBytes && !settled) {
+        settled = true;
+        clearTimeout(timer);
+        child.kill('SIGTERM');
+        reject(new Error(`Process output exceeded ${maxOutputBytes} bytes`));
+        return;
+      }
       stdout += chunk.toString();
     });
     child.stderr.on('data', (chunk) => {
+      outputBytes += Buffer.byteLength(chunk);
+      if (outputBytes > maxOutputBytes && !settled) {
+        settled = true;
+        clearTimeout(timer);
+        child.kill('SIGTERM');
+        reject(new Error(`Process output exceeded ${maxOutputBytes} bytes`));
+        return;
+      }
       stderr += chunk.toString();
     });
     child.on('error', (error) => {
@@ -911,6 +1074,123 @@ function pipExecutable(packagePath: string) {
 function compactRunText(value: string, maxLength = 900) {
   const normalized = value.trim().replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function schemaTypeOf(value: unknown) {
+  if (Array.isArray(value)) return 'array';
+  if (value === null) return 'null';
+  return typeof value;
+}
+
+function contractTypeMatches(actual: string, expected: string) {
+  if (expected === 'integer') return actual === 'number';
+  return actual === expected;
+}
+
+function validateContractValue(
+  value: unknown,
+  schema: Record<string, unknown>,
+  pathLabel: string,
+  errors: string[],
+  depth = 0
+) {
+  if (depth > 8 || !schema || typeof schema !== 'object') return;
+
+  const expectedTypes = Array.isArray(schema.type)
+    ? schema.type.map((item) => String(item))
+    : schema.type
+      ? [String(schema.type)]
+      : [];
+  const actualType = schemaTypeOf(value);
+  if (expectedTypes.length && !expectedTypes.some((type) => contractTypeMatches(actualType, type))) {
+    errors.push(`${pathLabel} 类型应为 ${expectedTypes.join(' 或 ')}，实际为 ${actualType}`);
+    return;
+  }
+
+  if (schema.enum && Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    errors.push(`${pathLabel} 不在允许取值范围内`);
+  }
+
+  if (actualType === 'object') {
+    const record = value as Record<string, unknown>;
+    const required = Array.isArray(schema.required) ? schema.required.map((item) => String(item)) : [];
+    for (const key of required) {
+      if (!(key in record) || record[key] === undefined || record[key] === null || record[key] === '') {
+        errors.push(`${pathLabel}.${key} 为必填项`);
+      }
+    }
+
+    const properties = parseJsonRecord(schema.properties);
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (key in record && propertySchema && typeof propertySchema === 'object' && !Array.isArray(propertySchema)) {
+        validateContractValue(record[key], propertySchema as Record<string, unknown>, `${pathLabel}.${key}`, errors, depth + 1);
+      }
+    }
+  }
+
+  if (actualType === 'array') {
+    const items = schema.items;
+    const list = value as unknown[];
+    const minItems = Number(schema.minItems);
+    const maxItems = Number(schema.maxItems);
+    if (Number.isFinite(minItems) && list.length < minItems) errors.push(`${pathLabel} 至少需要 ${minItems} 项`);
+    if (Number.isFinite(maxItems) && list.length > maxItems) errors.push(`${pathLabel} 最多允许 ${maxItems} 项`);
+    if (items && typeof items === 'object' && !Array.isArray(items)) {
+      list.slice(0, 20).forEach((item, index) => {
+        validateContractValue(item, items as Record<string, unknown>, `${pathLabel}[${index}]`, errors, depth + 1);
+      });
+    }
+  }
+
+  if (actualType === 'string') {
+    const text = String(value);
+    const minLength = Number(schema.minLength);
+    const maxLength = Number(schema.maxLength);
+    if (Number.isFinite(minLength) && text.length < minLength) errors.push(`${pathLabel} 长度不能少于 ${minLength}`);
+    if (Number.isFinite(maxLength) && text.length > maxLength) errors.push(`${pathLabel} 长度不能超过 ${maxLength}`);
+    if (typeof schema.pattern === 'string') {
+      try {
+        if (!new RegExp(schema.pattern).test(text)) errors.push(`${pathLabel} 格式不符合要求`);
+      } catch {
+        // 忽略 Skill 包声明中的非法正则，避免影响旧包运行。
+      }
+    }
+  }
+
+  if (actualType === 'number') {
+    const numberValue = Number(value);
+    const minimum = Number(schema.minimum);
+    const maximum = Number(schema.maximum);
+    if (Number.isFinite(minimum) && numberValue < minimum) errors.push(`${pathLabel} 不能小于 ${minimum}`);
+    if (Number.isFinite(maximum) && numberValue > maximum) errors.push(`${pathLabel} 不能大于 ${maximum}`);
+    if (expectedTypes.includes('integer') && !Number.isInteger(numberValue)) errors.push(`${pathLabel} 必须是整数`);
+  }
+}
+
+function validateSkillContract(contract: unknown, value: unknown, label: string) {
+  const schema = parseJsonRecord(contract);
+  if (!Object.keys(schema).length) return '';
+  const errors: string[] = [];
+  validateContractValue(value, schema, label, errors);
+  return errors.length ? errors.slice(0, 6).join('；') : '';
+}
+
+function parseSkillOutputForContract(outputText: string) {
+  const text = outputText.trim();
+  if (!text) return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+    if (fenced) {
+      try {
+        return JSON.parse(fenced);
+      } catch {
+        return text;
+      }
+    }
+    return text;
+  }
 }
 
 function hasSkillRuntimeError(stderrText: string) {
@@ -1037,10 +1317,14 @@ async function updateSkillTestStatus(skillId: number, status: SkillTestStatus, l
 }
 
 function buildSkillHealthInput(skill: any) {
+  const testSample = parseJsonRecord(skill?.test_sample);
+  if (Object.keys(testSample).length > 0) return testSample;
+
+  const capabilities = parseStoredCapabilities(skill?.capabilities);
   const categoryText = String(skill?.category || '').toLowerCase();
   const nameText = String(skill?.name || '').toLowerCase();
-  const isSearch = /search|web|collect|资料收集|搜索|联网/.test(`${categoryText} ${nameText}`);
-  const isFileParse = /file|parse|文件|解析/.test(`${categoryText} ${nameText}`);
+  const isSearch = capabilities.includes('web-search') || /search|web|collect|资料收集|搜索|联网/.test(`${categoryText} ${nameText}`);
+  const isFileParse = capabilities.includes('file-parse') || /file|parse|文件|解析/.test(`${categoryText} ${nameText}`);
 
   if (isSearch) {
     return {
@@ -1082,6 +1366,19 @@ function parseJsonRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function parseStoredCapabilities(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean);
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map((item) => String(item)).filter(Boolean) : [];
+    } catch {
+      return value.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
 export async function initializeSkillEnvironment(skillId: number, userId?: number) {
   const rows = await query<any>(
     'SELECT id, runtime, package_path, dependency_file, parameters FROM skills WHERE id = ?',
@@ -1110,16 +1407,22 @@ export async function initializeSkillEnvironment(skillId: number, userId?: numbe
         ...parseJsonRecord(skill.parameters),
         packageFileCount: analysis.files.length,
         inferredDependencies: analysis.inferredDependencies,
+        capabilities: analysis.capabilities,
       };
       await query(
         `UPDATE skills
-         SET runtime = ?, entry = ?, dependency_file = ?, manifest = ?, parameters = ?, install_log = ?
+         SET runtime = ?, entry = ?, dependency_file = ?, manifest = ?, capabilities = ?, input_contract = ?, output_contract = ?, test_sample = ?, sandbox_policy = ?, parameters = ?, install_log = ?
          WHERE id = ?`,
         [
           analysis.runtime,
           analysis.entry,
           analysis.dependencyFile,
           JSON.stringify(analysis.manifest),
+          JSON.stringify(analysis.capabilities),
+          analysis.inputContract ? JSON.stringify(analysis.inputContract) : null,
+          analysis.outputContract ? JSON.stringify(analysis.outputContract) : null,
+          analysis.testSample ? JSON.stringify(analysis.testSample) : null,
+          JSON.stringify(analysis.sandboxPolicy),
           JSON.stringify(nextParameters),
           [
             '正在自动适配 Skill 包到输入阶段工作流...',
@@ -1224,8 +1527,8 @@ export async function createSkillFromPackage(userId: number, filename: string, d
     : 'Skill 包已保存，等待自动适配、初始化依赖并执行健康测试。';
   const result = await query<any>(
     `INSERT INTO skills
-      (user_id, name, description, icon, category, parameters, is_enabled, type, runtime, entry, manifest, dependency_file, install_status, install_log, test_status, test_log)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (user_id, name, description, icon, category, parameters, is_enabled, type, runtime, entry, manifest, capabilities, input_contract, output_contract, test_sample, sandbox_policy, dependency_file, install_status, install_log, test_status, test_log)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       userId,
       analysis.name,
@@ -1237,6 +1540,11 @@ export async function createSkillFromPackage(userId: number, filename: string, d
       analysis.runtime,
       analysis.entry,
       JSON.stringify(analysis.manifest),
+      JSON.stringify(analysis.capabilities),
+      analysis.inputContract ? JSON.stringify(analysis.inputContract) : null,
+      analysis.outputContract ? JSON.stringify(analysis.outputContract) : null,
+      analysis.testSample ? JSON.stringify(analysis.testSample) : null,
+      JSON.stringify(analysis.sandboxPolicy),
       analysis.dependencyFile,
       initialStatus,
       initialLog,
@@ -1329,15 +1637,22 @@ export async function runSkillPackage(
   const runId = Number((runResult as any).insertId);
   const packagePath = String(skill.package_path || '');
   let inputFiles: { inputDir: string; savedFiles: Array<{ name: string; path: string }>; runDir: string; workDir: string } | null = null;
+  let slotAcquired = false;
 
   try {
     const runtime = skill.runtime as SkillRuntime;
+    const sandboxPolicy = parseSandboxPolicy(skill.sandbox_policy);
+    const inputContractError = validateSkillContract(skill.input_contract, payload.input || {}, 'Skill 输入');
+    if (inputContractError) {
+      throw new Error(`Skill 输入不符合契约：${inputContractError}`);
+    }
+
     if (packagePath) {
       assertSkillPackageDirectoryScope(packagePath, userId, skillId);
       assertSkillPackageSafe(await analyzePackageDirectory(packagePath), 'run');
     }
     const skillParameters = typeof skill.parameters === 'string' ? JSON.parse(skill.parameters || '{}') : skill.parameters || {};
-    inputFiles = await prepareSkillInputFiles(packagePath, runId, payload.input);
+    inputFiles = await prepareSkillInputFiles(packagePath, runId, payload.input, sandboxPolicy.maxInputFiles);
     const inputJson = JSON.stringify({
       skill: {
         id: String(skill.id),
@@ -1364,6 +1679,28 @@ export async function runSkillPackage(
               mode: 'prompt-only',
               text: '',
               instruction: '',
+              ok: false,
+              summary: message,
+            }),
+            message,
+            message,
+            runId,
+          ]
+        );
+        return runId;
+      }
+      const outputContractError = validateSkillContract(skill.output_contract, instruction, 'Skill 输出');
+      if (outputContractError) {
+        const message = `Skill 输出不符合契约：${outputContractError}`;
+        await query(
+          `UPDATE skill_runs
+           SET status = 'failed', progress = 100, output = ?, error_message = ?, logs = ?, completed_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            JSON.stringify({
+              mode: 'prompt-only',
+              text: instruction,
+              instruction,
               ok: false,
               summary: message,
             }),
@@ -1406,9 +1743,12 @@ export async function runSkillPackage(
       ? [entryPath, ...buildPythonSkillArgs(payload.input)]
       : [entryPath];
     const readableArgs = args.slice(1).map((item) => item.includes(' ') ? `"${item}"` : item).join(' ');
+    await acquireSkillRunSlot();
+    slotAcquired = true;
     const result = await runProcess(command, args, {
       cwd: inputFiles.workDir || packagePath,
-      timeoutMs: RUN_TIMEOUT_MS,
+      timeoutMs: sandboxPolicy.timeoutMs,
+      maxOutputBytes: sandboxPolicy.maxOutputBytes,
       input: inputJson,
       env: {
         SKILL_PACKAGE_DIR: packagePath,
@@ -1451,6 +1791,39 @@ export async function runSkillPackage(
       return runId;
     }
 
+    const outputContractError = validateSkillContract(
+      skill.output_contract,
+      parseSkillOutputForContract(outputText),
+      'Skill 输出'
+    );
+    if (outputContractError) {
+      const message = `Skill 输出不符合契约：${outputContractError}`;
+      await query(
+        `UPDATE skill_runs
+         SET status = 'failed', progress = 100, output = ?, error_message = ?, logs = ?, completed_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          JSON.stringify({
+            mode: runtime,
+            entry,
+            args: args.slice(1),
+            text: outputText,
+            stderr: stderrText,
+            ok: false,
+            summary: message,
+          }),
+          message,
+          [
+            `执行入口：${entry}${readableArgs ? ` ${readableArgs}` : ''}`,
+            stderrText,
+            outputText ? `stdout：${compactRunText(outputText, 1200)}` : '未返回 stdout 内容。',
+          ].filter(Boolean).join('\n'),
+          runId,
+        ]
+      );
+      return runId;
+    }
+
     await query(
       `UPDATE skill_runs
        SET status = 'completed', progress = 100, output = ?, logs = ?, completed_at = CURRENT_TIMESTAMP
@@ -1482,6 +1855,7 @@ export async function runSkillPackage(
       [message, message, runId]
     );
   } finally {
+    if (slotAcquired) releaseSkillRunSlot();
     if (inputFiles?.runDir) {
       await cleanupSkillRunDirectory(packagePath, inputFiles.runDir);
     }
@@ -1556,7 +1930,7 @@ function buildPythonSkillArgs(input: unknown) {
   return [];
 }
 
-async function prepareSkillInputFiles(packagePath: string, runId: number, input: unknown) {
+async function prepareSkillInputFiles(packagePath: string, runId: number, input: unknown, maxInputFiles = 8) {
   if (!packagePath) return { inputDir: '', savedFiles: [], runDir: '', workDir: '' };
   const record = extractInputRecord(input);
   const files = Array.isArray(record.fileContents)
@@ -1572,7 +1946,7 @@ async function prepareSkillInputFiles(packagePath: string, runId: number, input:
   await fs.mkdir(inputDir, { recursive: true });
   await fs.mkdir(workDir, { recursive: true });
 
-  for (const [index, file] of files.entries()) {
+  for (const [index, file] of files.slice(0, maxInputFiles).entries()) {
     const name = safeRelativePath(String(file?.name || `file-${index + 1}.txt`)).split('/').pop() || `file-${index + 1}.txt`;
     const target = path.join(inputDir, name);
     if (typeof file?.dataBase64 === 'string' && file.dataBase64.trim()) {

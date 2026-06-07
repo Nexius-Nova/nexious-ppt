@@ -95,6 +95,7 @@ export interface SkillDefinition {
   params: Record<string, any>;
   instruction?: string;
   category?: string;
+  capabilities?: string[];
   type?: string;
   runtime?: string;
   entry?: string | null;
@@ -137,12 +138,27 @@ export interface ProjectModelSelection {
   imageModelId: string | null;
 }
 
+export interface WorkflowContext {
+  projectId: string;
+  userId?: number | null;
+  jobId?: string | null;
+  currentPhase?: string | null;
+  modelConfig: ProjectModelSelection;
+  templateId?: string | null;
+  templateName?: string | null;
+  promptId?: string | null;
+  selectedSkills: string[];
+  startedAt?: number;
+  updatedAt?: number;
+}
+
 export interface PptProjectState {
   input: DeckInput;
   uploadedFileContents?: UploadedFileContent[];
   processedInputContent?: string;
   parameters: AgentParameters;
   modelSelection?: ProjectModelSelection;
+  workflowContext?: WorkflowContext | null;
   selectedTemplate: TemplateAsset | null;
   outline: SlideOutline[];
   images: GeneratedImage[];
