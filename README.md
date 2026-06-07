@@ -69,6 +69,12 @@ ENCRYPTION_KEY=change-this-32-character-key
 STORAGE_ROOT=/var/lib/nexious-ppt
 ```
 
+可编辑 PPTX 导出依赖 Python 运行时。部署脚本会自动创建 `.venv` 并安装 [server/requirements.txt](server/requirements.txt)，PM2 会通过 `PYTHON_BIN` 使用该虚拟环境：
+
+```env
+PYTHON_BIN=/home/admin/nexious-ppt/.venv/bin/python
+```
+
 ## 数据库初始化
 
 初始化脚本在 [database/init.sql](database/init.sql)。
@@ -155,6 +161,20 @@ curl -I https://nexious-ppt.xyz
 curl https://nexious-ppt.xyz/health
 pm2 status
 pm2 logs nexious-ppt-api --lines 80
+```
+
+如果导出时报 `from svg_to_pptx...`、`No module named pptx`、`No module named PIL` 等 Python 导入错误，先在服务器重新执行：
+
+```bash
+cd ~/nexious-ppt
+bash deploy.sh
+.venv/bin/python - <<'PY'
+import sys
+sys.path.insert(0, "server/vendor")
+from svg_to_pptx.pptx_builder import create_pptx_with_native_svg
+print("python pptx exporter deps ok")
+PY
+pm2 restart nexious-ppt-api --update-env
 ```
 
 ## 目录

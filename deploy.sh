@@ -11,6 +11,7 @@ NGINX_PORT="${NGINX_PORT:-8081}"
 STORAGE_ROOT="${STORAGE_ROOT:-/var/lib/nexious-ppt}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-https://${DOMAIN}}"
 CORS_ORIGINS="${CORS_ORIGINS:-https://${DOMAIN}}"
+PYTHON_VENV_DIR="${PYTHON_VENV_DIR:-.venv}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -65,11 +66,54 @@ install_nginx_conf() {
   run_sudo systemctl reload nginx
 }
 
+resolve_python_venv_dir() {
+  local app_dir="$1"
+  if [[ "${PYTHON_VENV_DIR}" = /* ]]; then
+    echo "${PYTHON_VENV_DIR}"
+  else
+    echo "${app_dir}/${PYTHON_VENV_DIR}"
+  fi
+}
+
+ensure_python_runtime() {
+  local app_dir="$1"
+  local venv_dir
+  venv_dir="$(resolve_python_venv_dir "${app_dir}")"
+
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "==> 安装 Python 与 SVG/PPTX 系统依赖"
+    run_sudo apt-get update
+    run_sudo apt-get install -y \
+      python3 \
+      python3-pip \
+      python3-venv \
+      libcairo2 \
+      libpango-1.0-0 \
+      libpangocairo-1.0-0 \
+      libgdk-pixbuf-2.0-0 \
+      libffi-dev \
+      shared-mime-info
+  fi
+
+  require_cmd python3
+
+  if [ ! -x "${venv_dir}/bin/python" ]; then
+    echo "==> 创建 Python 虚拟环境：${venv_dir}"
+    python3 -m venv "${venv_dir}"
+  fi
+
+  echo "==> 安装 PPTX 导出 Python 依赖"
+  "${venv_dir}/bin/python" -m pip install --upgrade pip
+  "${venv_dir}/bin/python" -m pip install -r "${app_dir}/server/requirements.txt"
+
+  export PYTHON_BIN="${venv_dir}/bin/python"
+}
+
 start_pm2() {
   if pm2 describe "${PM2_APP_NAME}" >/dev/null 2>&1; then
-    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" pm2 reload ecosystem.config.cjs --update-env
+    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" PYTHON_BIN="${PYTHON_BIN}" pm2 reload ecosystem.config.cjs --update-env
   else
-    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" pm2 start ecosystem.config.cjs --update-env
+    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" PYTHON_BIN="${PYTHON_BIN}" pm2 start ecosystem.config.cjs --update-env
   fi
   pm2 save
   pm2 status
@@ -97,6 +141,8 @@ deploy_here() {
 
   echo "==> 安装依赖"
   pnpm install --frozen-lockfile
+
+  ensure_python_runtime "${app_dir}"
 
   echo "==> 构建前端"
   VITE_API_URL="${PUBLIC_BASE_URL}" pnpm build
@@ -141,6 +187,7 @@ deploy_remote() {
   rsync -az --delete \
     --exclude='.git/' \
     --exclude='node_modules/' \
+    --exclude='.venv/' \
     --exclude='.generated/' \
     --exclude='logs/' \
     --exclude='.env' \
@@ -149,7 +196,7 @@ deploy_remote() {
 
   echo "==> 在服务器执行本机部署"
   ssh -p "${deploy_port}" "${ssh_target}" \
-    "cd '${app_dir}' && APP_DIR='${app_dir}' APP_NAME='${APP_NAME}' PM2_APP_NAME='${PM2_APP_NAME}' DOMAIN='${DOMAIN}' APP_PORT='${APP_PORT}' NGINX_PORT='${NGINX_PORT}' STORAGE_ROOT='${STORAGE_ROOT}' PUBLIC_BASE_URL='${PUBLIC_BASE_URL}' CORS_ORIGINS='${CORS_ORIGINS}' bash deploy.sh"
+    "cd '${app_dir}' && APP_DIR='${app_dir}' APP_NAME='${APP_NAME}' PM2_APP_NAME='${PM2_APP_NAME}' DOMAIN='${DOMAIN}' APP_PORT='${APP_PORT}' NGINX_PORT='${NGINX_PORT}' STORAGE_ROOT='${STORAGE_ROOT}' PUBLIC_BASE_URL='${PUBLIC_BASE_URL}' CORS_ORIGINS='${CORS_ORIGINS}' PYTHON_VENV_DIR='${PYTHON_VENV_DIR}' bash deploy.sh"
 }
 
 if [ -n "${DEPLOY_HOST:-}" ]; then
