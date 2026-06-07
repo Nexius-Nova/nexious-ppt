@@ -1,4 +1,5 @@
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue';
+import { api } from '@/services/api';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const PRIVATE_ASSET_PATHS = ['/generated-images/', '/avatars/'];
@@ -24,12 +25,7 @@ function toAbsoluteAssetUrl(value: string): string {
 }
 
 async function fetchPrivateAssetBlob(value: string): Promise<Blob> {
-  const token = localStorage.getItem('auth_token');
-  const response = await fetch(toAbsoluteAssetUrl(value), {
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
-    }
-  });
+  const response = await api.fetchWithAuth(toAbsoluteAssetUrl(value));
 
   if (!response.ok) throw new Error('资源加载失败');
   return response.blob();
@@ -42,7 +38,7 @@ async function fetchPrivateAssetUrl(value: string): Promise<string> {
 export async function fetchPrivateAssetAsDataUrl(value: string): Promise<string | null> {
   if (!isPrivateAssetUrl(value)) return null;
 
-  const token = localStorage.getItem('auth_token') || '';
+  const token = api.getStoredToken() || '';
   const cacheKey = `${token}:${toAbsoluteAssetUrl(value)}`;
   const cached = dataUrlCache.get(cacheKey);
   if (cached) return cached;

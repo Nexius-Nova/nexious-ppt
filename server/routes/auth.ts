@@ -12,6 +12,16 @@ import {
   updateUser,
   deleteUser
 } from '../models/user.js';
+import {
+  createExclusiveUserSession,
+  extendSession,
+  getActiveSession,
+  getActiveSessionByRefreshToken,
+  hashRefreshToken,
+  revokeSession,
+  revokeUserSessions,
+  touchSession,
+} from '../models/userSession.js';
 import { deleteGeneratedAssetUrl } from '../utils/generatedAssets.js';
 import { generatedAvatarsRoot } from '../utils/storage.js';
 
@@ -19,6 +29,9 @@ const router = Router();
 const DEFAULT_JWT_SECRET = 'your-secret-key-change-in-production';
 const JWT_SECRET = process.env.JWT_SECRET || DEFAULT_JWT_SECRET;
 const SALT_ROUNDS = 10;
+const ACCESS_TOKEN_EXPIRES_IN = process.env.ACCESS_TOKEN_EXPIRES_IN || '1h';
+const ACCESS_TOKEN_EXPIRES_SECONDS = Math.max(60, Number(process.env.ACCESS_TOKEN_EXPIRES_SECONDS || 60 * 60));
+const REFRESH_TOKEN_EXPIRES_DAYS = Math.max(1, Number(process.env.REFRESH_TOKEN_EXPIRES_DAYS || 7));
 
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = Number(process.env.LOGIN_MAX_ATTEMPTS || 8);
@@ -74,18 +87,72 @@ if (process.env.NODE_ENV === 'production' && JWT_SECRET === DEFAULT_JWT_SECRET) 
 
 export interface AuthRequest extends Request {
   userId?: number;
+  sessionId?: string;
 }
 
-function generateToken(userId: number): string {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
+type AccessTokenPayload = {
+  userId: number;
+  sessionId: string;
+  type: 'access';
+};
+
+type TokenVerifyResult =
+  | { ok: true; payload: AccessTokenPayload }
+  | { ok: false; code: 'TOKEN_EXPIRED' | 'TOKEN_INVALID'; message: string };
+
+function refreshTokenExpiresAt(): Date {
+  return new Date(Date.now() + REFRESH_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000);
 }
 
-function verifyToken(token: string): { userId: number } | null {
+function generateAccessToken(userId: number, sessionId: string): string {
+  return jwt.sign({ userId, sessionId, type: 'access' }, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRES_IN });
+}
+
+function verifyAccessToken(token: string): TokenVerifyResult {
   try {
-    return jwt.verify(token, JWT_SECRET) as { userId: number };
-  } catch {
-    return null;
+    const payload = jwt.verify(token, JWT_SECRET) as Partial<AccessTokenPayload>;
+    if (
+      payload.type !== 'access'
+      || typeof payload.userId !== 'number'
+      || typeof payload.sessionId !== 'string'
+      || !payload.sessionId
+    ) {
+      return { ok: false, code: 'TOKEN_INVALID', message: '登录状态无效，请重新登录' };
+    }
+    return { ok: true, payload: payload as AccessTokenPayload };
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      return { ok: false, code: 'TOKEN_EXPIRED', message: '登录已过期，正在尝试自动续期' };
+    }
+    return { ok: false, code: 'TOKEN_INVALID', message: '登录状态已失效，请重新登录' };
   }
+}
+
+function createRefreshToken(): string {
+  return `${randomUUID()}.${randomUUID()}`;
+}
+
+function authTokenPayload(userId: number, sessionId: string, refreshToken: string) {
+  return {
+    token: generateAccessToken(userId, sessionId),
+    refreshToken,
+    expiresIn: ACCESS_TOKEN_EXPIRES_SECONDS,
+    tokenExpiresAt: Date.now() + ACCESS_TOKEN_EXPIRES_SECONDS * 1000,
+  };
+}
+
+async function issueUserSession(req: Request, userId: number) {
+  const sessionId = randomUUID();
+  const refreshToken = createRefreshToken();
+  await createExclusiveUserSession({
+    userId,
+    sessionId,
+    refreshTokenHash: hashRefreshToken(refreshToken),
+    userAgent: req.headers['user-agent']?.slice(0, 500) || null,
+    ipAddress: clientIp(req).slice(0, 100),
+    expiresAt: refreshTokenExpiresAt(),
+  });
+  return authTokenPayload(userId, sessionId, refreshToken);
 }
 
 function clientIp(req: Request): string {
@@ -655,29 +722,51 @@ function consumeCaptchaToken(req: Request, email: unknown, captchaToken: unknown
 }
 
 async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
+  try {
+    const authHeader = req.headers.authorization;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        code: 'UNAUTHORIZED',
+        message: '请先登录后再操作'
+      });
+    }
+
+    const token = authHeader.substring(7);
+    const decoded = verifyAccessToken(token);
+
+    if (!decoded.ok) {
+      return res.status(401).json({
+        success: false,
+        code: decoded.code,
+        message: decoded.message
+      });
+    }
+
+    const session = await getActiveSession(decoded.payload.userId, decoded.payload.sessionId);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REPLACED',
+        message: '账号已在另一台设备登录，当前设备已下线'
+      });
+    }
+
+    void touchSession(decoded.payload.userId, decoded.payload.sessionId).catch((error) => {
+      console.warn('更新会话活跃时间失败:', error);
+    });
+    req.userId = decoded.payload.userId;
+    req.sessionId = decoded.payload.sessionId;
+    next();
+  } catch (error) {
+    console.error('认证会话校验错误:', error);
+    res.status(500).json({
       success: false,
-      code: 'UNAUTHORIZED',
-      message: '请先登录后再操作'
+      code: 'AUTH_SESSION_CHECK_FAILED',
+      message: '登录状态校验失败，请稍后再试'
     });
   }
-
-  const token = authHeader.substring(7);
-  const decoded = verifyToken(token);
-
-  if (!decoded) {
-    return res.status(401).json({
-      success: false,
-      code: 'TOKEN_INVALID',
-      message: '登录状态已失效，请重新登录'
-    });
-  }
-
-  req.userId = decoded.userId;
-  next();
 }
 
 router.post('/captcha', async (req: Request, res: Response) => {
@@ -925,7 +1014,7 @@ router.post('/register', async (req: Request, res: Response) => {
       name
     });
 
-    const token = generateToken(userId);
+    const authTokens = await issueUserSession(req, userId);
 
     res.status(201).json({
       success: true,
@@ -933,7 +1022,7 @@ router.post('/register', async (req: Request, res: Response) => {
         userId,
         email,
         name,
-        token
+        ...authTokens
       },
       message: '注册成功'
     });
@@ -1000,6 +1089,7 @@ router.post('/reset-password', async (req: Request, res: Response) => {
       });
     }
 
+    await revokeUserSessions(user.id);
     clearLoginFailures(loginAttemptKey(req, email));
     res.json({
       success: true,
@@ -1072,7 +1162,7 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     clearLoginFailures(attemptKey);
-    const token = generateToken(user.id);
+    const authTokens = await issueUserSession(req, user.id);
 
     res.json({
       success: true,
@@ -1081,7 +1171,7 @@ router.post('/login', async (req: Request, res: Response) => {
         email: user.email,
         name: user.name,
         avatar: user.avatar,
-        token
+        ...authTokens
       },
       message: '登录成功'
     });
@@ -1091,6 +1181,100 @@ router.post('/login', async (req: Request, res: Response) => {
       success: false,
       message: '登录失败',
       error: process.env.NODE_ENV === 'development' ? (error as Error).message : undefined
+    });
+  }
+});
+
+router.post('/refresh', async (req: Request, res: Response) => {
+  try {
+    if (isRateLimited(authRequests, rateKey(req, 'refresh'), AUTH_MAX_REQUESTS, AUTH_WINDOW_MS)) {
+      return res.status(429).json({
+        success: false,
+        code: 'AUTH_RATE_LIMITED',
+        message: '请求过于频繁，请稍后再试'
+      });
+    }
+
+    const refreshToken = String(req.body?.refreshToken || '').trim();
+    if (!refreshToken) {
+      return res.status(401).json({
+        success: false,
+        code: 'REFRESH_TOKEN_REQUIRED',
+        message: '请重新登录'
+      });
+    }
+
+    const oldRefreshTokenHash = hashRefreshToken(refreshToken);
+    const session = await getActiveSessionByRefreshToken(oldRefreshTokenHash);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REPLACED',
+        message: '账号已在另一台设备登录，当前设备已下线'
+      });
+    }
+
+    const user = await getUserById(session.user_id);
+    if (!user) {
+      await revokeSession(session.user_id, session.session_id);
+      return res.status(401).json({
+        success: false,
+        code: 'USER_NOT_FOUND',
+        message: '用户不存在，请重新登录'
+      });
+    }
+
+    const extended = await extendSession({
+      userId: session.user_id,
+      sessionId: session.session_id,
+      refreshTokenHash: oldRefreshTokenHash,
+      expiresAt: refreshTokenExpiresAt(),
+      userAgent: req.headers['user-agent']?.slice(0, 500) || null,
+      ipAddress: clientIp(req).slice(0, 100),
+    });
+
+    if (!extended) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REPLACED',
+        message: '登录状态已更新，请重新登录'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        avatar: user.avatar,
+        ...authTokenPayload(user.id, session.session_id, refreshToken)
+      },
+      message: '登录状态已续期'
+    });
+  } catch (error) {
+    console.error('刷新登录状态错误:', error);
+    res.status(500).json({
+      success: false,
+      message: '刷新登录状态失败'
+    });
+  }
+});
+
+router.post('/logout', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.userId && req.sessionId) {
+      await revokeSession(req.userId, req.sessionId);
+    }
+    res.json({
+      success: true,
+      message: '已退出登录'
+    });
+  } catch (error) {
+    console.error('退出登录错误:', error);
+    res.status(500).json({
+      success: false,
+      message: '退出登录失败'
     });
   }
 });
@@ -1217,6 +1401,9 @@ router.put('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
     if (avatar !== undefined && oldUser.avatar && oldUser.avatar !== (updateData.avatar || null)) {
       await deleteGeneratedAssetUrl(oldUser.avatar).catch(() => undefined);
     }
+    if (updateData.password_hash) {
+      await revokeUserSessions(req.userId);
+    }
     res.json({
       success: true,
       data: {
@@ -1225,7 +1412,7 @@ router.put('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
         name: user?.name,
         avatar: user?.avatar
       },
-      message: '更新成功'
+      message: updateData.password_hash ? '密码已更新，请重新登录' : '更新成功'
     });
   } catch (error) {
     console.error('更新用户信息错误:', error);

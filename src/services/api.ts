@@ -18,37 +18,213 @@ type ApiRequestOptions = RequestInit & {
   timeoutMs?: number;
 };
 
+export interface AuthTokenPayload {
+  token: string;
+  refreshToken: string;
+  expiresIn: number;
+  tokenExpiresAt: number;
+}
+
+export interface AuthSessionPayload extends AuthTokenPayload {
+  userId: number;
+  email: string;
+  name: string | null;
+  avatar?: string | null;
+}
+
+const AUTH_TOKEN_KEY = 'auth_token';
+const AUTH_REFRESH_TOKEN_KEY = 'auth_refresh_token';
+const AUTH_TOKEN_EXPIRES_AT_KEY = 'auth_token_expires_at';
+const TOKEN_REFRESH_SKEW_MS = 60_000;
+const PUBLIC_AUTH_ENDPOINTS = new Set([
+  '/api/auth/register',
+  '/api/auth/captcha',
+  '/api/auth/captcha/verify',
+  '/api/auth/login',
+  '/api/auth/email-code',
+  '/api/auth/reset-password',
+]);
+const SESSION_AUTH_ERROR_CODES = new Set([
+  'TOKEN_EXPIRED',
+  'TOKEN_INVALID',
+  'SESSION_REPLACED',
+  'REFRESH_TOKEN_REQUIRED',
+  'USER_NOT_FOUND',
+]);
+
+function readStoredNumber(key: string): number {
+  if (typeof window === 'undefined') return 0;
+  const value = Number(localStorage.getItem(key) || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function shouldUseAuth(endpoint: string) {
+  return !PUBLIC_AUTH_ENDPOINTS.has(endpoint);
+}
+
+function shouldNotifyUnauthorized(status: number, code?: string) {
+  return status === 401 && Boolean(code && SESSION_AUTH_ERROR_CODES.has(code));
+}
+
 class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
+  private refreshToken: string | null = null;
+  private tokenExpiresAt = 0;
+  private refreshPromise: Promise<string | null> | null = null;
   private timeoutMs = 30000;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl;
     if (typeof window !== 'undefined') {
-      this.token = localStorage.getItem('auth_token');
+      this.token = localStorage.getItem(AUTH_TOKEN_KEY);
+      this.refreshToken = localStorage.getItem(AUTH_REFRESH_TOKEN_KEY);
+      this.tokenExpiresAt = readStoredNumber(AUTH_TOKEN_EXPIRES_AT_KEY);
     }
   }
 
   setToken(token: string | null) {
+    if (!token) {
+      this.clearAuthTokens();
+      return;
+    }
     this.token = token;
     if (typeof window !== 'undefined') {
-      if (token) {
-        localStorage.setItem('auth_token', token);
-      } else {
-        localStorage.removeItem('auth_token');
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+    }
+  }
+
+  setAuthTokens(payload: AuthTokenPayload | null) {
+    if (!payload) {
+      this.clearAuthTokens();
+      return;
+    }
+    this.token = payload.token;
+    this.refreshToken = payload.refreshToken;
+    this.tokenExpiresAt = Number(payload.tokenExpiresAt || Date.now() + payload.expiresIn * 1000);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+      localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, payload.refreshToken);
+      localStorage.setItem(AUTH_TOKEN_EXPIRES_AT_KEY, String(this.tokenExpiresAt));
+    }
+  }
+
+  clearAuthTokens() {
+    this.token = null;
+    this.refreshToken = null;
+    this.tokenExpiresAt = 0;
+    this.refreshPromise = null;
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+      localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
+      localStorage.removeItem(AUTH_TOKEN_EXPIRES_AT_KEY);
+    }
+  }
+
+  getStoredToken() {
+    return this.token;
+  }
+
+  async getAuthToken(): Promise<string | null> {
+    return this.getValidToken();
+  }
+
+  async fetchWithAuth(input: string, init: RequestInit = {}, allowRefreshRetry = true): Promise<Response> {
+    const token = await this.getValidToken();
+    const headers: Record<string, string> = {
+      ...(init.headers as Record<string, string>),
+    };
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const response = await fetch(input, {
+      ...init,
+      headers,
+    });
+
+    if (response.status === 401 && allowRefreshRetry) {
+      const data = await response.clone().json().catch(() => ({}));
+      if (data?.code === 'TOKEN_EXPIRED') {
+        const refreshedToken = await this.getValidToken(true);
+        if (refreshedToken) return this.fetchWithAuth(input, init, false);
+      }
+      const message = translateErrorMessage(
+        { message: data?.message || data?.error, status: response.status, code: data?.code },
+        '登录状态已失效，请重新登录'
+      );
+      if (shouldNotifyUnauthorized(response.status, data?.code) && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('api:unauthorized', { detail: message }));
       }
     }
+
+    return response;
+  }
+
+  private async getValidToken(forceRefresh = false): Promise<string | null> {
+    if (!this.token && typeof window !== 'undefined') {
+      this.token = localStorage.getItem(AUTH_TOKEN_KEY);
+      this.refreshToken = localStorage.getItem(AUTH_REFRESH_TOKEN_KEY);
+      this.tokenExpiresAt = readStoredNumber(AUTH_TOKEN_EXPIRES_AT_KEY);
+    }
+    const shouldRefresh = forceRefresh
+      || (!!this.refreshToken && (!this.token || (this.tokenExpiresAt > 0 && Date.now() >= this.tokenExpiresAt - TOKEN_REFRESH_SKEW_MS)));
+    if (!shouldRefresh) return this.token;
+    return this.refreshAccessToken();
+  }
+
+  private async refreshAccessToken(): Promise<string | null> {
+    if (!this.refreshToken) return null;
+    if (!this.refreshPromise) {
+      const currentRefreshToken = this.refreshToken;
+      this.refreshPromise = fetch(`${this.baseUrl}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: currentRefreshToken }),
+      })
+        .then(async (response) => {
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || !data?.success || !data?.data?.token || !data?.data?.refreshToken) {
+            const message = translateErrorMessage(
+              { message: data?.message || data?.error, status: response.status, code: data?.code },
+              '登录状态已失效，请重新登录'
+            );
+            this.clearAuthTokens();
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('api:unauthorized', { detail: message }));
+            }
+            return null;
+          }
+          this.setAuthTokens(data.data);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('api:token-refreshed', { detail: data.data }));
+          }
+          return data.data.token as string;
+        })
+        .catch((error) => {
+          const message = translateErrorMessage(error, '登录状态刷新失败，请重新登录');
+          this.clearAuthTokens();
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('api:unauthorized', { detail: message }));
+          }
+          return null;
+        })
+        .finally(() => {
+          this.refreshPromise = null;
+        });
+    }
+    return this.refreshPromise;
   }
 
   private async request<T>(
     endpoint: string,
-    options: ApiRequestOptions = {}
+    options: ApiRequestOptions = {},
+    allowRefreshRetry = true
   ): Promise<ApiResponse<T>> {
     const url = `${this.baseUrl}${endpoint}`;
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), options.timeoutMs ?? this.timeoutMs);
     const requestId = this.createRequestId();
+    const useAuth = shouldUseAuth(endpoint);
+    const token = useAuth ? await this.getValidToken() : null;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -56,8 +232,8 @@ class ApiClient {
       ...(options.headers as Record<string, string>),
     };
 
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
     }
 
     try {
@@ -74,11 +250,16 @@ class ApiClient {
       const responseRequestId = response.headers.get('x-request-id') || data.requestId || requestId;
 
       if (!response.ok) {
+        if (useAuth && response.status === 401 && data.code === 'TOKEN_EXPIRED' && allowRefreshRetry) {
+          const refreshedToken = await this.getValidToken(true);
+          window.clearTimeout(timeoutId);
+          if (refreshedToken) return this.request<T>(endpoint, options, false);
+        }
         const message = translateErrorMessage(
           { message: data.message || data.error, status: response.status, code: data.code },
           '请求失败，请稍后重试'
         );
-        if (response.status === 401 && typeof window !== 'undefined') {
+        if (useAuth && shouldNotifyUnauthorized(response.status, data.code) && typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('api:unauthorized', {
             detail: message || '登录状态已失效，请重新登录'
           }));
@@ -154,18 +335,21 @@ class ApiClient {
     endpoint: string,
     body: any,
     onMessage: (data: any) => void,
-    onError?: (error: Error) => void
+    onError?: (error: Error) => void,
+    allowRefreshRetry = true
   ): Promise<void> {
     const url = `${this.baseUrl}${endpoint}`;
     const requestId = this.createRequestId();
+    const useAuth = shouldUseAuth(endpoint);
+    const token = useAuth ? await this.getValidToken() : null;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-Request-Id': requestId,
     };
 
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
     }
 
     try {
@@ -177,11 +361,17 @@ class ApiClient {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        if (useAuth && response.status === 401 && errorData.code === 'TOKEN_EXPIRED' && allowRefreshRetry) {
+          const refreshedToken = await this.getValidToken(true);
+          if (refreshedToken) {
+            return this.stream(endpoint, body, onMessage, onError, false);
+          }
+        }
         const message = translateErrorMessage(
           { message: errorData.message || errorData.error, status: response.status, code: errorData.code },
           '请求失败，请稍后重试'
         );
-        if (response.status === 401 && typeof window !== 'undefined') {
+        if (useAuth && shouldNotifyUnauthorized(response.status, errorData.code) && typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('api:unauthorized', {
             detail: message || '登录状态已失效，请重新登录'
           }));
@@ -309,7 +499,7 @@ export type EmailCodePurpose = 'register' | 'reset-password' | 'change-password'
 
 export const authApi = {
   register: (email: string, password: string, name?: string, emailCode?: string) =>
-    api.post<{ userId: number; email: string; name: string; token: string }>('/api/auth/register', {
+    api.post<AuthSessionPayload>('/api/auth/register', {
       email,
       password,
       name,
@@ -325,11 +515,13 @@ export const authApi = {
     api.post<{ captchaToken: string; expiresIn: number }>('/api/auth/captcha/verify', data),
 
   login: (email: string, password: string, captchaToken: string) =>
-    api.post<{ userId: number; email: string; name: string; avatar: string | null; token: string }>('/api/auth/login', {
+    api.post<AuthSessionPayload>('/api/auth/login', {
       email,
       password,
       captchaToken,
     }),
+
+  logout: () => api.post('/api/auth/logout'),
 
   sendEmailCode: (data: { email: string; purpose: Extract<EmailCodePurpose, 'register' | 'reset-password'> }) =>
     api.post<{ expiresIn: number; cooldown: number }>('/api/auth/email-code', data),
@@ -346,12 +538,10 @@ export const authApi = {
     api.put<User>('/api/auth/me', data),
 
   uploadAvatar: async (file: Blob) => {
-    const token = localStorage.getItem('auth_token');
-    const response = await fetch(`${API_BASE_URL}/api/auth/me/avatar`, {
+    const response = await api.fetchWithAuth(`${API_BASE_URL}/api/auth/me/avatar`, {
       method: 'PUT',
       headers: {
         'Content-Type': file.type || 'image/jpeg',
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
       },
       body: file,
     });
@@ -777,12 +967,7 @@ export const aiApi = {
     onJob: (job: QueueJobSnapshot) => void,
     onError?: (error: Error) => void
   ): Promise<void> => {
-    const token = localStorage.getItem('auth_token');
-    const response = await fetch(`${API_BASE_URL}/api/generate/jobs/${id}/events`, {
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      }
-    });
+    const response = await api.fetchWithAuth(`${API_BASE_URL}/api/generate/jobs/${id}/events`);
     if (!response.ok) {
       throw new Error('任务订阅失败');
     }
@@ -848,12 +1033,7 @@ export const aiApi = {
   },
 
   downloadExportJob: async (id: string): Promise<string> => {
-    const token = localStorage.getItem('auth_token');
-    const response = await fetch(`${API_BASE_URL}/api/generate/jobs/${id}/download`, {
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      }
-    });
+    const response = await api.fetchWithAuth(`${API_BASE_URL}/api/generate/jobs/${id}/download`);
     if (!response.ok) throw new Error('导出文件下载失败');
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -879,12 +1059,10 @@ export const aiApi = {
     lock?: SpecLock,
     exportOptions?: PptxExportOptions
   ): Promise<string> => {
-    const token = localStorage.getItem('auth_token');
-    const response = await fetch(`${API_BASE_URL}/api/generate/export-pptx`, {
+    const response = await api.fetchWithAuth(`${API_BASE_URL}/api/generate/export-pptx`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
       },
       body: JSON.stringify({ pages, spec, lock, exportOptions }),
     });

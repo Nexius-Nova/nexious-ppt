@@ -23,9 +23,15 @@ if (authStore.token) {
   void apiKeyStore.fetchApiKeys();
 }
 
+window.addEventListener('api:token-refreshed', (event) => {
+  if (event instanceof CustomEvent && event.detail) {
+    authStore.applyTokenRefresh(event.detail);
+  }
+});
+
 window.addEventListener('api:unauthorized', async (event) => {
   const message = event instanceof CustomEvent ? event.detail : '登录状态已失效，请重新登录';
-  authStore.logout();
+  authStore.logout({ remote: false });
   toastStore.warning('需要重新登录', message);
   if (router.currentRoute.value.path !== '/login') {
     await router.replace({

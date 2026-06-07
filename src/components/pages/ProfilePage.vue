@@ -187,6 +187,13 @@ async function saveProfile() {
     return;
   }
 
+  if (wantsPasswordChange.value) {
+    authStore.logout({ remote: false });
+    toastStore.success('密码已更新，请使用新密码重新登录');
+    await router.replace('/login');
+    return;
+  }
+
   currentPassword.value = '';
   newPassword.value = '';
   confirmPassword.value = '';

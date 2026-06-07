@@ -14,6 +14,7 @@
     "sidebar main";
   gap: 0;
   width: 100vw;
+  max-width: 100vw;
   height: 100dvh;
   background: var(--color-bg);
   overflow: hidden;
@@ -38,11 +39,12 @@
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: 52px minmax(0, 1fr) auto;
     grid-template-areas:
       "header"
       "main"
       "sidebar";
+    height: 100svh;
   }
 
   .app-shell--nav-collapsed {
@@ -50,7 +52,7 @@
   }
 
   .app-shell--workflow-focus {
-    grid-template-rows: auto 1fr;
+    grid-template-rows: 52px minmax(0, 1fr);
     grid-template-areas:
       "header"
       "main";

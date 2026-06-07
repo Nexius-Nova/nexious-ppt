@@ -1443,7 +1443,26 @@ onBeforeUnmount(stopStatusPolling);
 
 @media (max-width: 560px) {
   .skill-page {
-    padding: 14px;
+    gap: 12px;
+    padding: 14px 12px 18px;
+  }
+
+  .page-header {
+    gap: 10px;
+  }
+
+  .page-header__info {
+    min-width: 0;
+  }
+
+  .page-header__info h2 {
+    font-size: 22px;
+    line-height: 1.2;
+  }
+
+  .page-header__info p,
+  .upload-guide p {
+    font-size: 12px;
   }
 
   .page-header__actions,
@@ -1458,6 +1477,27 @@ onBeforeUnmount(stopStatusPolling);
   .package-detected,
   .package-view__summary {
     grid-template-columns: 1fr;
+  }
+
+  .upload-guide,
+  .skill-card {
+    padding: 12px;
+  }
+
+  .skill-card__icon,
+  .upload-guide__icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .skill-card__title h3 {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .loading-state {
+    padding: 28px 12px;
   }
 
   .package-tree header,

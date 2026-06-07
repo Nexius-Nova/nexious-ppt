@@ -191,8 +191,10 @@ function navigateTo(routePath: string) {
 }
 
 .side-nav--collapsed .side-nav__brand {
+  flex-direction: column;
   justify-content: center;
-  padding: 14px 8px 48px;
+  gap: 10px;
+  padding: 14px 8px;
 }
 
 .side-nav--collapsed .side-nav__brand span,
@@ -202,9 +204,6 @@ function navigateTo(routePath: string) {
 }
 
 .side-nav--collapsed .side-nav__collapse {
-  position: absolute;
-  right: 8px;
-  bottom: 10px;
   margin-left: 0;
 }
 
@@ -223,7 +222,7 @@ function navigateTo(routePath: string) {
     flex-direction: row;
     align-items: center;
     height: auto;
-    min-height: 64px;
+    min-height: 56px;
     border-top: 1px solid var(--color-border);
     border-right: 0;
     background: var(--color-surface);
@@ -234,7 +233,7 @@ function navigateTo(routePath: string) {
   .side-nav__brand {
     flex: 0 0 auto;
     gap: 8px;
-    padding: 10px 12px;
+    padding: 8px 10px;
     border-right: 1px solid var(--color-border);
     border-bottom: 0;
   }
@@ -260,10 +259,10 @@ function navigateTo(routePath: string) {
   .side-nav__item {
     flex: 0 0 auto;
     justify-content: center;
-    min-width: 74px;
-    min-height: 52px;
+    min-width: 68px;
+    min-height: 48px;
     margin: 0;
-    padding: 6px 8px;
+    padding: 5px 6px;
     flex-direction: column;
     gap: 4px;
     border-radius: 0;
@@ -272,14 +271,14 @@ function navigateTo(routePath: string) {
 
   .side-nav__item span {
     display: block;
-    max-width: 68px;
+    max-width: 62px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .side-nav--collapsed .side-nav__brand {
-    padding: 10px 12px;
+    padding: 8px 10px;
   }
 
   .side-nav--collapsed .side-nav__brand span {

@@ -242,6 +242,27 @@ CREATE TABLE IF NOT EXISTS `generation_jobs` (
   KEY `idx_generation_jobs_user_project_status_updated` (`user_id`, `project_id`, `status`, `updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ============================================
+-- 11. 用户登录会话表
+-- ============================================
+CREATE TABLE IF NOT EXISTS `user_sessions` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT UNSIGNED NOT NULL,
+  `session_id` CHAR(36) NOT NULL,
+  `refresh_token_hash` CHAR(64) NOT NULL,
+  `user_agent` VARCHAR(500) DEFAULT NULL,
+  `ip_address` VARCHAR(100) DEFAULT NULL,
+  `expires_at` DATETIME NOT NULL,
+  `revoked_at` DATETIME DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `last_seen_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_user_sessions_session_id` (`session_id`),
+  UNIQUE KEY `uk_user_sessions_refresh_token_hash` (`refresh_token_hash`),
+  KEY `idx_user_sessions_user_active` (`user_id`, `revoked_at`, `expires_at`),
+  CONSTRAINT `fk_user_sessions_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户登录会话表';
+
 -- 运行配置默认值
 -- 只为已存在用户补充缺失配置；不会创建用户，也不会覆盖用户已修改的配置。
 INSERT INTO `run_configs` (`user_id`, `name`, `key`, `type`, `value`, `options`, `min_value`, `max_value`, `description`)

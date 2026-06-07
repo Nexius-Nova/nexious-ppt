@@ -355,12 +355,44 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
+  .theme-switcher {
+    gap: 6px;
+  }
+
+  .theme-switcher__modes {
+    height: 30px;
+    padding: 2px;
+  }
+
+  .theme-switcher__mode {
+    width: 24px;
+    height: 24px;
+  }
+
+  .theme-switcher__trigger {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+  }
+
   .theme-switcher__panel {
-    right: -72px;
+    position: fixed;
+    top: 56px;
+    right: 10px;
+    left: 10px;
+    width: auto;
+    max-height: calc(100svh - 68px);
+    overflow-y: auto;
   }
 
   .theme-switcher__grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  .theme-switcher__modes {
+    display: none;
   }
 }
 </style>

@@ -267,6 +267,31 @@ async function migrate(): Promise<void> {
       console.log('generation_jobs table exists, skipped');
     }
 
+    if (!(await hasTable('user_sessions'))) {
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS \`user_sessions\` (
+          \`id\` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          \`user_id\` BIGINT UNSIGNED NOT NULL,
+          \`session_id\` CHAR(36) NOT NULL,
+          \`refresh_token_hash\` CHAR(64) NOT NULL,
+          \`user_agent\` VARCHAR(500) DEFAULT NULL,
+          \`ip_address\` VARCHAR(100) DEFAULT NULL,
+          \`expires_at\` DATETIME NOT NULL,
+          \`revoked_at\` DATETIME DEFAULT NULL,
+          \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          \`last_seen_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`id\`),
+          UNIQUE KEY \`uk_user_sessions_session_id\` (\`session_id\`),
+          UNIQUE KEY \`uk_user_sessions_refresh_token_hash\` (\`refresh_token_hash\`),
+          KEY \`idx_user_sessions_user_active\` (\`user_id\`, \`revoked_at\`, \`expires_at\`),
+          CONSTRAINT \`fk_user_sessions_user_id\` FOREIGN KEY (\`user_id\`) REFERENCES \`users\`(\`id\`) ON DELETE CASCADE ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户登录会话表'
+      `);
+      console.log('user_sessions table created');
+    } else {
+      console.log('user_sessions table exists, skipped');
+    }
+
     try {
       await ensureIndex(
         'projects',

@@ -885,7 +885,8 @@ function getProviderLabel(model: ManagedModel) {
 
 @media (max-width: 720px) {
   .model-page {
-    padding: 14px;
+    gap: 12px;
+    padding: 14px 12px 18px;
   }
 
   .model-list-panel__header,
@@ -908,6 +909,67 @@ function getProviderLabel(model: ManagedModel) {
   .model-tabs button {
     flex: 1;
     justify-content: center;
+  }
+
+  .model-card {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .model-card__main {
+    gap: 10px;
+  }
+
+  .model-card__mark {
+    width: 36px;
+    height: 36px;
+  }
+
+  .model-card__title-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .model-card__meta code,
+  .model-card__meta span {
+    max-width: 100%;
+  }
+
+  .model-card__state {
+    justify-items: start;
+    min-width: 0;
+  }
+
+  .model-card__actions {
+    justify-content: flex-end;
+  }
+
+  .loading-state,
+  .empty-models {
+    min-height: 180px;
+    padding: 24px 12px;
+  }
+
+  .modal {
+    max-height: calc(100svh - 24px);
+    overflow: auto;
+  }
+
+  .modal__header,
+  .modal__body,
+  .modal__footer {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .modal__footer {
+    flex-direction: column-reverse;
+  }
+
+  .modal__footer :deep(.ui-button) {
+    width: 100%;
   }
 
   .model-card {

@@ -1,0 +1,36 @@
+P0 优先
+工作流状态机独立化
+现在前端 agentStore.ts 和服务端队列都在维护状态，容易出现暂停、继续、重试、刷新后不同步。建议抽出统一状态机：input -> outline -> images -> pages -> export，明确每个阶段的 running/paused/failed/completed/retrying，前端只订阅服务端状态。
+
+多 PPT 并行上下文隔离
+每个项目应有独立 workflowContext，包含 projectId/userId/jobId/currentPhase/modelConfig/templateId/promptId/selectedSkills。避免一个 PPT 的暂停、模型切换、重试图片影响另一个 PPT。
+
+队列生产化
+BullMQ + Redis 是正确方向，但建议强制生产环境使用 Redis 6.2+ 和 noeviction。
+
+数据库迁移规范化
+现在有运行时自愈建表和脚本迁移，长期容易乱。建议引入 schema_migrations，所有表结构变化都走版本化迁移。启动时只做轻量校验，不在业务请求里动态补字段。
+
+P1 稳定和体验
+5. Skill 做成“能力平台”，不是简单脚本上传
+   Skill 包建议声明能力：web-search、file-parse、content-refine、image-tool 等。输入阶段由 AI 根据用户内容和上传文件自动选择，但执行前后必须遵守输入/输出契约。
+   文件解析类 Skill 应支持测试样本，否则会出现“没有测试文件导致健康测试失败”。
+Skill 沙箱继续加强
+当前已做目录限制和 .runs 清理，但建议后续用容器或受限 worker 执行。特别是第三方 Python 包、命令行工具、网络请求，都要有超时、日志、输出大小限制、并发限制。
+
+模板导入策略重新定位
+PPT 导入模板不要追求 100% 复刻，除非使用 PowerPoint 原生导出预览。更合理的是提取“设计 DNA”：配色、字体层级、版式比例、组件风格、示例页截图，然后作为生成约束。云服务器没有 PowerPoint 时，要明确降级预期。
+
+前端 Store 拆分
+agentStore.ts 太大了。建议拆成 projectStore、workflowStore、inputStore、queueStore、assetStore。这样暂停继续、输入处理、资源同步、页面状态不会互相缠住。
+
+统一错误和加载体验
+   所有页面都应统一：加载骨架、空状态、失败重试、权限失效提示、接口错误提示。尤其登录页、PPT 工作流页、Skill 管理、模板广场，建议共用一套错误展示组件。
+
+P2 扩展
+11. 模型配置按项目固化
+   默认模型来自模型管理，但每个 PPT 一旦开始运行，应保存当时使用的文本模型、图片模型、动画配置、模板、提示词、Skill 选择。后续切换默认模型不应影响已运行项目。
+加入测试体系
+   最小测试建议覆盖：OpenAI baseURL 拼接、队列状态流转、暂停继续恢复、Skill 路径安全、资源删除清理、登录错误提示、模板删除确认、项目刷新恢复。
+安全增强
+   邮箱验证码、登录、重置密码需要 IP + 邮箱双维限流。上传文件要校验 MIME、扩展名和实际内容。SVG 必须做 sanitize，避免脚本、外链和潜在 XSS。Resend key 这类密钥不要进入代码或提交记录，只通过环境变量管理。

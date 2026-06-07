@@ -859,12 +859,23 @@ onMounted(() => {
 
 @media (max-width: 720px) {
   .prompt-page {
-    padding: 16px;
+    gap: 12px;
+    padding: 14px 12px 18px;
   }
 
   .page-header {
     flex-direction: column;
     align-items: stretch;
+    gap: 10px;
+  }
+
+  .page-header__info h2 {
+    font-size: 22px;
+    line-height: 1.2;
+  }
+
+  .page-header__info p {
+    font-size: 13px;
   }
 
   .search-bar {
@@ -873,6 +884,21 @@ onMounted(() => {
 
   .prompt-grid {
     grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .prompt-card {
+    min-width: 0;
+    padding: 12px;
+  }
+
+  .prompt-upload {
+    min-height: 132px;
+  }
+
+  .loading-state,
+  .empty-state {
+    padding: 28px 12px;
   }
 
   .modal-overlay {
@@ -883,7 +909,7 @@ onMounted(() => {
   .modal,
   .modal--lg {
     max-width: none;
-    max-height: calc(100vh - 24px);
+    max-height: calc(100svh - 24px);
   }
 
   .form-grid {

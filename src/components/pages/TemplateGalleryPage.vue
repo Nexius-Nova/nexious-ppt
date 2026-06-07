@@ -2594,13 +2594,25 @@ onMounted(fetchTemplates);
 
 @media (max-width: 860px) {
   .template-page {
-    gap: 14px;
-    padding: 14px;
+    gap: 12px;
+    padding: 14px 12px 18px;
   }
 
   .page-header {
     align-items: stretch;
     flex-direction: column;
+    gap: 10px;
+    padding-bottom: 12px;
+  }
+
+  .page-header h2 {
+    font-size: 22px;
+    line-height: 1.2;
+  }
+
+  .page-header p:last-child {
+    margin-top: 6px;
+    font-size: 13px;
   }
 
   .toolbar,
@@ -2637,6 +2649,32 @@ onMounted(fetchTemplates);
     flex-wrap: wrap;
   }
 
+  .toolbar {
+    gap: 10px;
+  }
+
+  .category-tabs {
+    flex-wrap: nowrap;
+    margin: 0 -12px;
+    padding: 0 12px 4px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .category-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .category-tab {
+    flex: 0 0 auto;
+  }
+
+  .loading-state,
+  .empty-state {
+    padding: 28px 12px;
+  }
+
   .modal-overlay,
   .svg-preview-zoom {
     align-items: stretch;
@@ -2669,10 +2707,24 @@ onMounted(fetchTemplates);
 @media (max-width: 560px) {
   .template-grid {
     grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   .toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .template-preview {
+    height: 146px;
+    padding: 14px 16px;
+  }
+
+  .preview-deck {
+    min-height: 112px;
+  }
+
+  .preview-deck__slide {
+    width: 180px;
   }
 
   .editor-nav {

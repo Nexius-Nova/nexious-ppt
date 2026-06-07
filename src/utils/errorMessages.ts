@@ -18,7 +18,14 @@ export function translateErrorMessage(error: unknown, fallback = '操作失败�
   const lower = text.toLowerCase();
 
   if (!text) return fallback;
-  if (status === 401 || code === 'UNAUTHORIZED' || /unauthorized|jwt|token expired|invalid token/i.test(text)) {
+  if (
+    code === 'UNAUTHORIZED' ||
+    code === 'TOKEN_EXPIRED' ||
+    code === 'TOKEN_INVALID' ||
+    code === 'SESSION_REPLACED' ||
+    code === 'REFRESH_TOKEN_REQUIRED' ||
+    /unauthorized|jwt|token expired|invalid token/i.test(text)
+  ) {
     return '登录状态已失效，请重新登录';
   }
   if (status === 403 || /forbidden|permission denied|access denied/i.test(text)) {

@@ -1149,43 +1149,172 @@ onBeforeUnmount(() => {
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 720px) {
   .my-ppt-page {
-    gap: 14px;
-    padding: 14px;
+    gap: 12px;
+    padding: 14px 12px 18px;
   }
 
   .page-header {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .page-header__info h2 {
+    font-size: 22px;
+    line-height: 1.15;
+  }
+
+  .page-header__info p {
+    margin-top: 4px;
+    font-size: 13px;
   }
 
   .page-header :deep(.ui-button) {
-    width: 100%;
+    flex: 0 0 auto;
+    min-height: 38px;
+    padding-inline: 12px;
   }
 
-  .stats-grid,
-  .project-grid {
-    grid-template-columns: 1fr;
+  .stats-grid {
+    display: flex;
+    grid-template-columns: none;
+    gap: 10px;
+    margin: 0 -12px;
+    padding: 0 12px 4px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    scroll-snap-type: x mandatory;
+  }
+
+  .stats-grid::-webkit-scrollbar {
+    display: none;
   }
 
   .stat-card {
-    padding: 14px;
+    flex: 0 0 148px;
+    min-height: 72px;
+    padding: 12px;
+    gap: 10px;
+    border-radius: 10px;
+    scroll-snap-align: start;
+  }
+
+  .stat-card__icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+  }
+
+  .stat-card__value {
+    font-size: 22px;
+  }
+
+  .stat-card__label {
+    font-size: 12px;
+  }
+
+  .project-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   .search-bar {
     max-width: none;
   }
 
-  .project-card__header,
-  .project-card__footer {
-    gap: 10px;
+  .loading-state,
+  .empty-state {
+    padding: 24px 12px;
+  }
+
+  .project-card {
+    min-width: 0;
+    padding: 12px;
+    border-radius: 10px;
+  }
+
+  .project-card__header {
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .project-card__icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
   }
 
   .project-card__actions {
-    flex-wrap: wrap;
+    flex: 1;
     justify-content: flex-end;
+    gap: 6px;
+    min-width: 0;
     opacity: 1;
+  }
+
+  .action-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    border-radius: 8px;
+  }
+
+  .action-btn span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .project-card__preview {
+    margin-bottom: 10px;
+    border-radius: 7px;
+  }
+
+  .project-card__body {
+    margin-bottom: 8px;
+  }
+
+  .project-card__title {
+    font-size: 15px;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .project-card__topic {
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.45;
+    -webkit-line-clamp: 2;
+  }
+
+  .project-card__progress {
+    gap: 5px;
+    margin-top: 10px;
+  }
+
+  .project-card__footer {
+    gap: 10px;
+    padding-top: 8px;
+    min-width: 0;
+  }
+
+  .project-card__date {
+    min-width: 0;
+    font-size: 11px;
   }
 
   .modal-overlay {
@@ -1201,6 +1330,22 @@ onBeforeUnmount(() => {
 
   .modal__footer {
     flex-direction: column-reverse;
+  }
+}
+
+@media (max-width: 380px) {
+  .stat-card {
+    flex-basis: 132px;
+  }
+
+  .page-header__info h2 {
+    font-size: 20px;
+  }
+
+  .page-header :deep(.ui-button) {
+    min-height: 36px;
+    padding-inline: 10px;
+    font-size: 12px;
   }
 }
 </style>

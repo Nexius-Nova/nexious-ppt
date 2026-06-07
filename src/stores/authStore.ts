@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { api, authApi, type User } from '@/services/api';
+import { api, authApi, type AuthSessionPayload, type User } from '@/services/api';
 import { useApiKeyStore } from './apiKeyStore';
 
 export const useAuthStore = defineStore('auth', () => {
@@ -18,8 +18,23 @@ export const useAuthStore = defineStore('auth', () => {
     if (storedToken && storedUser) {
       token.value = storedToken;
       user.value = JSON.parse(storedUser);
-      api.setToken(storedToken);
     }
+  }
+
+  function applyAuthSession(data: AuthSessionPayload) {
+    token.value = data.token;
+    user.value = {
+      userId: data.userId,
+      email: data.email,
+      name: data.name,
+      avatar: data.avatar ?? null,
+    };
+    api.setAuthTokens(data);
+    localStorage.setItem('auth_user', JSON.stringify(user.value));
+  }
+
+  function applyTokenRefresh(data: AuthSessionPayload) {
+    applyAuthSession(data);
   }
 
   async function register(email: string, password: string, name?: string, emailCode?: string) {
@@ -29,15 +44,7 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await authApi.register(email, password, name, emailCode);
 
     if (response.success && response.data) {
-      token.value = response.data.token;
-      user.value = {
-        userId: response.data.userId,
-        email: response.data.email,
-        name: response.data.name,
-        avatar: null,
-      };
-      api.setToken(response.data.token);
-      localStorage.setItem('auth_user', JSON.stringify(user.value));
+      applyAuthSession(response.data);
       loading.value = false;
       
       const apiKeyStore = useApiKeyStore();
@@ -58,15 +65,7 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await authApi.login(email, password, captchaToken);
 
     if (response.success && response.data) {
-      token.value = response.data.token;
-      user.value = {
-        userId: response.data.userId,
-        email: response.data.email,
-        name: response.data.name,
-        avatar: response.data.avatar,
-      };
-      api.setToken(response.data.token);
-      localStorage.setItem('auth_user', JSON.stringify(user.value));
+      applyAuthSession(response.data);
       loading.value = false;
       
       const apiKeyStore = useApiKeyStore();
@@ -90,7 +89,7 @@ export const useAuthStore = defineStore('auth', () => {
       localStorage.setItem('auth_user', JSON.stringify(user.value));
       return true;
     } else {
-      logout();
+      clearLocalSession();
       return false;
     }
   }
@@ -153,7 +152,7 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await authApi.deleteMe();
 
     if (response.success) {
-      logout();
+      clearLocalSession();
       loading.value = false;
       return true;
     } else {
@@ -163,15 +162,22 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  function logout() {
+  function clearLocalSession() {
     user.value = null;
     token.value = null;
-    api.setToken(null);
-    localStorage.removeItem('auth_token');
+    api.clearAuthTokens();
     localStorage.removeItem('auth_user');
     
     const apiKeyStore = useApiKeyStore();
     apiKeyStore.clear();
+  }
+
+  function logout(options: { remote?: boolean } = {}) {
+    const remote = options.remote !== false;
+    if (remote && token.value) {
+      void authApi.logout().catch(() => undefined);
+    }
+    clearLocalSession();
   }
 
   return {
@@ -181,6 +187,8 @@ export const useAuthStore = defineStore('auth', () => {
     error,
     isAuthenticated,
     init,
+    applyTokenRefresh,
+    clearLocalSession,
     register,
     login,
     fetchUser,

@@ -89,6 +89,10 @@ function validateLogin() {
     toastStore.warning('请输入密码');
     return false;
   }
+  if (!isStrongPassword(password.value)) {
+    toastStore.warning('密码至少 8 位，并包含字母和数字');
+    return false;
+  }
   return true;
 }
 
@@ -249,7 +253,7 @@ onBeforeUnmount(() => {
               <UiInput v-model="email" type="email" placeholder="you@example.com" autocomplete="email" />
             </UiField>
 
-            <UiField label="密码" required :hint="isRegister ? '至少 8 位，包含字母和数字' : undefined">
+            <UiField label="密码" required hint="至少 8 位，包含字母和数字">
               <UiInput
                 v-model="password"
                 type="password"
@@ -317,6 +321,10 @@ onBeforeUnmount(() => {
 
         <div class="auth-links">
           <button v-if="isLogin" type="button" @click="switchMode('forgot')">忘记密码</button>
+          <button v-if="isForgot" type="button" @click="switchMode('login')">
+            <ArrowLeft :size="14" />
+            返回登录
+          </button>
         </div>
 
         <div class="auth-switch" v-if="!isForgot">

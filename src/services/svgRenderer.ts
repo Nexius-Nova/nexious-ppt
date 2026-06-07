@@ -1,16 +1,12 @@
 import { inlinePrivateSvgImages } from '@/composables/usePrivateAssetUrl';
+import { api } from '@/services/api';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 async function fetchImageAsDataUrl(imageUrl: string): Promise<string | null> {
   try {
     const proxyUrl = `${API_BASE_URL}/api/ai/proxy-image?url=${encodeURIComponent(imageUrl)}`;
-    const token = localStorage.getItem('auth_token');
-    const resp = await fetch(proxyUrl, {
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      }
-    });
+    const resp = await api.fetchWithAuth(proxyUrl);
     if (!resp.ok) {
       console.warn(`[svgRenderer] proxy-image failed for ${imageUrl}: ${resp.status}`);
       return null;

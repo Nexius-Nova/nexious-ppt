@@ -84,13 +84,19 @@ ensure_python_runtime() {
     echo "==> 安装 Python 与 SVG/PPTX 系统依赖"
     run_sudo apt-get update
     run_sudo apt-get install -y \
+      build-essential \
+      pkg-config \
       python3 \
+      python3-dev \
       python3-pip \
       python3-venv \
       libcairo2 \
+      libcairo2-dev \
       libpango-1.0-0 \
+      libpango1.0-dev \
       libpangocairo-1.0-0 \
       libgdk-pixbuf-2.0-0 \
+      libgdk-pixbuf-2.0-dev \
       libffi-dev \
       shared-mime-info
   fi

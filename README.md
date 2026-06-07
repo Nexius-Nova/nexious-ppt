@@ -60,6 +60,9 @@ REDIS_URL=redis://localhost:6379
 QUEUE_DRIVER=redis
 
 JWT_SECRET=change-this
+ACCESS_TOKEN_EXPIRES_IN=1h
+ACCESS_TOKEN_EXPIRES_SECONDS=3600
+REFRESH_TOKEN_EXPIRES_DAYS=7
 ENCRYPTION_KEY=change-this-32-character-key
 ```
 
@@ -175,6 +178,13 @@ from svg_to_pptx.pptx_builder import create_pptx_with_native_svg
 print("python pptx exporter deps ok")
 PY
 pm2 restart nexious-ppt-api --update-env
+```
+
+如果安装 Python 依赖时报 `Dependency lookup for cairo... pkg-config ... not found` 或 `metadata-generation-failed: pycairo`，说明服务器缺少编译依赖，先安装：
+
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config python3-dev libcairo2-dev libpango1.0-dev libgdk-pixbuf-2.0-dev libffi-dev
 ```
 
 ## 目录
