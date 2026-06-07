@@ -1,9 +1,9 @@
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { DesignSpec, SpecLock } from './spec.js';
 import { inlineRemoteImages } from './svg-to-pptx.js';
 import { exportNativeEditablePptx, type NativeSvgPptxAnimationOptions } from './native-svg-pptx.js';
+import { generatedProjectsRoot } from '../utils/storage.js';
 
 export interface PptExportPage {
   pageNumber?: number;
@@ -22,10 +22,7 @@ export interface PptExportOptions {
   animation?: NativeSvgPptxAnimationOptions;
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT_DIR = path.resolve(__dirname, '..', '..');
-const GENERATED_ROOT = path.join(ROOT_DIR, '.generated', 'nexious-ppt');
+const GENERATED_ROOT = generatedProjectsRoot;
 
 export function renderSpecLockMarkdown(lock: SpecLock): string {
   const c = lock.colors;

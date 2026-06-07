@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onBeforeUnmount, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Plus, Search, Trash2, FileText, Clock, Calendar, Check, BookmarkCheck, RefreshCw, Pause } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -30,6 +30,7 @@ const showCreateModal = ref(false);
 const newProjectTitle = ref('');
 const savingTemplateIds = ref<Set<number>>(new Set());
 const deletedProjectIds = ref<Set<number>>(new Set());
+let projectRefreshTimer: number | null = null;
 
 type ProjectDisplayStatus = 'draft' | 'paused' | 'generating' | 'completed';
 type TemplateSaveState = 'unsaved' | 'saved' | 'stale';
@@ -273,8 +274,10 @@ const stats = computed(() => ({
   completed: projectDisplays.value.filter(p => p.displayStatus === 'completed').length
 }));
 
-async function fetchProjects() {
-  loading.value = true;
+const hasLiveProjects = computed(() => projectDisplays.value.some((project) => project.displayStatus === 'generating'));
+
+async function fetchProjects(options: { silent?: boolean } = {}) {
+  if (!options.silent) loading.value = true;
   try {
     const response = await projectApi.getAll();
     if (response.success && response.data) {
@@ -286,7 +289,7 @@ async function fetchProjects() {
     console.error('Failed to fetch projects:', error);
     toastStore.error('加载项目失败', error instanceof Error ? error.message : '未知错误');
   } finally {
-    loading.value = false;
+    if (!options.silent) loading.value = false;
   }
 }
 
@@ -452,6 +455,17 @@ function formatDate(dateStr: string) {
 
 onMounted(() => {
   void Promise.all([fetchProjects(), fetchTemplates()]);
+  projectRefreshTimer = window.setInterval(() => {
+    if (hasLiveProjects.value) {
+      void fetchProjects({ silent: true });
+    }
+  }, 1500);
+});
+
+onBeforeUnmount(() => {
+  if (projectRefreshTimer !== null) {
+    window.clearInterval(projectRefreshTimer);
+  }
 });
 </script>
 

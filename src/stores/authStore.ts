@@ -22,11 +22,11 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function register(email: string, password: string, name?: string) {
+  async function register(email: string, password: string, name?: string, emailCode?: string) {
     loading.value = true;
     error.value = null;
 
-    const response = await authApi.register(email, password, name);
+    const response = await authApi.register(email, password, name, emailCode);
 
     if (response.success && response.data) {
       token.value = response.data.token;
@@ -95,7 +95,22 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function updateUser(data: { name?: string; avatar?: string; currentPassword?: string; password?: string }) {
+  async function resetPassword(email: string, emailCode: string, password: string) {
+    loading.value = true;
+    error.value = null;
+
+    const response = await authApi.resetPassword({ email, emailCode, password });
+
+    if (response.success) {
+      loading.value = false;
+      return true;
+    }
+    error.value = response.message || '重置密码失败';
+    loading.value = false;
+    return false;
+  }
+
+  async function updateUser(data: { name?: string; avatar?: string; currentPassword?: string; password?: string; emailCode?: string }) {
     loading.value = true;
     error.value = null;
 
@@ -170,6 +185,7 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     fetchUser,
     updateUser,
+    resetPassword,
     uploadAvatar,
     deleteAccount,
     logout,

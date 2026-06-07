@@ -5,8 +5,6 @@
 
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import path from 'path';
 import { randomUUID } from 'crypto';
 import { testConnection, closePool } from './db/connection.js';
 import authRoutes, { authMiddleware } from './routes/auth.js';
@@ -21,8 +19,8 @@ import workflowRoutes from './routes/workflows.js';
 import versionRoutes from './routes/versions.js';
 import generateRoutes from './routes/generate.js';
 import generationJobRoutes from './routes/generationJobs.js';
-
-dotenv.config();
+import { shutdownRedisQueue } from './services/generationQueue.js';
+import { generatedAvatarsRoot, generatedImagesRoot } from './utils/storage.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -62,8 +60,8 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
-app.use('/generated-images', authMiddleware, express.static(path.join(process.cwd(), '.generated', 'images')));
-app.use('/avatars', authMiddleware, express.static(path.join(process.cwd(), '.generated', 'avatars')));
+app.use('/generated-images', authMiddleware, express.static(generatedImagesRoot));
+app.use('/avatars', authMiddleware, express.static(generatedAvatarsRoot));
 
 app.get('/health', (req, res) => {
   res.json({
@@ -175,12 +173,14 @@ async function startServer() {
 
 process.on('SIGTERM', async () => {
   console.log('\n🛑 收到 SIGTERM 信号，正在关闭服务器...');
+  await shutdownRedisQueue();
   await closePool();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('\n🛑 收到 SIGINT 信号，正在关闭服务器...');
+  await shutdownRedisQueue();
   await closePool();
   process.exit(0);
 });

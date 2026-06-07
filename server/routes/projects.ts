@@ -11,6 +11,11 @@ import {
   getProjectStats
 } from '../models/project.js';
 import { cancelQueuedJobsByProject } from '../services/generationQueue.js';
+import {
+  collectGeneratedAssetUrls,
+  deleteGeneratedAssetUrls,
+  deleteGeneratedProjectDirsByTitle,
+} from '../utils/generatedAssets.js';
 
 const router = Router();
 
@@ -317,6 +322,13 @@ router.delete('/:id', authMiddleware, async (req: AuthRequest, res: Response) =>
     }
 
     await cleanupProjectRelations(req.userId, projectId);
+    await deleteGeneratedAssetUrls(collectGeneratedAssetUrls({
+      title: existingProject.title,
+      topic: existingProject.topic,
+      content: existingProject.content,
+      state: existingProject.state,
+    })).catch(() => undefined);
+    await deleteGeneratedProjectDirsByTitle(existingProject.title).catch(() => undefined);
 
     res.json({
       success: true,

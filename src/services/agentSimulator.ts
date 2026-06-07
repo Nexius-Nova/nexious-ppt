@@ -64,7 +64,8 @@ export async function generateSlideImages(
     onError?: (slideId: string, message: string) => void;
     onAllComplete?: (images: GeneratedImage[]) => void;
   },
-  concurrency: number = 3
+  concurrency: number = 3,
+  options: { imageModelId?: string | null } = {}
 ): Promise<GeneratedImage[]> {
   const toastStore = useToastStore();
   const images: GeneratedImage[] = [];
@@ -117,7 +118,8 @@ export async function generateSlideImages(
           slideId: slide.id,
           title: slide.title,
           prompt: slide.visualPrompt,
-          style
+          style,
+          imageModelId: options.imageModelId || null
         },
         {
           onStart: (message) => {

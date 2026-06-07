@@ -8,7 +8,7 @@ import UiTextarea from '@/components/ui/UiTextarea.vue';
 import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import TemplatePreviewDeck from '@/components/common/TemplatePreviewDeck.vue';
 import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
-import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, InputProcessStep, PromptDefinition, PptTemplate, SkillDefinition, TemplateAsset, TemplateAssetSettings } from '@/types/agent';
+import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, ImageModelConfig, InputProcessStep, PromptDefinition, PptTemplate, SkillDefinition, TemplateAsset, TemplateAssetSettings, TextModelConfig } from '@/types/agent';
 
 type TemplatePreviewSlide = NonNullable<TemplateAssetSettings['previewSlides']>[number];
 type ComposerModule = 'prompt' | 'template' | 'skills' | 'config';
@@ -21,6 +21,10 @@ const props = defineProps<{
   selectedTemplate: TemplateAsset | null;
   prompts: PromptDefinition[];
   selectedPromptId: string;
+  textModels: TextModelConfig[];
+  imageModels: ImageModelConfig[];
+  selectedTextModelId: string | null;
+  selectedImageModelId: string | null;
   skills: SkillDefinition[];
   inputProcessSteps: InputProcessStep[];
 }>();
@@ -31,6 +35,8 @@ const emit = defineEmits<{
   'select-template': [templateId: string];
   'clear-template': [];
   'select-prompt': [promptId: string];
+  'select-text-model': [modelId: string | null];
+  'select-image-model': [modelId: string | null];
   'toggle-skill': [skillId: string];
   attach: [files: FileList | null];
   'remove-file': [fileName: string];
@@ -77,6 +83,8 @@ const contentCharCount = computed(() => props.modelValue.content.trim().length);
 const activeParameterCount = computed(() =>
   parameterGroups.filter((group) => String(parameterValue(group.key)) !== autoOptionByKey[group.key].value).length
 );
+const selectedModelCount = computed(() => [props.selectedTextModelId, props.selectedImageModelId].filter(Boolean).length);
+const activeConfigCount = computed(() => activeParameterCount.value + selectedModelCount.value);
 const selectedSkillCount = computed(() => props.skills.filter((skill) => skill.enabled).length);
 const hasContent = computed(() => Boolean(props.modelValue.content.trim()));
 const fileCount = computed(() => props.modelValue.files.length);
@@ -90,7 +98,7 @@ const readinessScore = computed(() => {
     const current = steps.reduce((sum, step) => sum + (step.status === 'skipped' ? 100 : step.progress), 0);
     return Math.min(100, Math.round((current / total) * 100));
   }
-  const score = [hasContent.value || fileCount.value > 0, true, Boolean(selectedPrompt.value || props.selectedTemplate || activeParameterCount.value > 0)].filter(Boolean).length;
+  const score = [hasContent.value || fileCount.value > 0, true, Boolean(selectedPrompt.value || props.selectedTemplate || activeConfigCount.value > 0)].filter(Boolean).length;
   return Math.round((score / 3) * 100);
 });
 const workflowSummary = computed(() => {
@@ -131,6 +139,37 @@ const promptOptions = computed(() => [
     value: prompt.id,
     description: compactText(prompt.content || prompt.scene || '暂无提示词内容', 42),
     previewImageUrl: prompt.previewUrl
+  }))
+]);
+
+const defaultTextModel = computed(() => props.textModels.find((model) => model.isDefault) || props.textModels[0] || null);
+const defaultImageModel = computed(() => props.imageModels.find((model) => model.isDefault) || props.imageModels[0] || null);
+const availableTextModels = computed(() => props.textModels.filter((model) => model.enabled && model.hasKey !== false));
+const availableImageModels = computed(() => props.imageModels.filter((model) => model.enabled && model.hasKey !== false));
+
+const textModelOptions = computed(() => [
+  {
+    label: defaultTextModel.value ? `使用默认：${defaultTextModel.value.name}` : '使用默认文本模型',
+    value: '',
+    description: defaultTextModel.value ? `${defaultTextModel.value.provider} / ${defaultTextModel.value.model}` : '由模型管理页当前默认配置决定'
+  },
+  ...availableTextModels.value.map((model) => ({
+    label: model.name,
+    value: model.id,
+    description: `${model.provider} / ${model.model}${model.isDefault ? ' · 默认' : ''}`
+  }))
+]);
+
+const imageModelOptions = computed(() => [
+  {
+    label: defaultImageModel.value ? `使用默认：${defaultImageModel.value.name}` : '使用默认图片模型',
+    value: '',
+    description: defaultImageModel.value ? `${defaultImageModel.value.provider} / ${defaultImageModel.value.model}` : '由模型管理页当前默认配置决定'
+  },
+  ...availableImageModels.value.map((model) => ({
+    label: model.name,
+    value: model.id,
+    description: `${model.provider} / ${model.model}${model.isDefault ? ' · 默认' : ''}`
   }))
 ]);
 
@@ -187,6 +226,14 @@ function handleTemplateSelect(templateId: string) {
 
 function handlePromptSelect(promptId: string) {
   emit('select-prompt', promptId);
+}
+
+function handleTextModelSelect(modelId: string) {
+  emit('select-text-model', modelId || null);
+}
+
+function handleImageModelSelect(modelId: string) {
+  emit('select-image-model', modelId || null);
 }
 
 function toggleModule(module: ComposerModule) {
@@ -474,6 +521,25 @@ function handleFileChange(event: Event) {
             </div>
 
             <div v-else class="parameter-panel" aria-label="PPT 生成参数">
+              <section class="parameter-models" aria-label="当前 PPT 使用的模型">
+                <UiField label="文本模型" hint="仅影响当前 PPT；留空时使用模型管理页的默认文本模型">
+                  <UiSelect
+                    :model-value="selectedTextModelId || ''"
+                    :options="textModelOptions"
+                    placeholder="使用默认文本模型"
+                    @update:model-value="handleTextModelSelect"
+                  />
+                </UiField>
+                <UiField label="图片模型" hint="仅影响当前 PPT；留空时使用模型管理页的默认图片模型">
+                  <UiSelect
+                    :model-value="selectedImageModelId || ''"
+                    :options="imageModelOptions"
+                    placeholder="使用默认图片模型"
+                    @update:model-value="handleImageModelSelect"
+                  />
+                </UiField>
+              </section>
+
               <section
                 v-for="group in parameterGroups"
                 :key="group.key"
@@ -566,12 +632,12 @@ function handleFileChange(event: Event) {
                 <button
                   type="button"
                   class="doubao-composer__module"
-                  :class="{ 'doubao-composer__module--active': activeModule === 'config' || activeParameterCount > 0 }"
+                  :class="{ 'doubao-composer__module--active': activeModule === 'config' || activeConfigCount > 0 }"
                   @click="toggleModule('config')"
                 >
                   <Settings2 :size="18" />
                   <span>配置参数</span>
-                  <small v-if="activeParameterCount > 0">{{ activeParameterCount }}</small>
+                  <small v-if="activeConfigCount > 0">{{ activeConfigCount }}</small>
                 </button>
               </div>
 
@@ -1475,6 +1541,14 @@ function handleFileChange(event: Event) {
   background: var(--color-surface);
 }
 
+.parameter-models {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 12px;
+}
+
 .parameter-group {
   display: grid;
   grid-template-columns: 74px minmax(0, 1fr);
@@ -1754,6 +1828,10 @@ function handleFileChange(event: Event) {
   .parameter-group {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .parameter-models {
+    grid-template-columns: 1fr;
   }
 
   .skill-option {

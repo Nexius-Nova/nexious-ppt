@@ -1,6 +1,7 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 import type { DesignSpec, SpecSlide, SpecLock, SkillExtension, TemplateAsset, TemplateAssetSettings } from '../types/agent';
+import { translateErrorMessage } from '../utils/errorMessages';
 
 interface ApiResponse<T = any> {
   success: boolean;
@@ -73,15 +74,19 @@ class ApiClient {
       const responseRequestId = response.headers.get('x-request-id') || data.requestId || requestId;
 
       if (!response.ok) {
+        const message = translateErrorMessage(
+          { message: data.message || data.error, status: response.status, code: data.code },
+          '请求失败，请稍后重试'
+        );
         if (response.status === 401 && typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('api:unauthorized', {
-            detail: data.message || '\u767b\u5f55\u72b6\u6001\u5df2\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55'
+            detail: message || '登录状态已失效，请重新登录'
           }));
         }
 
         return {
           success: false,
-          message: data.message || '\u8bf7\u6c42\u5931\u8d25',
+          message,
           error: data.error,
           code: data.code,
           status: response.status,
@@ -93,9 +98,13 @@ class ApiClient {
       return { ...data, requestId: responseRequestId };
     } catch (error) {
       const isAbortError = error instanceof DOMException && error.name === 'AbortError';
+      const message = translateErrorMessage(
+        isAbortError ? { message: 'Request timeout', code: 'REQUEST_TIMEOUT' } : error,
+        isAbortError ? '请求超时，请稍后重试' : '网络连接失败，请检查网络或服务是否可用'
+      );
       return {
         success: false,
-        message: isAbortError ? '\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5' : error instanceof Error ? error.message : '\u7f51\u7edc\u9519\u8bef',
+        message,
         code: isAbortError ? 'REQUEST_TIMEOUT' : 'NETWORK_ERROR',
         requestId,
       };
@@ -168,13 +177,17 @@ class ApiClient {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        const message = translateErrorMessage(
+          { message: errorData.message || errorData.error, status: response.status, code: errorData.code },
+          '请求失败，请稍后重试'
+        );
         if (response.status === 401 && typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('api:unauthorized', {
-            detail: errorData.message || '登录状态已失效，请重新登录'
+            detail: message || '登录状态已失效，请重新登录'
           }));
         }
 
-        const error = new Error(errorData.message || '请求失败') as Error & {
+        const error = new Error(message) as Error & {
           code?: string;
           requestId?: string;
           status?: number;
@@ -186,7 +199,7 @@ class ApiClient {
       }
 
       const reader = response.body?.getReader();
-      if (!reader) throw new Error('No reader available');
+      if (!reader) throw new Error(translateErrorMessage('No reader available'));
 
       const decoder = new TextDecoder();
       let buffer = '';
@@ -205,6 +218,9 @@ class ApiClient {
             if (data === '[DONE]') continue;
             try {
               const parsed = JSON.parse(data);
+              if (parsed?.status === 'error' && parsed.message) {
+                parsed.message = translateErrorMessage(parsed.message);
+              }
               onMessage(parsed);
             } catch {
               // ignore parse errors
@@ -213,10 +229,13 @@ class ApiClient {
         }
       }
     } catch (error) {
+      const translatedError = error instanceof Error
+        ? new Error(translateErrorMessage(error, error.message))
+        : new Error(translateErrorMessage(error, '未知错误，请稍后重试'));
       if (onError) {
-        onError(error instanceof Error ? error : new Error('Unknown error'));
+        onError(translatedError);
       }
-      throw error;
+      throw translatedError;
     }
   }
 }
@@ -286,12 +305,15 @@ export interface Project {
   updated_at: string;
 }
 
+export type EmailCodePurpose = 'register' | 'reset-password' | 'change-password';
+
 export const authApi = {
-  register: (email: string, password: string, name?: string) =>
+  register: (email: string, password: string, name?: string, emailCode?: string) =>
     api.post<{ userId: number; email: string; name: string; token: string }>('/api/auth/register', {
       email,
       password,
       name,
+      emailCode,
     }),
 
   createCaptcha: (email: string) =>
@@ -309,9 +331,18 @@ export const authApi = {
       captchaToken,
     }),
 
+  sendEmailCode: (data: { email: string; purpose: Extract<EmailCodePurpose, 'register' | 'reset-password'> }) =>
+    api.post<{ expiresIn: number; cooldown: number }>('/api/auth/email-code', data),
+
+  sendCurrentUserEmailCode: () =>
+    api.post<{ expiresIn: number; cooldown: number }>('/api/auth/me/email-code', { purpose: 'change-password' }),
+
+  resetPassword: (data: { email: string; password: string; emailCode: string }) =>
+    api.post('/api/auth/reset-password', data),
+
   getMe: () => api.get<User>('/api/auth/me'),
 
-  updateMe: (data: { name?: string; avatar?: string; currentPassword?: string; password?: string }) =>
+  updateMe: (data: { name?: string; avatar?: string; currentPassword?: string; password?: string; emailCode?: string }) =>
     api.put<User>('/api/auth/me', data),
 
   uploadAvatar: async (file: Blob) => {
@@ -480,6 +511,7 @@ export const aiApi = {
       prompt: string;
     }>;
     style: string;
+    imageModelId?: string | null;
   }) => api.post<GeneratedImage[]>('/api/ai/generate-images', data),
 
   generateOutlineStream: async (
@@ -535,6 +567,7 @@ export const aiApi = {
       title: string;
       prompt: string;
       style: string;
+      imageModelId?: string | null;
     },
     callbacks: StreamCallbacks
   ): Promise<GeneratedImage> => {
@@ -639,6 +672,8 @@ export const aiApi = {
       slideCount: number;
       imageStyle: string;
       template: string;
+      textModelId?: string | null;
+      imageModelId?: string | null;
       templateAsset?: TemplateAsset | null;
       promptContent?: string;
       skills: Array<{ id: string; name: string; instruction?: string }>;
@@ -673,7 +708,7 @@ export const aiApi = {
   },
 
   executorPageStream: async (
-    data: { spec: DesignSpec; lock: SpecLock; slide: SpecSlide; imageUrl?: string },
+    data: { spec: DesignSpec; lock: SpecLock; slide: SpecSlide; imageUrl?: string; textModelId?: string | null },
     callbacks: StreamCallbacks
   ): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -713,12 +748,15 @@ export const aiApi = {
       slideCount: number;
       imageStyle: string;
       template: string;
+      textModelId?: string | null;
+      imageModelId?: string | null;
       templateAsset?: TemplateAsset | null;
       promptContent?: string;
       skills: Array<{ id: string; name: string; instruction?: string }>;
     };
     projectState?: any;
     includeImages?: boolean;
+    resumeStage?: 'outline' | 'images' | 'layout';
   }) => api.post<QueueJobSnapshot>('/api/generate/jobs/generate', data),
 
   createExportPptxJob: (data: {
@@ -928,6 +966,18 @@ export interface SkillPackagePreview {
   files: SkillPackagePreviewFile[];
 }
 
+export interface SkillPackageView {
+  skillMdPath: string;
+  skillMdContent: string;
+  skillMdTruncated: boolean;
+  fileCount: number;
+  totalSize: number;
+  runtime: 'prompt-only' | 'python' | 'node' | string;
+  entry: string | null;
+  dependencyFile: string | null;
+  files: SkillPackagePreviewFile[];
+}
+
 export interface SkillRun {
   id: number;
   user_id: number;
@@ -986,11 +1036,33 @@ export interface ImportedPptxSvgSlide {
 }
 
 export interface ImportedPptxSvgPreview {
+  importId?: string;
   slideCount: number;
   width: number;
   height: number;
   slides: ImportedPptxSvgSlide[];
   allText: string;
+  draft?: {
+    name: string;
+    category: string;
+    description: string;
+    slide_count: number;
+    accent: string;
+    settings: TemplateAssetSettings;
+  };
+  diagnostics?: {
+    importId?: string;
+    slideCount?: number;
+    previewSlideCount?: number;
+    colorCount?: number;
+    layoutCount?: number;
+    previewMode?: 'powerpoint' | 'lightweight' | string;
+    nativePreview?: {
+      width?: number;
+      height?: number;
+      slideCount?: number;
+    };
+  };
 }
 
 export type GenerationJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -1043,6 +1115,9 @@ export const skillApi = {
   previewPackage: (data: { filename: string; dataBase64: string }) =>
     api.post<SkillPackagePreview>('/api/skills/preview-package', data),
 
+  getPackageView: (id: number) =>
+    api.get<SkillPackageView>(`/api/skills/${id}/package`),
+
   create: (data: {
     name: string;
     description?: string;
@@ -1085,6 +1160,9 @@ export const templateApi = {
 
   importPptxPreview: (data: { filename: string; dataBase64: string }) =>
     api.post<ImportedPptxSvgPreview>('/api/templates/import-pptx/preview', data, { timeoutMs: 150000 }),
+
+  deletePptxPreviewImport: (importId: string) =>
+    api.delete(`/api/templates/import-pptx/preview/${encodeURIComponent(importId)}`),
 
   create: (data: {
     name: string;

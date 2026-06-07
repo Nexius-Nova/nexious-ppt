@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { CheckCircle2, LogOut, Save, ShieldCheck, Upload, X } from 'lucide-vue-next';
+import { CheckCircle2, LogOut, Mail, Save, ShieldCheck, Upload, X } from 'lucide-vue-next';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import PrivateImage from '@/components/common/PrivateImage.vue';
+import { authApi } from '@/services/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useToastStore } from '@/stores/toastStore';
 
@@ -20,8 +21,12 @@ const avatar = ref('');
 const currentPassword = ref('');
 const newPassword = ref('');
 const confirmPassword = ref('');
+const passwordEmailCode = ref('');
 const avatarInput = ref<HTMLInputElement | null>(null);
 const isAvatarProcessing = ref(false);
+const isSendingPasswordCode = ref(false);
+const passwordCodeCooldown = ref(0);
+let passwordCodeTimer: number | null = null;
 
 const displayName = computed(() => authStore.user?.name || authStore.user?.email || '当前用户');
 const userInitial = computed(() => displayName.value.trim().slice(0, 1).toUpperCase() || 'U');
@@ -41,9 +46,41 @@ watch(
     currentPassword.value = '';
     newPassword.value = '';
     confirmPassword.value = '';
+    passwordEmailCode.value = '';
   },
   { immediate: true }
 );
+
+function startPasswordCodeCooldown(seconds = 60) {
+  passwordCodeCooldown.value = seconds;
+  if (passwordCodeTimer !== null) return;
+  passwordCodeTimer = window.setInterval(() => {
+    passwordCodeCooldown.value = Math.max(0, passwordCodeCooldown.value - 1);
+    if (passwordCodeCooldown.value === 0 && passwordCodeTimer !== null) {
+      window.clearInterval(passwordCodeTimer);
+      passwordCodeTimer = null;
+    }
+  }, 1000);
+}
+
+async function requestPasswordEmailCode() {
+  if (!authStore.user?.email) {
+    toastStore.warning('请先登录后再获取验证码');
+    return;
+  }
+  if (passwordCodeCooldown.value > 0) return;
+
+  isSendingPasswordCode.value = true;
+  const response = await authApi.sendCurrentUserEmailCode();
+  isSendingPasswordCode.value = false;
+  if (!response.success) {
+    toastStore.error('验证码发送失败', response.message || undefined);
+    return;
+  }
+
+  startPasswordCodeCooldown(response.data?.cooldown || 60);
+  toastStore.success(response.message || '邮箱验证码已发送');
+}
 
 function openAvatarPicker() {
   avatarInput.value?.click();
@@ -121,7 +158,7 @@ function compressAvatar(file: File): Promise<Blob> {
 }
 
 async function saveProfile() {
-  const payload: { name?: string; avatar?: string; currentPassword?: string; password?: string } = {
+  const payload: { name?: string; avatar?: string; currentPassword?: string; password?: string; emailCode?: string } = {
     name: name.value.trim(),
     avatar: avatar.value
   };
@@ -135,8 +172,13 @@ async function saveProfile() {
       toastStore.warning('新密码不符合要求');
       return;
     }
+    if (!passwordEmailCode.value.trim()) {
+      toastStore.warning('请输入邮箱验证码');
+      return;
+    }
     payload.currentPassword = currentPassword.value;
     payload.password = newPassword.value;
+    payload.emailCode = passwordEmailCode.value.trim();
   }
 
   const ok = await authStore.updateUser(payload);
@@ -148,6 +190,7 @@ async function saveProfile() {
   currentPassword.value = '';
   newPassword.value = '';
   confirmPassword.value = '';
+  passwordEmailCode.value = '';
   toastStore.success('个人资料已保存');
 }
 
@@ -156,6 +199,12 @@ async function logout() {
   toastStore.info('已退出登录');
   await router.replace('/login');
 }
+
+onBeforeUnmount(() => {
+  if (passwordCodeTimer !== null) {
+    window.clearInterval(passwordCodeTimer);
+  }
+});
 </script>
 
 <template>
@@ -208,14 +257,29 @@ async function logout() {
               </div>
             </header>
             <div class="password-panel__fields">
-              <UiField label="当前密码">
+              <UiField label="当前密码" hint="至少 8 位，包含字母和数字">
                 <UiInput v-model="currentPassword" type="password" placeholder="请输入当前密码" autocomplete="current-password" />
               </UiField>
-              <UiField label="新密码">
+              <UiField label="新密码" hint="至少 8 位，包含字母和数字">
                 <UiInput v-model="newPassword" type="password" placeholder="至少 8 位，包含字母和数字" autocomplete="new-password" />
               </UiField>
-              <UiField label="确认新密码">
+              <UiField label="确认新密码" hint="至少 8 位，包含字母和数字">
                 <UiInput v-model="confirmPassword" type="password" placeholder="再次输入新密码" autocomplete="new-password" />
+              </UiField>
+              <UiField label="邮箱验证码" hint="验证码会发送到当前登录邮箱。">
+                <div class="profile-code-row">
+                  <UiInput v-model="passwordEmailCode" placeholder="请输入 6 位验证码" />
+                  <UiButton
+                    type="button"
+                    variant="secondary"
+                    :loading="isSendingPasswordCode"
+                    :disabled="passwordCodeCooldown > 0"
+                    @click="requestPasswordEmailCode"
+                  >
+                    <Mail :size="14" />
+                    {{ passwordCodeCooldown > 0 ? `${passwordCodeCooldown}s 后重发` : '获取验证码' }}
+                  </UiButton>
+                </div>
               </UiField>
             </div>
             <div class="password-rules">
@@ -386,8 +450,14 @@ async function logout() {
 
 .password-panel__fields {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.profile-code-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .password-rules {
@@ -422,6 +492,14 @@ async function logout() {
 
   .password-panel__fields {
     grid-template-columns: 1fr;
+  }
+
+  .profile-code-row {
+    grid-template-columns: 1fr;
+  }
+
+  .profile-code-row :deep(.ui-button) {
+    width: 100%;
   }
 }
 

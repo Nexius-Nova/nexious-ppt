@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { analyzeDeckInput, exportDeck, generateSlideImages } from '@/services/agentSimulator';
 import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi, generationJobApi, configApi } from '@/services/api';
-import type { GenerationJobStatus, RunConfig } from '@/services/api';
+import type { GenerationJobStatus, QueueJobSnapshot, RunConfig } from '@/services/api';
 import { applyTemplateLayoutParams, getTemplateColors } from '@/composables/templateColors';
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import { useApiKeyStore } from './apiKeyStore';
@@ -34,7 +34,8 @@ import type {
   WorkflowStep,
   WorkflowStepId,
   InputProcessStep,
-  UploadedFileContent
+  UploadedFileContent,
+  ProjectModelSelection
 } from '@/types/agent';
 
 const workflowSteps: WorkflowStep[] = [
@@ -533,6 +534,8 @@ export const useAgentStore = defineStore('agent', () => {
   const specLock = ref<SpecLock | null>(null);
   const svgPages = ref<Array<{ pageNumber: number; svg: string; speakerNotes: string; visualSummary?: string }>>([]);
   const selectedPromptId = ref<string>('');
+  const selectedTextModelId = ref<string | null>(null);
+  const selectedImageModelId = ref<string | null>(null);
   const currentGeneratingSlide = ref<string | null>(null);
   const generatedSlides = ref<Set<string>>(new Set());
   const retryingPageNumbers = ref<Set<number>>(new Set());
@@ -545,6 +548,16 @@ export const useAgentStore = defineStore('agent', () => {
   const runningProjectId = ref<string | null>(null);
   const activeGenerationJobId = ref<number | null>(null);
   const activeQueueJobId = ref<string | null>(null);
+  const runningProjectJobs = ref<Record<string, {
+    projectId: string;
+    queueJobId: string;
+    dbJobId: number | null;
+    status: QueueJobSnapshot['status'];
+    phase: string;
+    progress: number;
+    updatedAt: number;
+  }>>({});
+  const subscribedQueueJobIds = new Set<string>();
 
   const enabledSkills = computed(() => skills.value.filter((skill) => skill.enabled).sort((a, b) => a.order - b.order));
   const runnableSkills = computed(() => skills.value.filter((skill) =>
@@ -604,6 +617,327 @@ export const useAgentStore = defineStore('agent', () => {
     return steps.value.some((step) => step.status === 'running');
   }
 
+  function isTerminalQueueStatus(status?: QueueJobSnapshot['status']) {
+    return status === 'completed' || status === 'failed' || status === 'cancelled';
+  }
+
+  function normalizeActiveQueueJob(value: any): PptProjectState['activeQueueJob'] {
+    if (!value || typeof value !== 'object') return null;
+    const status = String(value.status || '');
+    if (!['queued', 'running', 'completed', 'failed', 'cancelled'].includes(status)) return null;
+    const queueJobId = String(value.queueJobId || value.id || '');
+    if (!queueJobId) return null;
+    return {
+      queueJobId,
+      dbJobId: value.dbJobId == null ? null : Number(value.dbJobId),
+      status: status as QueueJobSnapshot['status'],
+      phase: String(value.phase || 'queued'),
+      progress: Math.max(0, Math.min(100, Number(value.progress) || 0)),
+      updatedAt: Number(value.updatedAt) || Date.now(),
+    };
+  }
+
+  function queueJobStateForProject(projectId: string | null = activePptId.value): PptProjectState['activeQueueJob'] {
+    const job = getProjectRunningJob(projectId);
+    if (!job) return null;
+    return {
+      queueJobId: job.queueJobId,
+      dbJobId: job.dbJobId,
+      status: job.status,
+      phase: job.phase,
+      progress: job.progress,
+      updatedAt: job.updatedAt,
+    };
+  }
+
+  function getProjectRunningJob(projectId: string | null = activePptId.value) {
+    if (!projectId) return null;
+    const job = runningProjectJobs.value[projectId];
+    if (!job || isTerminalQueueStatus(job.status)) return null;
+    return job;
+  }
+
+  function isProjectRunning(projectId: string | null = activePptId.value) {
+    return Boolean(getProjectRunningJob(projectId));
+  }
+
+  function syncActiveRunRefsFromProject() {
+    const job = getProjectRunningJob(activePptId.value);
+    isRunning.value = Boolean(job);
+    runningProjectId.value = job ? job.projectId : null;
+    activeQueueJobId.value = job?.queueJobId || null;
+    activeGenerationJobId.value = job?.dbJobId || null;
+  }
+
+  function upsertProjectRunningJob(projectId: string, job: QueueJobSnapshot) {
+    const next = { ...runningProjectJobs.value };
+    if (isTerminalQueueStatus(job.status)) {
+      delete next[projectId];
+    } else {
+      next[projectId] = {
+        projectId,
+        queueJobId: job.id,
+        dbJobId: job.dbJobId || null,
+        status: job.status,
+        phase: job.phase,
+        progress: job.progress,
+        updatedAt: Date.now(),
+      };
+    }
+    runningProjectJobs.value = next;
+    const project = pptProjects.value.find(item => item.id === projectId);
+    if (project) {
+      project.state = {
+        ...normalizeProjectState(project.state),
+        activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateForProject(projectId),
+        workflowActive: !isTerminalQueueStatus(job.status),
+        paused: false,
+      };
+      project.updatedAt = Date.now();
+    }
+    if (activePptId.value === projectId) {
+      syncActiveRunRefsFromProject();
+    }
+  }
+
+  function clearProjectRunningJob(projectId: string | null = activePptId.value) {
+    if (!projectId) return;
+    const next = { ...runningProjectJobs.value };
+    delete next[projectId];
+    runningProjectJobs.value = next;
+    const project = pptProjects.value.find(item => item.id === projectId);
+    if (project) {
+      project.state = {
+        ...normalizeProjectState(project.state),
+        activeQueueJob: null,
+        workflowActive: false,
+      };
+      project.updatedAt = Date.now();
+    }
+    if (activePptId.value === projectId) {
+      syncActiveRunRefsFromProject();
+    }
+  }
+
+  function queueJobStateFromSnapshot(job: QueueJobSnapshot): PptProjectState['activeQueueJob'] {
+    return {
+      queueJobId: job.id,
+      dbJobId: job.dbJobId || null,
+      status: job.status,
+      phase: job.phase,
+      progress: Math.max(0, Math.min(100, Number(job.progress) || 0)),
+      updatedAt: job.updatedAt || Date.now(),
+    };
+  }
+
+  function applyQueuedOutlineToState(state: PptProjectState, result: any, progress: number): PptProjectState {
+    if (!Array.isArray(result?.outline) || result.outline.length === 0) return state;
+    const nextOutline = result.outline.map((slide: any, index: number) =>
+      specSlideToOutlineSlide(slide as SpecSlide, index)
+    );
+    if (nextOutline.length < state.outline.length) return state;
+    return {
+      ...state,
+      outline: nextOutline,
+      steps: state.steps.map((step): WorkflowStep =>
+        step.id === 'outline'
+          ? { ...step, status: 'running' as const, progress: Math.min(99, progress) }
+          : step
+      ),
+      lastActiveStep: 'outline',
+    };
+  }
+
+  function applyQueuedResultToState(
+    baseState: PptProjectState,
+    result: any,
+    options: { phase?: WorkflowStepId | 'completed'; progress?: number; final?: boolean } = {}
+  ): PptProjectState {
+    if (!result?.spec || !result?.lock) return baseState;
+
+    const nextOutline = (result.outline || result.spec.outline || []).map((s: any) => ({
+      id: s.id,
+      title: s.title,
+      bullets: s.bullets || [],
+      speakerNotes: s.speakerNotes || '',
+      visualPrompt: s.visualPrompt || '',
+      chartHint: s.chartHint,
+      layout: s.layout as SlideLayout,
+    }));
+    const nextImages = Array.isArray(result.images) ? result.images : [];
+    const nextSvgPages = Array.isArray(result.svgPages)
+      ? result.svgPages
+          .map((page: any, index: number) => ({
+            pageNumber: page.pageNumber || index + 1,
+            svg: page.svg || '',
+            speakerNotes: page.speakerNotes || '',
+            visualSummary: page.visualSummary,
+          }))
+          .sort((left: any, right: any) => left.pageNumber - right.pageNumber)
+      : [];
+    const requiredImageSlideIds = new Set(
+      (result.spec.outline || [])
+        .filter((slide: any) => slideNeedsImage(slide))
+        .map((slide: any) => String(slide.id))
+    );
+    const readyImageSlideIds = new Set(
+      nextImages
+        .filter((image: any) => image?.url && !image.error)
+        .map((image: any) => String(image.slideId))
+    );
+    const requiredImageCount = requiredImageSlideIds.size;
+    const readyImageCount = [...requiredImageSlideIds].filter((id) => readyImageSlideIds.has(id)).length;
+    const imagesComplete = requiredImageCount === 0 || readyImageCount >= requiredImageCount;
+    const layoutComplete = nextSvgPages.length >= (result.spec.outline?.length || nextOutline.length || 0);
+
+    const nextSteps = baseState.steps.map((step): WorkflowStep => {
+      if (step.id === 'outline') return { ...step, status: 'done' as const, progress: 100 };
+      if (step.id === 'images') {
+        if (imagesComplete) return { ...step, status: 'done' as const, progress: 100 };
+        const progress = requiredImageCount ? Math.round((readyImageCount / requiredImageCount) * 100) : Math.min(99, options.progress || step.progress || 0);
+        return { ...step, status: options.phase === 'images' ? 'running' as const : 'idle' as const, progress };
+      }
+      if (step.id === 'layout') {
+        if (options.final && layoutComplete) return { ...step, status: 'done' as const, progress: 100 };
+        if (options.phase === 'layout') return { ...step, status: 'running' as const, progress: Math.min(99, options.progress || step.progress || 0) };
+        return { ...step, status: step.status === 'done' ? step.status : 'idle' as const, progress: step.status === 'done' ? step.progress : 0 };
+      }
+      if (step.id === 'preview' && options.final && layoutComplete) return { ...step, status: 'done' as const, progress: 100 };
+      return step;
+    });
+
+    return {
+      ...baseState,
+      outline: nextOutline,
+      images: nextImages,
+      designSpec: result.spec,
+      specLock: result.lock,
+      svgPages: nextSvgPages,
+      steps: nextSteps,
+      executorCursor: nextSvgPages.length,
+      waitingForImageRetry: !imagesComplete,
+      lastActiveStep: options.final ? 'preview' : options.phase === 'layout' ? 'layout' : options.phase === 'images' ? 'images' : baseState.lastActiveStep,
+    };
+  }
+
+  function applyQueueJobToProjectState(projectId: string, job: QueueJobSnapshot) {
+    const project = pptProjects.value.find(item => item.id === projectId);
+    if (!project) return;
+    let nextState = normalizeProjectState(project.state);
+
+    if (job.phase === 'outline' && job.result) {
+      nextState = applyQueuedOutlineToState(nextState, job.result, job.progress);
+    }
+    if ((job.phase === 'images' || job.phase === 'layout' || job.status === 'completed') && job.result) {
+      nextState = applyQueuedResultToState(nextState, job.result, {
+        phase: job.phase === 'images' || job.phase === 'layout' ? job.phase : undefined,
+        progress: job.progress,
+        final: job.status === 'completed',
+      });
+    }
+
+    project.state = {
+      ...nextState,
+      activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateFromSnapshot(job),
+      workflowActive: !isTerminalQueueStatus(job.status),
+      paused: false,
+    };
+    project.updatedAt = Date.now();
+  }
+
+  function applyQueueJobToActiveProject(job: QueueJobSnapshot) {
+    if (job.status === 'cancelled') return;
+    pushLog(job.message || `任务进度：${job.phase}`);
+    if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') {
+      activeStep.value = 'outline';
+      setStepStatus('outline', 'running', Math.min(99, job.progress));
+      if (job.phase === 'outline' && job.result) {
+        applyQueuedOutlineProgress(job.result, job.progress);
+      }
+    } else if (job.phase === 'images') {
+      activeStep.value = 'images';
+      setStepStatus('outline', 'done', 100);
+      setStepStatus('images', 'running', Math.min(99, job.progress));
+      if (job.result) {
+        try {
+          applyQueuedGenerationResult(job.result, { phase: 'images', progress: job.progress });
+        } catch {
+          // 图片阶段可能只有消息，没有完整结果。
+        }
+      }
+    } else if (job.phase === 'layout') {
+      activeStep.value = 'layout';
+      setStepStatus('outline', 'done', 100);
+      setStepStatus('layout', 'running', Math.min(99, job.progress));
+      if (job.result) {
+        try {
+          applyQueuedGenerationResult(job.result, { phase: 'layout', progress: job.progress });
+          setStepStatus('layout', 'running', Math.min(99, job.progress));
+        } catch {
+          // Partial results may be incomplete while the job is running.
+        }
+      }
+    }
+  }
+
+  function subscribeProjectQueueJob(projectId: string, queueJobId: string) {
+    if (!projectId || !queueJobId || subscribedQueueJobIds.has(queueJobId)) return;
+    subscribedQueueJobIds.add(queueJobId);
+    void aiApi.waitForQueueJob(queueJobId, (job) => {
+      upsertProjectRunningJob(projectId, job);
+      applyQueueJobToProjectState(projectId, job);
+      if (activePptId.value === projectId) {
+        applyQueueJobToActiveProject(job);
+      }
+    }).then(async (finalJob) => {
+      applyQueueJobToProjectState(projectId, finalJob);
+      clearProjectRunningJob(projectId);
+      if (activePptId.value === projectId) {
+        applyQueuedGenerationResult(finalJob.result, { final: true });
+        activeStep.value = 'preview';
+        clearPauseState();
+        await syncToProjectNow();
+      }
+    }).catch((error) => {
+      const errMsg = error instanceof Error ? error.message : '任务订阅中断';
+      if (errMsg !== '任务等待超时') {
+        clearProjectRunningJob(projectId);
+      }
+      if (activePptId.value === projectId) {
+        pushLog(`后台任务状态同步失败：${errMsg}`);
+      }
+    }).finally(() => {
+      subscribedQueueJobIds.delete(queueJobId);
+      syncActiveRunRefsFromProject();
+    });
+  }
+
+  async function refreshProjectQueueSnapshot(projectId: string) {
+    const project = pptProjects.value.find(item => item.id === projectId);
+    const queueJobId = normalizeActiveQueueJob(project?.state?.activeQueueJob)?.queueJobId
+      || runningProjectJobs.value[projectId]?.queueJobId;
+    if (!project || !queueJobId) return;
+
+    try {
+      const response = await aiApi.getQueueJob(queueJobId);
+      if (!response.success || !response.data) return;
+      const job = response.data;
+      upsertProjectRunningJob(projectId, job);
+      applyQueueJobToProjectState(projectId, job);
+      if (activePptId.value === projectId) {
+        applyQueueJobToActiveProject(job);
+        if (isTerminalQueueStatus(job.status)) {
+          restoreProjectState(project.state);
+        }
+      }
+      if (!isTerminalQueueStatus(job.status)) {
+        subscribeProjectQueueJob(projectId, queueJobId);
+      }
+    } catch (error) {
+      console.warn('刷新队列任务状态失败', error);
+    }
+  }
+
   function applyGeneratedProjectInfo(spec?: DesignSpec | null) {
     if (!activePpt.value || !spec?.projectInfo) return;
 
@@ -628,34 +962,22 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function cancelActiveRunForProjectSwitch() {
-    if (!isRunning.value || !activePpt.value) return;
-    const previousProject = activePpt.value;
-    const previousJobId = activeGenerationJobId.value;
-    pushLog('已切换项目，当前工作流已保存，可稍后继续。');
-    freezeWorkflowStepsForPause(activeStep.value);
-    previousProject.state = {
-      ...snapshotProjectState(),
-      paused: true,
-      workflowActive: false,
-      resumeStage: activeStep.value,
-      lastActiveStep: activeStep.value,
-    };
-    previousProject.updatedAt = Date.now();
+    if (!activePpt.value) return;
+    if (isRunning.value || hasRunningWorkflowStep()) {
+      pushLog('已切换项目，当前 PPT 将在后台继续生成。');
+      activePpt.value.state = {
+        ...snapshotProjectState(),
+        paused: false,
+        workflowActive: true,
+        resumeStage: null,
+        lastActiveStep: activeStep.value,
+      };
+      activePpt.value.updatedAt = Date.now();
+    }
     workflowRunToken.value += 1;
-    runningProjectId.value = null;
-    isRunning.value = false;
-    isPaused.value = true;
     pauseRequested.value = false;
     currentGeneratingSlide.value = null;
-    activeGenerationJobId.value = null;
-    if (previousJobId) {
-      void generationJobApi.update(previousJobId, {
-        status: 'running',
-        phase: 'paused',
-        progress: steps.value.find((step) => step.id === activeStep.value)?.progress || 0,
-        metadata: buildGenerationJobMetadata({ resume: true }),
-      });
-    }
+    syncActiveRunRefsFromProject();
   }
 
   function mergePptProjects(projects: PptProject[], preferredActiveId: string | null = activePptId.value): PptProject[] {
@@ -721,6 +1043,10 @@ export const useAgentStore = defineStore('agent', () => {
       uploadedFileContents: [],
       processedInputContent: '',
       parameters: normalizeAgentParameters(),
+      modelSelection: {
+        textModelId: null,
+        imageModelId: null,
+      },
       selectedTemplate: null,
       outline: [],
       images: [],
@@ -738,6 +1064,7 @@ export const useAgentStore = defineStore('agent', () => {
       resumeStage: null,
       executorCursor: 0,
       workflowActive: false,
+      activeQueueJob: null,
       lastActiveStep: null,
       waitingForImageRetry: false,
     };
@@ -746,6 +1073,10 @@ export const useAgentStore = defineStore('agent', () => {
   function normalizeProjectState(state?: Partial<PptProjectState> | null): PptProjectState {
     const fallback = makeDefaultProjectState();
     if (!state) return fallback;
+    const modelSelection: ProjectModelSelection = {
+      textModelId: state.modelSelection?.textModelId ? String(state.modelSelection.textModelId) : null,
+      imageModelId: state.modelSelection?.imageModelId ? String(state.modelSelection.imageModelId) : null,
+    };
     return {
       ...fallback,
       ...state,
@@ -759,6 +1090,7 @@ export const useAgentStore = defineStore('agent', () => {
       })).filter((file) => file.name && (file.text || file.dataBase64)),
       processedInputContent: String(state.processedInputContent || ''),
       parameters: normalizeAgentParameters(state.parameters || fallback.parameters),
+      modelSelection,
       selectedTemplate: state.selectedTemplate ? snapshotTemplateAsset(state.selectedTemplate) : null,
       outline: (state.outline || []).map(s => ({ ...s, bullets: [...(s.bullets || [])] })),
       images: (state.images || []).map(img => ({ ...img })),
@@ -770,6 +1102,7 @@ export const useAgentStore = defineStore('agent', () => {
       steps: (state.steps || fallback.steps).map(s => ({ ...s })),
       svgPages: (state.svgPages || []).map(page => ({ ...page })),
       configOptions: normalizeConfigOptions(state.configOptions || fallback.configOptions),
+      activeQueueJob: normalizeActiveQueueJob(state.activeQueueJob),
     };
   }
 
@@ -780,6 +1113,10 @@ export const useAgentStore = defineStore('agent', () => {
       ...baseState,
       selectedPromptId: selectedPromptId.value,
       selectedTemplate: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
+      modelSelection: {
+        textModelId: selectedTextModelId.value,
+        imageModelId: selectedImageModelId.value,
+      },
     };
     activePpt.value.templateId = selectedTemplate.value?.id || 'auto';
     activePpt.value.updatedAt = Date.now();
@@ -904,6 +1241,10 @@ export const useAgentStore = defineStore('agent', () => {
       uploadedFileContents: uploadedFileContents.value.map((file) => ({ ...file })),
       processedInputContent: processedInputContent.value,
       parameters: { ...parameters.value },
+      modelSelection: {
+        textModelId: selectedTextModelId.value,
+        imageModelId: selectedImageModelId.value,
+      },
       selectedTemplate: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
       outline: outline.value.map(s => ({ ...s, bullets: [...s.bullets] })),
       images: persistable
@@ -937,7 +1278,8 @@ export const useAgentStore = defineStore('agent', () => {
       },
       resumeStage: resumeStage.value,
       executorCursor: executorCursor.value,
-      workflowActive: isRunning.value || steps.value.some(step => step.status === 'running'),
+      workflowActive: isProjectRunning(activePptId.value) || steps.value.some(step => step.status === 'running'),
+      activeQueueJob: queueJobStateForProject(activePptId.value),
       lastActiveStep: activeStep.value,
       waitingForImageRetry: waitingForImageRetry.value,
     };
@@ -949,6 +1291,8 @@ export const useAgentStore = defineStore('agent', () => {
     uploadedFileContents.value = normalizedState.uploadedFileContents?.map((file) => ({ ...file })) || [];
     processedInputContent.value = normalizedState.processedInputContent || '';
     parameters.value = normalizeAgentParameters(normalizedState.parameters);
+    selectedTextModelId.value = normalizedState.modelSelection?.textModelId || null;
+    selectedImageModelId.value = normalizedState.modelSelection?.imageModelId || null;
     selectedTemplate.value = normalizedState.selectedTemplate
       ? snapshotTemplateAsset(normalizedState.selectedTemplate!)
       : null;
@@ -972,10 +1316,34 @@ export const useAgentStore = defineStore('agent', () => {
     normalizeParametersAgainstConfig();
     retryingPageNumbers.value = new Set();
     normalizeImageAndLayoutStepState();
+    const restoredActiveQueueJob = normalizeActiveQueueJob(normalizedState.activeQueueJob);
+    const hasActiveQueueJob = Boolean(
+      activePptId.value &&
+      restoredActiveQueueJob?.queueJobId &&
+      !isTerminalQueueStatus(restoredActiveQueueJob.status)
+    );
+    if (activePptId.value && restoredActiveQueueJob?.queueJobId) {
+      if (hasActiveQueueJob) {
+        runningProjectJobs.value = {
+          ...runningProjectJobs.value,
+          [activePptId.value]: {
+            projectId: activePptId.value,
+            queueJobId: restoredActiveQueueJob.queueJobId,
+            dbJobId: restoredActiveQueueJob.dbJobId || null,
+            status: restoredActiveQueueJob.status,
+            phase: restoredActiveQueueJob.phase,
+            progress: restoredActiveQueueJob.progress,
+            updatedAt: restoredActiveQueueJob.updatedAt,
+          },
+        };
+      } else {
+        clearProjectRunningJob(activePptId.value);
+      }
+    }
     const hasRunningSteps = Boolean(normalizedState.steps?.some(step => step.status === 'running'));
-    const hadActiveWorkflow = !normalizedState.paused && Boolean(normalizedState.workflowActive || hasRunningSteps);
-    recoveredActiveWorkflow.value = hadActiveWorkflow && !normalizedState.paused;
-    isPaused.value = Boolean(normalizedState.paused || hadActiveWorkflow);
+    const hadActiveWorkflow = !normalizedState.paused && Boolean(normalizedState.workflowActive || hasRunningSteps || hasActiveQueueJob);
+    recoveredActiveWorkflow.value = hadActiveWorkflow && !normalizedState.paused && !hasActiveQueueJob;
+    isPaused.value = Boolean(normalizedState.paused || (hadActiveWorkflow && !hasActiveQueueJob));
     waitingForImageRetry.value = Boolean(normalizedState.waitingForImageRetry);
     pauseRequested.value = false;
     resumeStage.value = normalizedState.resumeStage || normalizedState.lastActiveStep || null;
@@ -1008,6 +1376,10 @@ export const useAgentStore = defineStore('agent', () => {
       }
     } else {
       steps.value = workflowSteps.map(s => ({ ...s }));
+    }
+    syncActiveRunRefsFromProject();
+    if (activePptId.value && hasActiveQueueJob && restoredActiveQueueJob?.queueJobId) {
+      subscribeProjectQueueJob(activePptId.value, restoredActiveQueueJob.queueJobId);
     }
   }
 
@@ -1223,8 +1595,11 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function pushLog(message: string) {
+    const normalizedMessage = compactMultiline(message, 420);
+    const lastMessage = activityLog.value[0]?.replace(/^\d{2}:\d{2}:\d{2}\s+/, '') || '';
+    if (lastMessage === normalizedMessage) return;
     activityLog.value = [
-      `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${compactMultiline(message, 420)}`,
+      `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${normalizedMessage}`,
       ...activityLog.value
     ].slice(0, MAX_ACTIVITY_LOGS);
     scheduleLogSync();
@@ -1545,6 +1920,7 @@ export const useAgentStore = defineStore('agent', () => {
 
   function markPaused(stage: WorkflowStepId) {
     const actualStage = inferPauseStage(stage);
+    const pausedProjectId = activePptId.value;
     workflowRunToken.value += 1;
     freezeWorkflowStepsForPause(actualStage);
     isPaused.value = true;
@@ -1555,6 +1931,7 @@ export const useAgentStore = defineStore('agent', () => {
     currentGeneratingSlide.value = null;
     activeQueueJobId.value = null;
     activeGenerationJobId.value = null;
+    clearProjectRunningJob(pausedProjectId);
     pushLog('工作流已暂停。');
     syncToProject();
   }
@@ -1566,18 +1943,75 @@ export const useAgentStore = defineStore('agent', () => {
     recoveredActiveWorkflow.value = false;
   }
 
+  function inferWorkflowResumeStage(fallback: WorkflowStepId = activeStep.value): WorkflowStepId {
+    const savedStage = resumeStage.value;
+    if (savedStage === 'images' || savedStage === 'layout' || savedStage === 'outline' || savedStage === 'input' || savedStage === 'preview') {
+      return savedStage;
+    }
+
+    if (waitingForImageRetry.value) return 'images';
+    const imageGate = imageGenerationGate();
+    if (imageGate.total > 0 && !imageGate.complete) return 'images';
+    if (hasPendingLayoutPages()) return 'layout';
+    if (fallback === 'images' || fallback === 'layout' || fallback === 'outline' || fallback === 'input' || fallback === 'preview') {
+      return fallback;
+    }
+    return 'outline';
+  }
+
+  async function resumeWorkflowFromStage(stage: WorkflowStepId = inferWorkflowResumeStage()) {
+    if (isRunning.value) return;
+
+    if (!checkActivePpt()) return;
+    if (isProjectRunning(activePptId.value)) {
+      pushLog('当前 PPT 已有服务端任务在运行，正在同步进度。');
+      await refreshProjectQueueSnapshot(activePptId.value!);
+      return;
+    }
+
+    const resumeFrom = inferWorkflowResumeStage(stage);
+    clearPauseState();
+
+    if (resumeFrom === 'input') {
+      await runInputStage();
+      return;
+    }
+
+    if (resumeFrom === 'outline') {
+      await runFullWorkflow({ resume: true });
+      return;
+    }
+
+    if (resumeFrom === 'preview') {
+      activeStep.value = 'preview';
+      setStepStatus('preview', 'done', svgPages.value.length > 0 ? 100 : 0);
+      await syncToProjectNow();
+      return;
+    }
+
+    if (!designSpec.value || !specLock.value || outline.value.length === 0) {
+      const message = '项目缺少已生成的大纲或设计规格，无法从当前阶段继续。请重新生成大纲。';
+      pushLog(message);
+      const toastStore = useToastStore();
+      toastStore.warning('无法继续生成', message);
+      activeStep.value = 'outline';
+      await syncToProjectNow();
+      return;
+    }
+
+    await runFullWorkflow({ resume: true, resumeStage: resumeFrom === 'images' ? 'images' : 'layout' });
+  }
+
   async function continueWorkflow() {
     if (isRunning.value) return;
     pushLog('继续生成。');
-    clearPauseState();
-    await runFullWorkflow({ resume: true });
+    await resumeWorkflowFromStage();
   }
 
   async function resumeRecoveredWorkflow() {
     if (!recoveredActiveWorkflow.value || isRunning.value) return;
     pushLog('页面已恢复，继续生成。');
-    clearPauseState();
-    await runFullWorkflow({ resume: true });
+    await resumeWorkflowFromStage();
   }
 
   function shouldPauseAt(stage: WorkflowStepId): boolean {
@@ -1857,6 +2291,22 @@ export const useAgentStore = defineStore('agent', () => {
     if (!apiKeyStore.isTextModelConfigured) {
       toastStore.warning('文本模型未配置', '请先在设置中配置文本模型的 API Key');
       return false;
+    }
+
+    if (selectedTextModelId.value) {
+      const selectedTextModel = apiKeyStore.textModels.find((model) => model.id === selectedTextModelId.value);
+      if (!selectedTextModel || !selectedTextModel.enabled || !selectedTextModel.hasKey) {
+        toastStore.warning('当前 PPT 的文本模型不可用', '请重新选择文本模型，或清空为默认模型');
+        return false;
+      }
+    }
+
+    if (selectedImageModelId.value) {
+      const selectedImageModel = apiKeyStore.imageModels.find((model) => model.id === selectedImageModelId.value);
+      if (!selectedImageModel || !selectedImageModel.enabled || !selectedImageModel.hasKey) {
+        toastStore.warning('当前 PPT 的图片模型不可用', '请重新选择图片模型，或清空为默认模型');
+        return false;
+      }
     }
 
     return true;
@@ -2793,6 +3243,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     activePptId.value = id;
     restoreProjectState(project.state);
+    void refreshProjectQueueSnapshot(id);
   }
 
   function addSkill(data: Omit<SkillDefinition, 'id' | 'order' | 'enabled'> & { enabled?: boolean }) {
@@ -3292,6 +3743,20 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
+  function selectProjectTextModel(id: string | null) {
+    selectedTextModelId.value = id || null;
+    persistCurrentSelectionToActiveProject();
+    pushLog(selectedTextModelId.value ? '已为当前 PPT 选择文本模型。' : '当前 PPT 已改为使用默认文本模型。');
+    syncToProject();
+  }
+
+  function selectProjectImageModel(id: string | null) {
+    selectedImageModelId.value = id || null;
+    persistCurrentSelectionToActiveProject();
+    pushLog(selectedImageModelId.value ? '已为当前 PPT 选择图片模型。' : '当前 PPT 已改为使用默认图片模型。');
+    syncToProject();
+  }
+
   async function runStrategist(ctx: RunContext = createRunContext()) {
     if (!checkActivePpt() || !checkApiKeys()) return;
     if (!isRunContextActive(ctx)) return;
@@ -3356,6 +3821,8 @@ export const useAgentStore = defineStore('agent', () => {
           slideCount: parameters.value.slideCount,
           imageStyle: parameters.value.imageStyle,
           template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
+          textModelId: selectedTextModelId.value,
+          imageModelId: selectedImageModelId.value,
           templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
           promptContent: selectedPromptContent(),
           skills: [],
@@ -3519,7 +3986,9 @@ export const useAgentStore = defineStore('agent', () => {
               updateImageStepFromGate('running');
               syncToProject();
             }
-          }
+          },
+          3,
+          { imageModelId: selectedImageModelId.value }
         );
       };
 
@@ -3602,7 +4071,8 @@ export const useAgentStore = defineStore('agent', () => {
           },
           onAllComplete: () => {},
         },
-        1
+        1,
+        { imageModelId: selectedImageModelId.value }
       );
       if (!isRunContextActive(ctx)) return null;
       return result[0] || null;
@@ -3638,7 +4108,7 @@ export const useAgentStore = defineStore('agent', () => {
         waitingForImageRetry.value = false;
         currentGeneratingSlide.value = null;
         pushLog('图片已全部生成，继续生成页面。');
-        await runFullWorkflow({ resume: true });
+        await resumeWorkflowFromStage('layout');
       }
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
@@ -3745,7 +4215,7 @@ export const useAgentStore = defineStore('agent', () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         svg = await aiApi.executorPageStream(
-          { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl },
+          { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl, textModelId: selectedTextModelId.value },
           {
             onStart: () => {},
             onContent: () => {},
@@ -3947,8 +4417,7 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     if (shouldContinueAfterRetry) {
-      clearPauseState();
-      await runFullWorkflow({ resume: true });
+      await resumeWorkflowFromStage('layout');
     } else if (takeover.shouldResumeAfterRetry && !hasPendingLayoutPages()) {
       clearPauseState();
       activeStep.value = 'preview';
@@ -3974,7 +4443,19 @@ export const useAgentStore = defineStore('agent', () => {
 </svg>`;
   }
 
-  async function runLayout() {
+  async function runLayout(ctx?: RunContext) {
+    if (!designSpec.value || !specLock.value) {
+      const message = outline.value.length > 0
+        ? '项目缺少设计规格，无法直接生成页面。请先重新生成大纲。'
+        : '项目缺少大纲内容，无法直接生成页面。请先生成大纲。';
+      activeStep.value = outline.value.length > 0 ? 'outline' : 'input';
+      pushLog(message);
+      const toastStore = useToastStore();
+      toastStore.warning('无法生成页面', message);
+      await syncToProjectNow();
+      return;
+    }
+
     const imageGate = updateImageStepFromGate('idle');
     if (imageGate.total > 0 && !imageGate.complete) {
       activeStep.value = 'images';
@@ -3986,7 +4467,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     const totalPages = designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount;
     const hasPartialPages = svgPages.value.length > 0 && svgPages.value.length < totalPages;
-    await runExecutor({ resume: hasPartialPages || executorCursor.value > 0 });
+    await runExecutor({ resume: hasPartialPages || executorCursor.value > 0, ctx });
   }
 
   async function runSkills() {
@@ -4096,8 +4577,10 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
-  async function runFullWorkflow(options: { resume?: boolean } = {}) {
+  async function runFullWorkflow(options: { resume?: boolean; resumeStage?: 'outline' | 'images' | 'layout' } = {}) {
     const toastStore = useToastStore();
+    let queuedProjectId: string | null = null;
+    let subscribedQueueJobId: string | null = null;
 
     if (!options.resume) {
       try {
@@ -4115,24 +4598,38 @@ export const useAgentStore = defineStore('agent', () => {
 
     if (!checkApiKeys()) return;
 
-    if (isRunning.value) {
+    const projectId = activePpt.value?.id || activePptId.value;
+    if (isProjectRunning(projectId)) {
       toastStore.warning('正在生成', '请等待当前任务完成');
       return;
     }
 
     isRunning.value = true;
     const ctx = createRunContext();
+    const queuedResumeStage = options.resume ? (options.resumeStage || 'outline') : 'outline';
     if (!options.resume) {
       clearPauseState();
       executorCursor.value = 0;
     }
 
     try {
-      resetDownstreamSteps('outline');
-      activeStep.value = 'outline';
-      setStepStatus('outline', 'running', 5);
-      toastStore.info('开始生成 PPT', '服务端任务已提交，正在排队处理。');
-      pushLog('服务端生成任务已提交。');
+      if (queuedResumeStage === 'outline') {
+        resetDownstreamSteps('outline');
+        activeStep.value = 'outline';
+        setStepStatus('outline', 'running', 5);
+      } else if (queuedResumeStage === 'images') {
+        activeStep.value = 'images';
+        setStepStatus('outline', 'done', 100);
+        setStepStatus('images', 'running', Math.max(5, steps.value.find(step => step.id === 'images')?.progress || 5));
+        setStepStatus('layout', 'idle', steps.value.find(step => step.id === 'layout')?.progress || 0);
+      } else {
+        activeStep.value = 'layout';
+        setStepStatus('outline', 'done', 100);
+        setStepStatus('images', 'done', 100);
+        setStepStatus('layout', 'running', Math.max(5, steps.value.find(step => step.id === 'layout')?.progress || 5));
+      }
+      toastStore.info('开始生成 PPT', queuedResumeStage === 'outline' ? '服务端任务已提交，正在排队处理。' : '服务端续跑任务已提交，正在排队处理。');
+      pushLog(queuedResumeStage === 'outline' ? '服务端生成任务已提交。' : `服务端续跑任务已提交：${queuedResumeStage === 'images' ? '图片阶段' : '页面阶段'}。`);
 
       const response = await aiApi.createGenerateJob({
         projectId: activePpt.value!.id,
@@ -4145,17 +4642,25 @@ export const useAgentStore = defineStore('agent', () => {
           slideCount: parameters.value.slideCount,
           imageStyle: parameters.value.imageStyle,
           template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
+          textModelId: selectedTextModelId.value,
+          imageModelId: selectedImageModelId.value,
           templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
           promptContent: selectedPromptContent(),
           skills: [],
         },
         projectState: snapshotProjectState({ persistable: true }),
         includeImages: true,
+        resumeStage: queuedResumeStage,
       });
 
       if (!response.success || !response.data) {
         throw new Error(response.message || '创建服务端生成任务失败');
       }
+      queuedProjectId = ctx.projectId || response.data.projectId || projectId;
+      if (!queuedProjectId) {
+        throw new Error('创建服务端生成任务失败：缺少项目 ID');
+      }
+      const currentQueuedProjectId = queuedProjectId;
 
       if (pauseRequested.value || isPaused.value || !isRunContextActive(ctx)) {
         await aiApi.cancelQueueJob(response.data.id).catch((error) => console.warn('取消队列任务失败', error));
@@ -4168,42 +4673,18 @@ export const useAgentStore = defineStore('agent', () => {
 
       activeQueueJobId.value = response.data.id;
       activeGenerationJobId.value = response.data.dbJobId || null;
+      upsertProjectRunningJob(currentQueuedProjectId, response.data);
+      subscribedQueueJobId = response.data.id;
+      subscribedQueueJobIds.add(subscribedQueueJobId);
       const finalJob = await aiApi.waitForQueueJob(response.data.id, (job) => {
+        upsertProjectRunningJob(currentQueuedProjectId, job);
+        applyQueueJobToProjectState(currentQueuedProjectId, job);
         if (!isRunContextActive(ctx)) return;
-        if (job.status === 'cancelled') return;
-        pushLog(job.message || `任务进度：${job.phase}`);
-        if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') {
-          activeStep.value = 'outline';
-          setStepStatus('outline', 'running', Math.min(99, job.progress));
-          if (job.phase === 'outline' && job.result) {
-            applyQueuedOutlineProgress(job.result, job.progress);
-          }
-        } else if (job.phase === 'images') {
-          activeStep.value = 'images';
-          setStepStatus('outline', 'done', 100);
-          setStepStatus('images', 'running', Math.min(99, job.progress));
-          if (job.result) {
-            try {
-              applyQueuedGenerationResult(job.result, { phase: 'images', progress: job.progress });
-            } catch {
-              // 图片阶段可能只有消息，没有完整结果。
-            }
-          }
-        } else if (job.phase === 'layout') {
-          activeStep.value = 'layout';
-          setStepStatus('outline', 'done', 100);
-          setStepStatus('layout', 'running', Math.min(99, job.progress));
-          if (job.result) {
-            try {
-              applyQueuedGenerationResult(job.result, { phase: 'layout', progress: job.progress });
-              setStepStatus('layout', 'running', Math.min(99, job.progress));
-            } catch {
-              // Partial results may be incomplete while the job is running.
-            }
-          }
-        }
+        applyQueueJobToActiveProject(job);
       });
 
+      applyQueueJobToProjectState(currentQueuedProjectId, finalJob);
+      clearProjectRunningJob(currentQueuedProjectId);
       if (!isRunContextActive(ctx)) return;
       applyQueuedGenerationResult(finalJob.result, { final: true });
       activeStep.value = 'preview';
@@ -4214,6 +4695,9 @@ export const useAgentStore = defineStore('agent', () => {
 
       toastStore.success('PPT 生成完成', '可以在预览区查看结果');
     } catch (error) {
+      if (queuedProjectId && !(pauseRequested.value || (error instanceof Error && error.message === '任务已取消'))) {
+        clearProjectRunningJob(queuedProjectId);
+      }
       if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
       if (pauseRequested.value || errMsg === '任务已取消') {
@@ -4238,13 +4722,15 @@ export const useAgentStore = defineStore('agent', () => {
       toastStore.error('PPT 生成失败', errMsg);
     } finally {
       if (isRunContextActive(ctx) && !isPaused.value) {
-        isRunning.value = false;
-        runningProjectId.value = null;
-        activeQueueJobId.value = null;
+        clearProjectRunningJob(ctx.projectId);
+        syncActiveRunRefsFromProject();
       }
       if (isRunContextActive(ctx)) {
         streamingText.value = '';
         currentGeneratingSlide.value = null;
+      }
+      if (subscribedQueueJobId) {
+        subscribedQueueJobIds.delete(subscribedQueueJobId);
       }
     }
   }
@@ -4732,6 +5218,8 @@ export const useAgentStore = defineStore('agent', () => {
     svgPages,
     configOptions,
     selectedPromptId,
+    selectedTextModelId,
+    selectedImageModelId,
     currentGeneratingSlide,
     generatedSlides,
     isDataLoaded,
@@ -4748,6 +5236,8 @@ export const useAgentStore = defineStore('agent', () => {
     deletePrompt,
     selectPrompt,
     applyPrompt,
+    selectProjectTextModel,
+    selectProjectImageModel,
     attachFiles,
     removeAttachedFile,
     exportCurrentDeck,

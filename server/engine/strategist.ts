@@ -24,6 +24,8 @@ export interface StrategistInput {
   slideCount?: number;
   imageStyle: string;
   template: string;
+  textModelId?: string | number | null;
+  imageModelId?: string | number | null;
   templateAsset?: {
     id: string;
     name: string;

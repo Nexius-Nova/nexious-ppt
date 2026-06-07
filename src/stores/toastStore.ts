@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
+import { translateErrorMessage } from '../utils/errorMessages';
 
 export interface Toast {
   id: string;
@@ -29,11 +30,17 @@ export const useToastStore = defineStore('toast', () => {
     message?: string,
     duration: number = 5000
   ): Toast {
+    const normalizedTitle = type === 'error'
+      ? translateErrorMessage(title, '操作失败')
+      : title;
+    const normalizedMessage = type === 'error' && message
+      ? translateErrorMessage(message, '操作失败，请稍后重试')
+      : message;
     const toast: Toast = {
       id: generateId(),
       type,
-      title,
-      message,
+      title: normalizedTitle,
+      message: normalizedMessage,
       duration,
       createdAt: Date.now(),
       read: false

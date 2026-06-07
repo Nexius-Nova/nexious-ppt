@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { CheckCircle2, FileArchive, Loader2, RotateCw, Sparkles, Trash2, UploadCloud, XCircle, Zap } from 'lucide-vue-next';
+import { CheckCircle2, Eye, FileArchive, FileText, FolderTree, Loader2, RotateCw, Sparkles, Trash2, UploadCloud, XCircle, Zap } from 'lucide-vue-next';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiEmpty from '@/components/ui/UiEmpty.vue';
@@ -8,7 +8,7 @@ import UiSelect from '@/components/ui/UiSelect.vue';
 import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useToastStore } from '@/stores/toastStore';
-import { skillApi, type Skill, type SkillPackagePreview, type SkillPackagePreviewFile } from '@/services/api';
+import { skillApi, type Skill, type SkillPackagePreview, type SkillPackagePreviewFile, type SkillPackageView } from '@/services/api';
 import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
 
 const toastStore = useToastStore();
@@ -27,6 +27,10 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 const packageFileName = ref('');
 const pendingPackage = ref<{ filename: string; dataBase64: string } | null>(null);
 const packagePreview = ref<SkillPackagePreview | null>(null);
+const showPackageView = ref(false);
+const packageView = ref<SkillPackageView | null>(null);
+const packageViewSkill = ref<Skill | null>(null);
+const packageViewLoadingId = ref<number | null>(null);
 const packageCategory = ref('资料收集');
 
 const readyCount = computed(() =>
@@ -190,6 +194,39 @@ async function confirmPackageUpload() {
     toastStore.error('上传失败', error instanceof Error ? error.message : '上传 Skill 包失败');
   } finally {
     uploading.value = false;
+  }
+}
+
+function canViewSkillPackage(skill: Skill) {
+  return Boolean(skill.package_path || skill.type === 'package');
+}
+
+function closePackageView() {
+  if (packageViewLoadingId.value) return;
+  showPackageView.value = false;
+  packageView.value = null;
+  packageViewSkill.value = null;
+}
+
+async function viewSkillPackage(skill: Skill) {
+  if (!canViewSkillPackage(skill)) return;
+  packageViewSkill.value = skill;
+  showPackageView.value = true;
+  packageViewLoadingId.value = skill.id;
+  packageView.value = null;
+  try {
+    const response = await skillApi.getPackageView(skill.id);
+    if (!response.success || !response.data) {
+      throw new Error(response.message || '加载 Skill 包失败');
+    }
+    packageView.value = response.data;
+  } catch (error) {
+    toastStore.error('加载失败', error instanceof Error ? error.message : '加载 Skill 包失败');
+    showPackageView.value = false;
+    packageView.value = null;
+    packageViewSkill.value = null;
+  } finally {
+    packageViewLoadingId.value = null;
   }
 }
 
@@ -497,6 +534,10 @@ onBeforeUnmount(stopStatusPolling);
           </div>
         </div>
         <div class="skill-card__actions">
+          <UiButton v-if="canViewSkillPackage(skill)" size="sm" variant="secondary" :loading="packageViewLoadingId === skill.id" @click="viewSkillPackage(skill)">
+            <Eye :size="13" />
+            查看包
+          </UiButton>
           <UiButton v-if="skill.runtime !== 'prompt-only'" size="sm" variant="secondary" @click="reinstallSkill(skill)">
             <RotateCw :size="13" />
             重试初始化并测试
@@ -602,6 +643,76 @@ onBeforeUnmount(stopStatusPolling);
           <footer class="modal__footer">
             <UiButton variant="secondary" :disabled="uploading" @click="closePackagePreview">取消</UiButton>
             <UiButton variant="primary" :loading="uploading" @click="confirmPackageUpload">确认添加</UiButton>
+          </footer>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="showPackageView" class="modal-overlay" @click.self="closePackageView">
+        <div class="modal package-view-modal">
+          <header class="modal__header">
+            <div>
+              <h3>查看 Skill 包</h3>
+              <span>{{ packageViewSkill?.name || 'Skill 包' }}</span>
+            </div>
+            <button type="button" class="modal__close" :disabled="Boolean(packageViewLoadingId)" @click="closePackageView">×</button>
+          </header>
+
+          <div class="modal__body package-view">
+            <div v-if="packageViewLoadingId" class="package-view__loading">
+              <Loader2 :size="18" class="spin" />
+              <span>正在读取 Skill 包</span>
+            </div>
+            <template v-else-if="packageView">
+              <section class="package-view__summary">
+                <div>
+                  <span>说明文件</span>
+                  <strong>{{ packageView.skillMdPath }}</strong>
+                </div>
+                <div>
+                  <span>运行时</span>
+                  <strong>{{ runtimePreviewLabel(packageView.runtime) }}</strong>
+                </div>
+                <div>
+                  <span>入口</span>
+                  <strong>{{ packageView.entry || '仅提示词' }}</strong>
+                </div>
+                <div>
+                  <span>文件</span>
+                  <strong>{{ packageView.fileCount }} 个 · {{ formatFileSize(packageView.totalSize) }}</strong>
+                </div>
+              </section>
+
+              <section class="package-view__grid">
+                <article class="package-view__panel package-view__panel--content">
+                  <header>
+                    <FileText :size="15" />
+                    <strong>SKILL.md</strong>
+                    <UiBadge v-if="packageView.skillMdTruncated" tone="warning" size="sm">已截断</UiBadge>
+                  </header>
+                  <pre>{{ packageView.skillMdContent || 'SKILL.md 为空' }}</pre>
+                </article>
+
+                <article class="package-view__panel package-view__panel--tree">
+                  <header>
+                    <FolderTree :size="15" />
+                    <strong>包内文件结构</strong>
+                  </header>
+                  <div class="package-tree__list">
+                    <div v-for="file in packageView.files" :key="file.path" class="package-tree__file">
+                      <code>{{ file.path }}</code>
+                      <span>{{ formatFileSize(file.size) }}</span>
+                      <UiBadge :tone="fileRoleTone(file.role)" size="sm">{{ fileRoleLabel(file.role) }}</UiBadge>
+                    </div>
+                  </div>
+                </article>
+              </section>
+            </template>
+          </div>
+
+          <footer class="modal__footer">
+            <UiButton variant="secondary" :disabled="Boolean(packageViewLoadingId)" @click="closePackageView">关闭</UiButton>
           </footer>
         </div>
       </div>
@@ -952,6 +1063,11 @@ onBeforeUnmount(stopStatusPolling);
   width: min(860px, 100%);
 }
 
+.package-view-modal {
+  width: min(1080px, 100%);
+  overflow: hidden;
+}
+
 .modal__header,
 .modal__footer {
   display: flex;
@@ -1002,6 +1118,112 @@ onBeforeUnmount(stopStatusPolling);
 
 .package-preview {
   gap: 12px;
+}
+
+.package-view {
+  gap: 12px;
+  overflow: hidden;
+}
+
+.package-view__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 260px;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.package-view__summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.package-view__summary div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--color-panel);
+}
+
+.package-view__summary span {
+  color: var(--color-subtle);
+  font-size: 11px;
+}
+
+.package-view__summary strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.package-view__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  align-items: start;
+  gap: 12px;
+  min-height: 0;
+}
+
+.package-view__panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+
+.package-view__panel--content {
+  height: min(58vh, 560px);
+}
+
+.package-view__panel--tree {
+  max-height: min(58vh, 560px);
+  grid-template-rows: auto auto;
+}
+
+.package-view__panel header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.package-view__panel header svg {
+  color: var(--color-accent);
+}
+
+.package-view__panel pre {
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.package-view__panel--tree .package-tree__list {
+  max-height: min(48vh, 480px);
+  min-height: 0;
+  overflow: auto;
 }
 
 .package-summary,
@@ -1208,6 +1430,15 @@ onBeforeUnmount(stopStatusPolling);
   .skill-flow {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .package-view__grid,
+  .package-view__summary {
+    grid-template-columns: 1fr;
+  }
+
+  .package-view__panel--content {
+    height: min(52vh, 460px);
+  }
 }
 
 @media (max-width: 560px) {
@@ -1224,7 +1455,8 @@ onBeforeUnmount(stopStatusPolling);
   .skill-flow,
   .skill-meta,
   .package-summary,
-  .package-detected {
+  .package-detected,
+  .package-view__summary {
     grid-template-columns: 1fr;
   }
 

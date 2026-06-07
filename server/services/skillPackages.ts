@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import JSZip from 'jszip';
 import { query } from '../db/connection.js';
+import { generatedSkillsRoot } from '../utils/storage.js';
 
 export type SkillRuntime = 'prompt-only' | 'python' | 'node';
 export type SkillInstallStatus = 'not_required' | 'pending' | 'installing' | 'ready' | 'failed';
@@ -71,12 +72,42 @@ export interface SkillPackagePreview {
   files: SkillPackagePreviewFile[];
 }
 
+export interface SkillPackageView {
+  skillMdPath: string;
+  skillMdContent: string;
+  skillMdTruncated: boolean;
+  fileCount: number;
+  totalSize: number;
+  runtime: SkillRuntime;
+  entry: string | null;
+  dependencyFile: string | null;
+  files: SkillPackagePreviewFile[];
+}
+
 const MAX_PACKAGE_BYTES = 20 * 1024 * 1024;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
 const RUN_TIMEOUT_MS = 2 * 60 * 1000;
 const HEALTH_TEST_PROJECT_ID = '__skill_health_check__';
-const storageRoot = path.join(process.cwd(), '.generated', 'skills');
+const storageRoot = generatedSkillsRoot;
+const TEXT_SCAN_BYTES = 512 * 1024;
+const SKILL_MD_VIEW_BYTES = 512 * 1024;
+const SECURITY_FAILURE_MESSAGE = 'Skill 包未通过安全验证。';
+
+interface SkillPackageSecurityIssue {
+  code: string;
+  path: string;
+}
+
+class SkillPackageSecurityError extends Error {
+  readonly issues: SkillPackageSecurityIssue[];
+
+  constructor(issues: SkillPackageSecurityIssue[]) {
+    super(SECURITY_FAILURE_MESSAGE);
+    this.name = 'SkillPackageSecurityError';
+    this.issues = issues;
+  }
+}
 
 function isPathInside(childPath: string, parentPath: string) {
   const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
@@ -95,6 +126,226 @@ function safeRelativePath(input: string) {
     throw new Error(`Invalid package path: ${input}`);
   }
   return resolved;
+}
+
+function collectSecurityIssue(
+  issues: SkillPackageSecurityIssue[],
+  code: string,
+  filePath: string,
+  limit = 80
+) {
+  if (issues.length >= limit) return;
+  issues.push({ code, path: filePath });
+}
+
+function logSkillSecurityFailure(context: string, issues: SkillPackageSecurityIssue[]) {
+  console.warn(`Skill package security validation failed during ${context}`, {
+    issues: issues.map((issue) => ({ code: issue.code, path: issue.path })),
+  });
+}
+
+function throwIfSecurityIssues(context: string, issues: SkillPackageSecurityIssue[]) {
+  if (!issues.length) return;
+  logSkillSecurityFailure(context, issues);
+  throw new SkillPackageSecurityError(issues);
+}
+
+function assertSkillPackageDirectoryScope(packagePath: string, userId: number | null, skillId: number) {
+  if (!packagePath) return;
+  const expectedBase = userId
+    ? path.join(storageRoot, String(userId), String(skillId))
+    : storageRoot;
+  const resolvedPackage = path.resolve(packagePath);
+  const resolvedBase = path.resolve(expectedBase);
+  if (resolvedPackage !== resolvedBase && !isPathInside(resolvedPackage, resolvedBase)) {
+    logSkillSecurityFailure('package-directory-scope', [{ code: 'path:package-directory-out-of-scope', path: packagePath }]);
+    throw new SkillPackageSecurityError([{ code: 'path:package-directory-out-of-scope', path: packagePath }]);
+  }
+}
+
+function isTextScannablePath(filePath: string) {
+  return /\.(md|txt|json|ya?ml|toml|ini|cfg|conf|py|js|mjs|cjs|ts|tsx|css|html|xml|csv|requirements)$/i.test(filePath)
+    || /(^|\/)(requirements\.txt|package\.json|skill\.json|skill\.md)$/i.test(filePath);
+}
+
+function readTextForSecurityScan(data: Buffer) {
+  if (!data.byteLength) return '';
+  const sample = data.subarray(0, Math.min(data.byteLength, TEXT_SCAN_BYTES));
+  if (sample.includes(0)) return '';
+  return sample.toString('utf8');
+}
+
+function hasSuspiciousPackageJsonDependency(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).some((dependency) => {
+    const spec = String(dependency || '').trim().toLowerCase();
+    return /^(file:|link:|workspace:|git\+|https?:\/\/|ssh:)/i.test(spec);
+  });
+}
+
+function scanPackageJsonSecurity(
+  content: string,
+  filePath: string,
+  issues: SkillPackageSecurityIssue[]
+) {
+  try {
+    const data = JSON.parse(content);
+    const scripts = data?.scripts && typeof data.scripts === 'object' && !Array.isArray(data.scripts)
+      ? data.scripts as Record<string, unknown>
+      : {};
+    for (const scriptName of ['preinstall', 'install', 'postinstall', 'prepare']) {
+      if (typeof scripts[scriptName] === 'string' && String(scripts[scriptName]).trim()) {
+        collectSecurityIssue(issues, `dependency-script:${scriptName}`, filePath);
+      }
+    }
+    if (
+      hasSuspiciousPackageJsonDependency(data?.dependencies)
+      || hasSuspiciousPackageJsonDependency(data?.optionalDependencies)
+      || hasSuspiciousPackageJsonDependency(data?.devDependencies)
+      || hasSuspiciousPackageJsonDependency(data?.peerDependencies)
+    ) {
+      collectSecurityIssue(issues, 'dependency-source:external-or-local', filePath);
+    }
+  } catch {
+    collectSecurityIssue(issues, 'manifest:invalid-package-json', filePath);
+  }
+}
+
+function scanRequirementsSecurity(
+  content: string,
+  filePath: string,
+  issues: SkillPackageSecurityIssue[]
+) {
+  const blockedLine = /(^|\s)(-e|--editable|--index-url|--extra-index-url|--find-links|--trusted-host)\b|(?:git\+|https?:\/\/|file:|\.{1,2}[\\/])/i;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (blockedLine.test(line)) {
+      collectSecurityIssue(issues, 'dependency-source:requirements', filePath);
+      return;
+    }
+  }
+}
+
+function scanTextSecurity(
+  content: string,
+  filePath: string,
+  issues: SkillPackageSecurityIssue[]
+) {
+  const normalized = content.replace(/\r\n/g, '\n');
+  const suspiciousPatterns: Array<{ code: string; pattern: RegExp }> = [
+    { code: 'path:parent-directory-reference', pattern: /(^|[^.])\.\.[\\/]/ },
+    { code: 'path:system-or-home-reference', pattern: /(?:\/etc\/(?:passwd|shadow)|~[\\/]?\.ssh|[A-Za-z]:\\|\/Users\/|\/root\/|\/home\/[^/\s]+\/\.ssh)/i },
+    { code: 'path:sensitive-file-reference', pattern: /(?:\.env\b|id_rsa\b|id_dsa\b|authorized_keys\b|known_hosts\b|\.npmrc\b|\.pypirc\b)/i },
+    { code: 'secret:private-key', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+    { code: 'secret:token-pattern', pattern: /\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|sk-[A-Za-z0-9_-]{32,})\b/ },
+    { code: 'secret:assignment-pattern', pattern: /\b(?:api[_-]?key|access[_-]?token|secret[_-]?key|password|passwd|pwd)\s*[:=]\s*['"]?[^'"\s]{12,}/i },
+    { code: 'code:node-child-process', pattern: /\b(?:child_process|spawnSync|execSync|execFileSync)\b|require\(\s*['"]child_process['"]\s*\)/i },
+    { code: 'code:node-destructive-fs', pattern: /\bfs\.(?:rm|rmdir|unlink)\b/i },
+    { code: 'code:node-sensitive-env', pattern: /\b(?:JSON\.stringify|Object\.(?:keys|values|entries))\(\s*process\.env\s*\)|\bprocess\.env(?:\.|\[['"])(?!(?:SKILL_|PATH\b|Path\b|TEMP\b|TMP\b|HOME\b|USERPROFILE\b|SystemRoot\b|WINDIR\b))[A-Za-z0-9_ -]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|DATABASE|DB_|JWT|OPENAI|AWS_)/i },
+    { code: 'code:python-dangerous-runtime', pattern: /\b(?:os\.system|eval|exec|compile|__import__)\b|\bsubprocess\.(?:Popen|call|check_call|check_output|run)\s*\([\s\S]{0,240}\bshell\s*=\s*True/i },
+    { code: 'code:python-destructive-fs', pattern: /\b(?:shutil\.rmtree|os\.remove|os\.unlink|os\.rmdir|Path\([^)]*\)\.unlink)\b/i },
+    { code: 'shell:destructive-or-privileged', pattern: /\b(?:rm\s+-rf|sudo\s+|chmod\s+(?:\+x|777)|powershell(?:\.exe)?|cmd\.exe)\b/i },
+    { code: 'network:shell-pipe-download', pattern: /\b(?:curl|wget)\b[\s\S]{0,120}\|\s*(?:sh|bash|powershell|python|node)\b/i },
+    { code: 'intent:exfiltration-or-malware', pattern: /\b(?:exfiltrate|keylogger|ransomware|credential\s*(?:dump|steal)|token\s*(?:dump|steal)|phishing)\b|(?:窃取|外传|盗取|键盘记录|勒索|钓鱼|删除系统文件|读取环境变量)/i },
+  ];
+
+  for (const rule of suspiciousPatterns) {
+    if (rule.pattern.test(normalized)) {
+      collectSecurityIssue(issues, rule.code, filePath);
+    }
+  }
+}
+
+function assertSkillPackageSafe(analysis: PackageAnalysis, context = 'package') {
+  const issues: SkillPackageSecurityIssue[] = [];
+  const blockedDirNames = new Set([
+    '.git',
+    '.ssh',
+    '.gnupg',
+    '.aws',
+    '.azure',
+    '.config',
+    'node_modules',
+    '.venv',
+    'venv',
+    '__pycache__',
+  ]);
+  const blockedFileNames = [
+    /^\.env(?:\.|$)/i,
+    /^\.npmrc$/i,
+    /^\.pypirc$/i,
+    /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i,
+    /(?:private[_-]?key|secret|credential|token|password).*\.(?:txt|json|ya?ml|env)$/i,
+    /\.(?:pem|key|p12|pfx|crt|cer)$/i,
+  ];
+  const blockedExtensions = new Set([
+    '.exe',
+    '.dll',
+    '.so',
+    '.dylib',
+    '.msi',
+    '.scr',
+    '.bat',
+    '.cmd',
+    '.ps1',
+    '.vbs',
+    '.jar',
+    '.com',
+  ]);
+  const filePaths = new Set(analysis.files.map((file) => file.relativePath));
+
+  for (const file of analysis.files) {
+    let relativePath = '';
+    try {
+      relativePath = safeRelativePath(file.relativePath);
+    } catch {
+      collectSecurityIssue(issues, 'path:invalid', file.relativePath);
+      continue;
+    }
+
+    const normalizedPath = relativePath.replace(/\\/g, '/');
+    const lowerPath = normalizedPath.toLowerCase();
+    const segments = lowerPath.split('/');
+    const fileName = segments[segments.length - 1] || lowerPath;
+    const extension = path.posix.extname(lowerPath);
+
+    if (segments.some((segment) => blockedDirNames.has(segment))) {
+      collectSecurityIssue(issues, 'path:blocked-directory', normalizedPath);
+    }
+    if (blockedFileNames.some((pattern) => pattern.test(fileName))) {
+      collectSecurityIssue(issues, 'file:sensitive-name', normalizedPath);
+    }
+    if (blockedExtensions.has(extension)) {
+      collectSecurityIssue(issues, 'file:executable-or-binary', normalizedPath);
+    }
+
+    if (!isTextScannablePath(normalizedPath)) continue;
+    const content = readTextForSecurityScan(file.data);
+    if (!content) continue;
+    if (fileName === 'package.json') {
+      scanPackageJsonSecurity(content, normalizedPath, issues);
+    } else if (fileName === 'requirements.txt') {
+      scanRequirementsSecurity(content, normalizedPath, issues);
+    }
+    scanTextSecurity(content, normalizedPath, issues);
+  }
+
+  for (const candidate of [analysis.entry, analysis.dependencyFile, analysis.manifest.skillMdPath, analysis.manifest.skillJsonPath]) {
+    if (!candidate) continue;
+    let relativePath = '';
+    try {
+      relativePath = safeRelativePath(candidate);
+    } catch {
+      collectSecurityIssue(issues, 'manifest:path-invalid', String(candidate));
+      continue;
+    }
+    if (!filePaths.has(relativePath)) {
+      collectSecurityIssue(issues, 'manifest:path-missing', relativePath);
+    }
+  }
+
+  throwIfSecurityIssues(context, issues);
 }
 
 function parseFrontMatter(content: string): SkillManifest {
@@ -284,6 +535,10 @@ async function analyzePackage(filename: string, dataBase64: string): Promise<Pac
   const zip = await JSZip.loadAsync(buffer);
   for (const entry of Object.values(zip.files)) {
     if (entry.dir) continue;
+    const unixPermissions = typeof entry.unixPermissions === 'number' ? entry.unixPermissions : 0;
+    if ((unixPermissions & 0o170000) === 0o120000) {
+      throw new Error(SECURITY_FAILURE_MESSAGE);
+    }
     const relativePath = safeRelativePath(entry.name);
     const data = await entry.async('nodebuffer');
     if (data.byteLength > MAX_FILE_BYTES) {
@@ -302,7 +557,7 @@ async function analyzePackageDirectory(packagePath: string): Promise<PackageAnal
   async function walk(currentDir: string) {
     const entries = await fs.readdir(currentDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name === 'node_modules' || entry.name === '.venv' || entry.name === '__pycache__') continue;
+      if (entry.name === 'node_modules' || entry.name === '.venv' || entry.name === '__pycache__' || entry.name === '.runs') continue;
       const absolutePath = path.join(currentDir, entry.name);
       const relativePath = safeRelativePath(path.relative(packagePath, absolutePath));
       if (entry.isDirectory()) {
@@ -355,8 +610,20 @@ function packageAnalysisToPreview(analysis: PackageAnalysis): SkillPackagePrevie
   };
 }
 
+function packageAnalysisToFiles(analysis: PackageAnalysis): SkillPackagePreviewFile[] {
+  return analysis.files
+    .map((file) => ({
+      path: file.relativePath,
+      size: file.data.byteLength,
+      role: classifyPackageFile(analysis, file.relativePath),
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
 export async function previewSkillPackage(filename: string, dataBase64: string): Promise<SkillPackagePreview> {
-  return packageAnalysisToPreview(await analyzePackage(filename, dataBase64));
+  const analysis = await analyzePackage(filename, dataBase64);
+  assertSkillPackageSafe(analysis, 'preview');
+  return packageAnalysisToPreview(analysis);
 }
 
 async function writePackageFiles(baseDir: string, files: PackageAnalysis['files']) {
@@ -503,6 +770,7 @@ function detectPackageAdaptationPlan(analysis: PackageAnalysis) {
 
 async function adaptSkillPackageForWorkflow(packagePath: string) {
   const analysis = await analyzePackageDirectory(packagePath);
+  assertSkillPackageSafe(analysis, 'workflow-adaptation:before');
   const logs: string[] = [];
   const instruction = parseSkillInstruction(
     await fs.readFile(path.join(packagePath, analysis.manifest.skillMdPath || 'SKILL.md'), 'utf8')
@@ -520,6 +788,7 @@ async function adaptSkillPackageForWorkflow(packagePath: string) {
   }
 
   const nextAnalysis = await analyzePackageDirectory(packagePath);
+  assertSkillPackageSafe(nextAnalysis, 'workflow-adaptation:after');
   return {
     analysis: nextAnalysis,
     logs,
@@ -589,13 +858,7 @@ function runProcess(
       cwd: options.cwd,
       shell: false,
       windowsHide: true,
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUTF8: '1',
-        LC_ALL: process.env.LC_ALL || 'C.UTF-8',
-        ...(options.env || {}),
-      },
+      env: buildSafeProcessEnv(options.env || {}),
     });
     let stdout = '';
     let stderr = '';
@@ -662,6 +925,42 @@ function hasSkillRuntimeError(stderrText: string) {
     /ImportError/i,
     /Process timeout/i,
   ].some((pattern) => pattern.test(stderrText));
+}
+
+function buildSafeProcessEnv(extraEnv: Record<string, string> = {}) {
+  const safeEnv: Record<string, string> = {
+    PATH: process.env.PATH || '',
+    Path: process.env.Path || process.env.PATH || '',
+    PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD',
+    SystemRoot: process.env.SystemRoot || 'C:\\Windows',
+    WINDIR: process.env.WINDIR || process.env.SystemRoot || 'C:\\Windows',
+    TEMP: process.env.TEMP || process.env.TMP || '',
+    TMP: process.env.TMP || process.env.TEMP || '',
+    HOME: process.env.HOME || '',
+    USERPROFILE: process.env.USERPROFILE || '',
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+    PYTHONNOUSERSITE: '1',
+    PIP_DISABLE_PIP_VERSION_CHECK: '1',
+    PIP_NO_INPUT: '1',
+    npm_config_ignore_scripts: 'true',
+    PNPM_HOME: process.env.PNPM_HOME || '',
+    LC_ALL: process.env.LC_ALL || 'C.UTF-8',
+  };
+
+  for (const [key, value] of Object.entries(extraEnv)) {
+    safeEnv[key] = value;
+  }
+
+  return safeEnv;
+}
+
+function getSkillSecurityMessage(error: unknown) {
+  return error instanceof SkillPackageSecurityError
+    ? SECURITY_FAILURE_MESSAGE
+    : error instanceof Error
+      ? error.message
+      : 'Skill package scan failed.';
 }
 
 function isSearchLikeSkill(skill: any, payload: { phase?: string; input?: unknown }) {
@@ -783,7 +1082,7 @@ function parseJsonRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-export async function initializeSkillEnvironment(skillId: number) {
+export async function initializeSkillEnvironment(skillId: number, userId?: number) {
   const rows = await query<any>(
     'SELECT id, runtime, package_path, dependency_file, parameters FROM skills WHERE id = ?',
     [skillId]
@@ -800,6 +1099,7 @@ export async function initializeSkillEnvironment(skillId: number) {
   if (packagePath) {
     try {
       await updateSkillInstallStatus(skillId, 'installing', '正在自动适配 Skill 包到输入阶段工作流...');
+      assertSkillPackageDirectoryScope(packagePath, userId ?? null, skillId);
       const adaptation = await adaptSkillPackageForWorkflow(packagePath);
       adaptationLogs = adaptation.logs;
       const analysis = adaptation.analysis;
@@ -830,7 +1130,7 @@ export async function initializeSkillEnvironment(skillId: number) {
         ]
       );
     } catch (error) {
-      await updateSkillInstallStatus(skillId, 'failed', error instanceof Error ? error.message : 'Skill package scan failed.');
+      await updateSkillInstallStatus(skillId, 'failed', getSkillSecurityMessage(error));
       return;
     }
   }
@@ -897,7 +1197,7 @@ export async function initializeSkillEnvironment(skillId: number) {
     if (runtime === 'node') {
       const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
       const dependencyDir = dependencyFile ? path.dirname(path.join(packagePath, dependencyFile)) : packagePath;
-      const result = await runProcess(pnpmBin, ['install', '--prod'], {
+      const result = await runProcess(pnpmBin, ['install', '--prod', '--ignore-scripts'], {
         cwd: dependencyDir,
         timeoutMs: INSTALL_TIMEOUT_MS,
       });
@@ -912,6 +1212,7 @@ export async function initializeSkillEnvironment(skillId: number) {
 
 export async function createSkillFromPackage(userId: number, filename: string, dataBase64: string, overrides: { category?: string } = {}) {
   const analysis = await analyzePackage(filename, dataBase64);
+  assertSkillPackageSafe(analysis, 'upload');
   const category = String(overrides.category || analysis.category || '').trim() || analysis.category;
   const commandAdaptable = analysis.runtime === 'prompt-only'
     ? Boolean(detectSkillCommandAdapter(String(analysis.parameters.instruction || '')))
@@ -956,8 +1257,44 @@ export async function createSkillFromPackage(userId: number, filename: string, d
   return skillId;
 }
 
+export async function getSkillPackageView(userId: number, skillId: number): Promise<SkillPackageView> {
+  const rows = await query<any>(
+    'SELECT id, package_path FROM skills WHERE id = ? AND user_id = ?',
+    [skillId, userId]
+  );
+  const skill = rows[0];
+  if (!skill) throw new Error('Skill not found.');
+
+  const packagePath = String(skill.package_path || '');
+  if (!packagePath) throw new Error('Skill package not found.');
+
+  assertSkillPackageDirectoryScope(packagePath, userId, skillId);
+  const analysis = await analyzePackageDirectory(packagePath);
+  assertSkillPackageSafe(analysis, 'package-view');
+
+  const skillMdPath = analysis.manifest.skillMdPath || 'SKILL.md';
+  const skillMdFile = analysis.files.find((file) => file.relativePath === skillMdPath);
+  const skillMdBuffer = skillMdFile?.data || Buffer.from('');
+  const skillMdTruncated = skillMdBuffer.byteLength > SKILL_MD_VIEW_BYTES;
+  const skillMdContent = skillMdBuffer
+    .subarray(0, Math.min(skillMdBuffer.byteLength, SKILL_MD_VIEW_BYTES))
+    .toString('utf8');
+
+  return {
+    skillMdPath,
+    skillMdContent,
+    skillMdTruncated,
+    fileCount: analysis.files.length,
+    totalSize: analysis.files.reduce((sum, file) => sum + file.data.byteLength, 0),
+    runtime: analysis.runtime,
+    entry: analysis.entry,
+    dependencyFile: analysis.dependencyFile,
+    files: packageAnalysisToFiles(analysis),
+  };
+}
+
 export async function initializeAndTestSkill(userId: number, skillId: number) {
-  await initializeSkillEnvironment(skillId);
+  await initializeSkillEnvironment(skillId, userId);
   await testSkillPackage(userId, skillId);
 }
 
@@ -971,7 +1308,7 @@ export async function runSkillPackage(
   if (!skill) throw new Error('Skill not found.');
 
   if (skill.package_path && (skill.runtime === 'prompt-only' || !skill.entry || skill.install_status === 'pending')) {
-    await initializeSkillEnvironment(skillId);
+    await initializeSkillEnvironment(skillId, userId);
     rows = await query<any>('SELECT * FROM skills WHERE id = ? AND user_id = ?', [skillId, userId]);
     skill = rows[0] || skill;
   }
@@ -995,6 +1332,10 @@ export async function runSkillPackage(
 
   try {
     const runtime = skill.runtime as SkillRuntime;
+    if (packagePath) {
+      assertSkillPackageDirectoryScope(packagePath, userId, skillId);
+      assertSkillPackageSafe(await analyzePackageDirectory(packagePath), 'run');
+    }
     const skillParameters = typeof skill.parameters === 'string' ? JSON.parse(skill.parameters || '{}') : skill.parameters || {};
     inputFiles = await prepareSkillInputFiles(packagePath, runId, payload.input);
     const inputJson = JSON.stringify({
@@ -1156,7 +1497,7 @@ export async function testSkillPackage(userId: number, skillId: number) {
 
   if (skill.runtime !== 'prompt-only') {
     await updateSkillTestStatus(skillId, 'testing', '正在等待依赖初始化完成。');
-    await initializeSkillEnvironment(skillId);
+    await initializeSkillEnvironment(skillId, userId);
   }
 
   const nextRows = await query<any>('SELECT * FROM skills WHERE id = ? AND user_id = ?', [skillId, userId]);

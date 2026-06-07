@@ -132,11 +132,17 @@ export interface PromptDefinition {
   updatedAt: number;
 }
 
+export interface ProjectModelSelection {
+  textModelId: string | null;
+  imageModelId: string | null;
+}
+
 export interface PptProjectState {
   input: DeckInput;
   uploadedFileContents?: UploadedFileContent[];
   processedInputContent?: string;
   parameters: AgentParameters;
+  modelSelection?: ProjectModelSelection;
   selectedTemplate: TemplateAsset | null;
   outline: SlideOutline[];
   images: GeneratedImage[];
@@ -154,6 +160,14 @@ export interface PptProjectState {
   resumeStage?: WorkflowStepId | null;
   executorCursor?: number;
   workflowActive?: boolean;
+  activeQueueJob?: {
+    queueJobId: string;
+    dbJobId?: number | null;
+    status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+    phase: string;
+    progress: number;
+    updatedAt: number;
+  } | null;
   lastActiveStep?: WorkflowStepId | null;
   waitingForImageRetry?: boolean;
 }

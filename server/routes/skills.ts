@@ -4,6 +4,7 @@ import { query } from '../db/connection.js';
 import { getProjectByIdForUser } from '../models/project.js';
 import {
   createSkillFromPackage,
+  getSkillPackageView,
   initializeAndTestSkill,
   previewSkillPackage,
   removeSkillPackage,
@@ -126,7 +127,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     res.json({ success: true, data: skills.map(normalizeSkill) });
   } catch (error) {
     console.error('Failed to fetch skills', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch skills' });
+    res.status(500).json({ success: false, message: '获取 Skill 列表失败' });
   }
 });
 
@@ -158,18 +159,29 @@ router.get('/runs', async (req: AuthRequest, res: Response) => {
     res.json({ success: true, data: runs.map(normalizeRun) });
   } catch (error) {
     console.error('Failed to fetch skill runs', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch skill runs' });
+    res.status(500).json({ success: false, message: '获取 Skill 运行记录失败' });
   }
 });
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const skill = await fetchSkill(Number(req.params.id), req.userId!);
-    if (!skill) return res.status(404).json({ success: false, message: 'Skill not found' });
+    if (!skill) return res.status(404).json({ success: false, message: 'Skill 不存在或无权访问' });
     res.json({ success: true, data: skill });
   } catch (error) {
     console.error('Failed to fetch skill', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch skill' });
+    res.status(500).json({ success: false, message: '获取 Skill 失败' });
+  }
+});
+
+router.get('/:id/package', async (req: AuthRequest, res: Response) => {
+  try {
+    const packageView = await getSkillPackageView(req.userId!, Number(req.params.id));
+    res.json({ success: true, data: packageView, message: 'Skill 包已加载' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '加载 Skill 包失败';
+    console.error('Failed to load skill package', error);
+    res.status(message === 'Skill not found.' ? 404 : 400).json({ success: false, message });
   }
 });
 
@@ -177,12 +189,12 @@ router.post('/preview-package', async (req: AuthRequest, res: Response) => {
   try {
     const { filename, dataBase64, category } = req.body || {};
     if (!filename || !dataBase64) {
-      return res.status(400).json({ success: false, message: 'Skill package is required' });
+      return res.status(400).json({ success: false, message: '请上传 Skill 包' });
     }
     const preview = await previewSkillPackage(String(filename), String(dataBase64));
-    res.json({ success: true, data: preview, message: 'Skill package parsed' });
+    res.json({ success: true, data: preview, message: 'Skill 包解析完成' });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to parse skill package';
+    const message = error instanceof Error ? error.message : '解析 Skill 包失败';
     console.error('Failed to parse skill package', error);
     res.status(400).json({ success: false, message });
   }
@@ -192,15 +204,15 @@ router.post('/upload-package', async (req: AuthRequest, res: Response) => {
   try {
     const { filename, dataBase64, category } = req.body || {};
     if (!filename || !dataBase64) {
-      return res.status(400).json({ success: false, message: 'Skill package is required' });
+      return res.status(400).json({ success: false, message: '请上传 Skill 包' });
     }
     const skillId = await createSkillFromPackage(req.userId!, String(filename), String(dataBase64), {
       category: category ? String(category) : undefined,
     });
     const skill = await fetchSkill(skillId, req.userId!);
-    res.status(201).json({ success: true, data: skill, message: 'Skill package uploaded' });
+    res.status(201).json({ success: true, data: skill, message: 'Skill 包上传成功' });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to upload skill package';
+    const message = error instanceof Error ? error.message : '上传 Skill 包失败';
     console.error('Failed to upload skill package', error);
     res.status(400).json({ success: false, message });
   }
@@ -210,7 +222,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const { name, description, icon, category, parameters, is_enabled } = req.body;
     if (!String(name || '').trim()) {
-      return res.status(400).json({ success: false, message: 'Skill name is required' });
+      return res.status(400).json({ success: false, message: 'Skill 名称不能为空' });
     }
     const result = await query<any>(
       `INSERT INTO skills
@@ -229,10 +241,10 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       ]
     );
     const skill = await fetchSkill(Number((result as any).insertId), req.userId!);
-    res.status(201).json({ success: true, data: skill, message: 'Skill created' });
+    res.status(201).json({ success: true, data: skill, message: 'Skill 已创建' });
   } catch (error) {
     console.error('Failed to create skill', error);
-    res.status(500).json({ success: false, message: 'Failed to create skill' });
+    res.status(500).json({ success: false, message: '创建 Skill 失败' });
   }
 });
 
@@ -240,7 +252,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     const existing = await fetchSkill(id, req.userId!);
-    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill 不存在或无权访问' });
 
     const { name, description, icon, category, parameters, is_enabled } = req.body;
     await query(
@@ -259,10 +271,10 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       ]
     );
     const skill = await fetchSkill(id, req.userId!);
-    res.json({ success: true, data: skill, message: 'Skill updated' });
+    res.json({ success: true, data: skill, message: 'Skill 已更新' });
   } catch (error) {
     console.error('Failed to update skill', error);
-    res.status(500).json({ success: false, message: 'Failed to update skill' });
+    res.status(500).json({ success: false, message: '更新 Skill 失败' });
   }
 });
 
@@ -270,7 +282,7 @@ router.post('/:id/reinstall', async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     const existing = await fetchSkill(id, req.userId!);
-    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill 不存在或无权访问' });
     await query(
       `UPDATE skills
        SET install_status = 'pending',
@@ -281,10 +293,10 @@ router.post('/:id/reinstall', async (req: AuthRequest, res: Response) => {
       [id, req.userId]
     );
     void initializeAndTestSkill(req.userId!, id).catch((error) => console.error('Failed to reinstall skill', error));
-    res.json({ success: true, message: 'Skill runtime initialization started' });
+    res.json({ success: true, message: 'Skill 运行环境初始化已开始' });
   } catch (error) {
     console.error('Failed to reinstall skill', error);
-    res.status(500).json({ success: false, message: 'Failed to reinstall skill' });
+    res.status(500).json({ success: false, message: '重新初始化 Skill 失败' });
   }
 });
 
@@ -292,7 +304,7 @@ router.post('/:id/test', async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     const existing = await fetchSkill(id, req.userId!);
-    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill 不存在或无权访问' });
     await query(
       `UPDATE skills
        SET test_status = 'testing',
@@ -301,10 +313,10 @@ router.post('/:id/test', async (req: AuthRequest, res: Response) => {
       [id, req.userId]
     );
     void testSkillPackage(req.userId!, id).catch((error) => console.error('Failed to test skill', error));
-    res.json({ success: true, message: 'Skill health test started' });
+    res.json({ success: true, message: 'Skill 健康测试已开始' });
   } catch (error) {
     console.error('Failed to test skill', error);
-    res.status(500).json({ success: false, message: 'Failed to test skill' });
+    res.status(500).json({ success: false, message: '测试 Skill 失败' });
   }
 });
 
@@ -331,10 +343,10 @@ router.post('/:id/run', async (req: AuthRequest, res: Response) => {
     res.json({
       success: true,
       data: run,
-      message: run.status === 'failed' ? 'Skill run failed' : 'Skill run completed',
+      message: run.status === 'failed' ? 'Skill 运行失败' : 'Skill 运行完成',
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to run skill';
+    const message = error instanceof Error ? error.message : '运行 Skill 失败';
     console.error('Failed to run skill', error);
     res.status(400).json({ success: false, message });
   }
@@ -344,13 +356,13 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     const existing = await fetchSkill(id, req.userId!);
-    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill 不存在或无权访问' });
     await query('DELETE FROM skills WHERE id = ? AND user_id = ?', [id, req.userId]);
     await removeSkillPackage(req.userId!, id);
-    res.json({ success: true, message: 'Skill deleted' });
+    res.json({ success: true, message: 'Skill 已删除' });
   } catch (error) {
     console.error('Failed to delete skill', error);
-    res.status(500).json({ success: false, message: 'Failed to delete skill' });
+    res.status(500).json({ success: false, message: '删除 Skill 失败' });
   }
 });
 
@@ -358,13 +370,13 @@ router.post('/:id/toggle', async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     const existing = await fetchSkill(id, req.userId!);
-    if (!existing) return res.status(404).json({ success: false, message: 'Skill not found' });
+    if (!existing) return res.status(404).json({ success: false, message: 'Skill 不存在或无权访问' });
     const newStatus = existing.is_enabled ? 0 : 1;
     await query('UPDATE skills SET is_enabled = ? WHERE id = ? AND user_id = ?', [newStatus, id, req.userId]);
-    res.json({ success: true, message: newStatus ? 'Skill enabled' : 'Skill disabled' });
+    res.json({ success: true, message: newStatus ? 'Skill 已启用' : 'Skill 已停用' });
   } catch (error) {
     console.error('Failed to toggle skill', error);
-    res.status(500).json({ success: false, message: 'Failed to toggle skill' });
+    res.status(500).json({ success: false, message: '切换 Skill 状态失败' });
   }
 });
 

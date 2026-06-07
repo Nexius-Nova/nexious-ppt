@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs/promises';
+import crypto from 'crypto';
 import path from 'path';
 import JSZip from 'jszip';
 
@@ -325,6 +326,20 @@ function colorFromFill(block: string, fallback = '#FFFFFF', theme: ThemeColors =
   if (srgb) return `#${srgb}`;
 
   const scheme = solidFill.match(/<a:schemeClr\b[^>]*\bval="([^"]+)"/i)?.[1];
+  if (scheme) return resolveSchemeColor(scheme, fallback, theme);
+
+  const fillRef = extractSelfOrPairedTag(block, 'a:fillRef');
+  const fillRefScheme = fillRef.match(/<a:schemeClr\b[^>]*\bval="([^"]+)"/i)?.[1];
+  if (fillRefScheme) return resolveSchemeColor(fillRefScheme, fallback, theme);
+
+  const lnRef = extractSelfOrPairedTag(block, 'a:lnRef');
+  const lnRefScheme = lnRef.match(/<a:schemeClr\b[^>]*\bval="([^"]+)"/i)?.[1];
+  if (lnRefScheme) return resolveSchemeColor(lnRefScheme, fallback, theme);
+
+  return fallback;
+}
+
+function resolveSchemeColor(scheme: string, fallback = '#FFFFFF', theme: ThemeColors = {}) {
   const schemeMap: Record<string, string> = {
     accent1: '#4472C4',
     accent2: '#ED7D31',
@@ -339,16 +354,38 @@ function colorFromFill(block: string, fallback = '#FFFFFF', theme: ThemeColors =
     dk1: '#111827',
     lt1: '#FFFFFF',
   };
-  return scheme ? theme[scheme] || schemeMap[scheme] || fallback : fallback;
+  return theme[scheme] || schemeMap[scheme] || fallback;
 }
 
 function lineColor(block: string, fallback = '#334155', theme: ThemeColors = {}) {
   const ln = extractTag(block, 'a:ln');
-  return ln ? colorFromFill(ln, fallback, theme) : fallback;
+  if (ln) {
+    if (/<a:noFill\s*\/?>/i.test(ln)) return 'none';
+    return colorFromFill(ln, fallback, theme);
+  }
+  const lnRef = extractSelfOrPairedTag(block, 'a:lnRef');
+  const lnRefScheme = lnRef.match(/<a:schemeClr\b[^>]*\bval="([^"]+)"/i)?.[1];
+  return lnRefScheme ? resolveSchemeColor(lnRefScheme, fallback, theme) : fallback;
 }
 
-function isNoFill(block: string) {
-  return /<a:noFill\s*\/?>/i.test(block);
+function hasShapeNoFill(block: string) {
+  const spPr = extractTag(block, 'p:spPr') || block;
+  const withoutLines = spPr.replace(/<a:ln\b[\s\S]*?<\/a:ln>/gi, '');
+  return /<a:noFill\s*\/?>/i.test(withoutLines);
+}
+
+function shapeWrapper(transform: Transform, x: number, y: number, width: number, height: number, element: string) {
+  if (!transform.rot) return element;
+  const cx = x + width / 2;
+  const cy = y + height / 2;
+  return `<g transform="rotate(${transform.rot} ${cx} ${cy})">${element}</g>`;
+}
+
+function hasRenderableShapeStyle(shapeBlock: string) {
+  return /<a:(solidFill|gradFill|pattFill)\b/i.test(shapeBlock) ||
+    /<a:(fillRef|lnRef)\b/i.test(shapeBlock) ||
+    /<a:ln\b/i.test(shapeBlock) ||
+    /<p:style\b/i.test(shapeBlock);
 }
 
 function textColor(runBlock: string, shapeBlock: string, theme: ThemeColors = {}) {
@@ -519,32 +556,74 @@ function renderTextShape(shapeBlock: string, scaleX: number, scaleY: number, the
 }
 
 function renderGeometry(shapeBlock: string, scaleX: number, scaleY: number, theme: ThemeColors = {}) {
-  if (/<p:txBody\b/i.test(shapeBlock) && !/<a:solidFill\b/i.test(shapeBlock) && !/<a:ln\b/i.test(shapeBlock)) return '';
+  if (/<p:txBody\b/i.test(shapeBlock) && !hasRenderableShapeStyle(shapeBlock)) return '';
   const transform = extractTransform(shapeBlock);
   const x = emuToPx(transform.x, scaleX);
   const y = emuToPx(transform.y, scaleY);
   const width = Math.max(1, emuToPx(transform.cx, scaleX));
   const height = Math.max(1, emuToPx(transform.cy, scaleY));
   const geometry = attr(shapeBlock.match(/<a:prstGeom\b[^>]*>/i)?.[0] || '', 'prst') || 'rect';
-  const fill = isNoFill(shapeBlock) ? 'none' : colorFromFill(shapeBlock, 'none', theme);
+  const fill = hasShapeNoFill(shapeBlock) ? 'none' : colorFromFill(shapeBlock, 'none', theme);
   const stroke = lineColor(shapeBlock, 'none', theme);
   const strokeWidth = /<a:ln\b/i.test(shapeBlock) ? Math.max(1, numAttr(extractTag(shapeBlock, 'a:ln'), 'w') / EMU_PER_INCH * 96) : 0;
 
   if (fill === 'none' && stroke === 'none' && !strokeWidth) return '';
   if (/<p:cxnSp\b/i.test(shapeBlock)) {
-    return `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${stroke || fill || '#334155'}" stroke-width="${Math.max(1, strokeWidth)}" />`;
+    return shapeWrapper(transform, x, y, width, height, `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${stroke || fill || '#334155'}" stroke-width="${Math.max(1, strokeWidth)}" />`);
   }
   if (geometry === 'ellipse') {
-    return `<ellipse cx="${x + width / 2}" cy="${y + height / 2}" rx="${width / 2}" ry="${height / 2}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+    return shapeWrapper(transform, x, y, width, height, `<ellipse cx="${x + width / 2}" cy="${y + height / 2}" rx="${width / 2}" ry="${height / 2}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`);
   }
   if (geometry === 'triangle') {
-    return `<path d="M ${x + width / 2} ${y} L ${x + width} ${y + height} L ${x} ${y + height} Z" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+    return shapeWrapper(transform, x, y, width, height, `<path d="M ${x + width / 2} ${y} L ${x + width} ${y + height} L ${x} ${y + height} Z" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`);
   }
   if (geometry === 'line') {
-    return `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${stroke || fill || '#334155'}" stroke-width="${Math.max(1, strokeWidth)}" />`;
+    return shapeWrapper(transform, x, y, width, height, `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${stroke || fill || '#334155'}" stroke-width="${Math.max(1, strokeWidth)}" />`);
+  }
+  const pathShape = renderPresetShapePath(geometry, x, y, width, height);
+  if (pathShape) {
+    return shapeWrapper(transform, x, y, width, height, `<path d="${pathShape}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`);
   }
   const rx = geometry === 'roundRect' ? Math.min(width, height) * 0.08 : 0;
-  return `<rect x="${x}" y="${y}" width="${width}" height="${height}" rx="${rx}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+  return shapeWrapper(transform, x, y, width, height, `<rect x="${x}" y="${y}" width="${width}" height="${height}" rx="${rx}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`);
+}
+
+function renderPresetShapePath(geometry: string, x: number, y: number, width: number, height: number) {
+  const right = x + width;
+  const bottom = y + height;
+  const midX = x + width / 2;
+  const midY = y + height / 2;
+  const notchX = Math.min(width * 0.18, 42);
+  const notchY = Math.min(height * 0.28, 34);
+  const bracket = Math.max(5, Math.min(width, height) * 0.28);
+
+  switch (geometry) {
+    case 'rtTriangle':
+      return `M ${x} ${y} L ${right} ${bottom} L ${x} ${bottom} Z`;
+    case 'parallelogram':
+      return `M ${x + notchX} ${y} L ${right} ${y} L ${right - notchX} ${bottom} L ${x} ${bottom} Z`;
+    case 'trapezoid':
+      return `M ${x + notchX} ${y} L ${right - notchX} ${y} L ${right} ${bottom} L ${x} ${bottom} Z`;
+    case 'chevron':
+      return `M ${x} ${y} L ${right - notchX} ${y} L ${right} ${midY} L ${right - notchX} ${bottom} L ${x} ${bottom} L ${x + notchX} ${midY} Z`;
+    case 'pentagon':
+      return `M ${x} ${y} L ${right - notchX} ${y} L ${right} ${midY} L ${right - notchX} ${bottom} L ${x} ${bottom} Z`;
+    case 'hexagon':
+      return `M ${x + notchX} ${y} L ${right - notchX} ${y} L ${right} ${midY} L ${right - notchX} ${bottom} L ${x + notchX} ${bottom} L ${x} ${midY} Z`;
+    case 'leftBracket':
+      return `M ${right} ${y} L ${x} ${y} L ${x} ${bottom} L ${right} ${bottom} L ${right} ${bottom - bracket} L ${x + bracket} ${bottom - bracket} L ${x + bracket} ${y + bracket} L ${right} ${y + bracket} Z`;
+    case 'rightBracket':
+      return `M ${x} ${y} L ${right} ${y} L ${right} ${bottom} L ${x} ${bottom} L ${x} ${bottom - bracket} L ${right - bracket} ${bottom - bracket} L ${right - bracket} ${y + bracket} L ${x} ${y + bracket} Z`;
+    case 'bracePair':
+    case 'bracketPair':
+      return `M ${x + bracket} ${y} L ${x} ${y} L ${x} ${bottom} L ${x + bracket} ${bottom} L ${x + bracket} ${bottom - bracket} L ${x + bracket / 2} ${bottom - bracket} L ${x + bracket / 2} ${y + bracket} L ${x + bracket} ${y + bracket} Z M ${right - bracket} ${y} L ${right} ${y} L ${right} ${bottom} L ${right - bracket} ${bottom} L ${right - bracket} ${bottom - bracket} L ${right - bracket / 2} ${bottom - bracket} L ${right - bracket / 2} ${y + bracket} L ${right - bracket} ${y + bracket} Z`;
+    case 'corner':
+      return `M ${x} ${y} L ${right} ${y} L ${right} ${y + notchY} L ${x + notchX} ${y + notchY} L ${x + notchX} ${bottom} L ${x} ${bottom} Z`;
+    case 'diagStripe':
+      return `M ${x + notchX} ${y} L ${right} ${y} L ${right - notchX} ${bottom} L ${x} ${bottom} Z`;
+    default:
+      return '';
+  }
 }
 
 function picturePreserveAspectRatio(picBlock: string, transform: Transform, slideSizePx: { width: number; height: number }) {

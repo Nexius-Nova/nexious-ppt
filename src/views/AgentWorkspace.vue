@@ -49,6 +49,7 @@ import PageLoadingState from "@/components/common/PageLoadingState.vue";
 import PrivateImage from "@/components/common/PrivateImage.vue";
 import PrivateSvg from "@/components/common/PrivateSvg.vue";
 import { useAgentStore } from "@/stores/agentStore";
+import { useApiKeyStore } from "@/stores/apiKeyStore";
 import { useShortcuts } from "@/composables/useShortcuts";
 import { slideNeedsImage } from "@/utils/slideVisuals";
 import type {
@@ -61,6 +62,7 @@ import type { PptxExportOptions } from "@/services/api";
 const route = useRoute();
 const router = useRouter();
 const store = useAgentStore();
+const apiKeyStore = useApiKeyStore();
 
 const {
   activityLog,
@@ -83,6 +85,8 @@ const {
   prompts,
   skills,
   selectedPromptId,
+  selectedTextModelId,
+  selectedImageModelId,
   inputProcessSteps,
   templates,
   selectedTemplate,
@@ -90,6 +94,11 @@ const {
   specLock,
   retryingPageNumbers
 } = storeToRefs(store);
+
+const {
+  textModels,
+  imageModels
+} = storeToRefs(apiKeyStore);
 
 const showRightPanel = ref(true);
 const isSideNavCollapsed = ref(false);
@@ -706,7 +715,8 @@ function returnToMyPpt() {
 async function runFromCurrentStep() {
   try {
     if (isPaused.value) {
-      store.clearPauseState();
+      await store.continueWorkflow();
+      return;
     }
     switch (activeStep.value) {
       case "input":
@@ -1028,12 +1038,18 @@ async function retryImage(slideId: string) {
                     :config-options="configOptions"
                     :prompts="prompts"
                     :selected-prompt-id="selectedPromptId"
+                    :text-models="textModels"
+                    :image-models="imageModels"
+                    :selected-text-model-id="selectedTextModelId"
+                    :selected-image-model-id="selectedImageModelId"
                     :skills="skills"
                     :input-process-steps="inputProcessSteps"
                     :templates="templates"
                     :selected-template="selectedTemplate"
                     @update:parameters="parameters = $event"
                     @select-prompt="store.selectPrompt"
+                    @select-text-model="store.selectProjectTextModel"
+                    @select-image-model="store.selectProjectImageModel"
                     @toggle-skill="store.toggleSkill"
                     @select-template="selectInputTemplate"
                     @clear-template="store.clearGalleryTemplate()"

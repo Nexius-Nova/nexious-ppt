@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ArrowLeft, KeyRound, LogIn, Mail, UserPlus } from 'lucide-vue-next';
 import AuthCaptchaModal from '@/components/common/AuthCaptchaModal.vue';
@@ -7,6 +7,7 @@ import UiButton from '@/components/ui/UiButton.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiInput from '@/components/ui/UiInput.vue';
+import { authApi } from '@/services/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useToastStore } from '@/stores/toastStore';
 
@@ -27,6 +28,10 @@ const resetEmail = ref('');
 const resetEmailCode = ref('');
 const resetPassword = ref('');
 const resetConfirmPassword = ref('');
+const sendingEmailCode = ref<'register' | 'reset' | null>(null);
+const registerCooldown = ref(0);
+const resetCooldown = ref(0);
+let emailCodeTimer: number | null = null;
 
 const captchaOpen = ref(false);
 const captchaReloadKey = ref(0);
@@ -41,9 +46,11 @@ const title = computed(() => {
 });
 const subtitle = computed(() => {
   if (isRegister.value) return '注册后即可生成并管理自己的 PPT。';
-  if (isForgot.value) return '通过邮箱验证码重置密码，当前仅展示前端占位流程。';
+  if (isForgot.value) return '通过邮箱验证码重置密码。';
   return '登录后进入你的 PPT 工作台。';
 });
+const registerCodeButtonText = computed(() => registerCooldown.value > 0 ? `${registerCooldown.value}s 后重发` : '获取验证码');
+const resetCodeButtonText = computed(() => resetCooldown.value > 0 ? `${resetCooldown.value}s 后重发` : '获取验证码');
 
 function isValidEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
@@ -56,6 +63,21 @@ function isStrongPassword(value: string) {
 function switchMode(nextMode: AuthMode) {
   mode.value = nextMode;
   captchaOpen.value = false;
+}
+
+function startEmailCodeCooldown(kind: 'register' | 'reset', seconds = 60) {
+  if (kind === 'register') registerCooldown.value = seconds;
+  else resetCooldown.value = seconds;
+
+  if (emailCodeTimer !== null) return;
+  emailCodeTimer = window.setInterval(() => {
+    registerCooldown.value = Math.max(0, registerCooldown.value - 1);
+    resetCooldown.value = Math.max(0, resetCooldown.value - 1);
+    if (registerCooldown.value === 0 && resetCooldown.value === 0 && emailCodeTimer !== null) {
+      window.clearInterval(emailCodeTimer);
+      emailCodeTimer = null;
+    }
+  }, 1000);
 }
 
 function validateLogin() {
@@ -83,6 +105,10 @@ function validateRegister() {
     toastStore.warning('两次输入的密码不一致');
     return false;
   }
+  if (!registerEmailCode.value.trim()) {
+    toastStore.warning('请输入邮箱验证码');
+    return false;
+  }
   return true;
 }
 
@@ -97,6 +123,10 @@ function validateForgot() {
   }
   if (resetPassword.value !== resetConfirmPassword.value) {
     toastStore.warning('两次输入的新密码不一致');
+    return false;
+  }
+  if (!resetEmailCode.value.trim()) {
+    toastStore.warning('请输入邮箱验证码');
     return false;
   }
   return true;
@@ -122,7 +152,12 @@ async function submitLogin(captchaToken: string) {
 
 async function submitRegister() {
   if (!validateRegister()) return;
-  const ok = await authStore.register(email.value.trim(), password.value, name.value.trim() || undefined);
+  const ok = await authStore.register(
+    email.value.trim(),
+    password.value,
+    name.value.trim() || undefined,
+    registerEmailCode.value.trim()
+  );
   if (!ok) {
     toastStore.error('注册失败', authStore.error || undefined);
     return;
@@ -133,18 +168,44 @@ async function submitRegister() {
   await router.replace(redirect);
 }
 
-function requestEmailCode(kind: 'register' | 'reset') {
+async function requestEmailCode(kind: 'register' | 'reset') {
   const targetEmail = kind === 'register' ? email.value : resetEmail.value;
   if (!isValidEmail(targetEmail)) {
     toastStore.warning('请先输入有效邮箱');
     return;
   }
-  toastStore.info('邮箱验证码暂未启用', '当前仅保留前端占位，暂不发送邮件。');
+  if ((kind === 'register' && registerCooldown.value > 0) || (kind === 'reset' && resetCooldown.value > 0)) {
+    return;
+  }
+
+  sendingEmailCode.value = kind;
+  const response = await authApi.sendEmailCode({
+    email: targetEmail.trim(),
+    purpose: kind === 'register' ? 'register' : 'reset-password'
+  });
+  sendingEmailCode.value = null;
+  if (!response.success) {
+    toastStore.error('验证码发送失败', response.message || undefined);
+    return;
+  }
+
+  startEmailCodeCooldown(kind, response.data?.cooldown || 60);
+  toastStore.success(response.message || '邮箱验证码已发送');
 }
 
-function submitForgot() {
+async function submitForgot() {
   if (!validateForgot()) return;
-  toastStore.info('找回密码暂未启用', '邮箱验证码与重置密码接口尚未接入，当前仅完成前端占位。');
+  const ok = await authStore.resetPassword(resetEmail.value.trim(), resetEmailCode.value.trim(), resetPassword.value);
+  if (!ok) {
+    toastStore.error('重置密码失败', authStore.error || undefined);
+    return;
+  }
+  toastStore.success('密码已重置，请使用新密码登录');
+  password.value = '';
+  resetEmailCode.value = '';
+  resetPassword.value = '';
+  resetConfirmPassword.value = '';
+  switchMode('login');
 }
 
 function submit() {
@@ -158,6 +219,12 @@ function submit() {
   }
   submitForgot();
 }
+
+onBeforeUnmount(() => {
+  if (emailCodeTimer !== null) {
+    window.clearInterval(emailCodeTimer);
+  }
+});
 </script>
 
 <template>
@@ -196,12 +263,18 @@ function submit() {
             <UiField label="确认密码" required>
               <UiInput v-model="confirmPassword" type="password" placeholder="再次输入密码" autocomplete="new-password" />
             </UiField>
-            <UiField label="邮箱验证码" hint="暂未启用，仅保留前端占位。">
+            <UiField label="邮箱验证码" required hint="验证码 5 分钟内有效。">
               <div class="auth-code-row">
-                <UiInput v-model="registerEmailCode" placeholder="暂不校验" disabled />
-                <UiButton type="button" variant="secondary" @click="requestEmailCode('register')">
+                <UiInput v-model="registerEmailCode" placeholder="请输入 6 位验证码" />
+                <UiButton
+                  type="button"
+                  variant="secondary"
+                  :loading="sendingEmailCode === 'register'"
+                  :disabled="registerCooldown > 0"
+                  @click="requestEmailCode('register')"
+                >
                   <Mail :size="14" />
-                  获取验证码
+                  {{ registerCodeButtonText }}
                 </UiButton>
               </div>
             </UiField>
@@ -211,19 +284,25 @@ function submit() {
             <UiField label="邮箱" required>
               <UiInput v-model="resetEmail" type="email" placeholder="you@example.com" autocomplete="email" />
             </UiField>
-            <UiField label="邮箱验证码" hint="暂未启用，仅保留前端占位。">
+            <UiField label="邮箱验证码" required hint="验证码 5 分钟内有效。">
               <div class="auth-code-row">
-                <UiInput v-model="resetEmailCode" placeholder="暂不校验" disabled />
-                <UiButton type="button" variant="secondary" @click="requestEmailCode('reset')">
+                <UiInput v-model="resetEmailCode" placeholder="请输入 6 位验证码" />
+                <UiButton
+                  type="button"
+                  variant="secondary"
+                  :loading="sendingEmailCode === 'reset'"
+                  :disabled="resetCooldown > 0"
+                  @click="requestEmailCode('reset')"
+                >
                   <Mail :size="14" />
-                  获取验证码
+                  {{ resetCodeButtonText }}
                 </UiButton>
               </div>
             </UiField>
             <UiField label="新密码" required hint="至少 8 位，包含字母和数字">
               <UiInput v-model="resetPassword" type="password" placeholder="请输入新密码" autocomplete="new-password" />
             </UiField>
-            <UiField label="确认新密码" required>
+            <UiField label="确认新密码" required hint="至少 8 位，包含字母和数字">
               <UiInput v-model="resetConfirmPassword" type="password" placeholder="再次输入新密码" autocomplete="new-password" />
             </UiField>
           </template>
@@ -232,7 +311,7 @@ function submit() {
             <UserPlus v-if="isRegister" :size="16" />
             <KeyRound v-else-if="isForgot" :size="16" />
             <LogIn v-else :size="16" />
-            {{ isRegister ? '注册并进入' : isForgot ? '提交重置申请' : '登录并进入' }}
+            {{ isRegister ? '注册并进入' : isForgot ? '重置密码' : '登录并进入' }}
           </UiButton>
         </form>
 

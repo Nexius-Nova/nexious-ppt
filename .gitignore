@@ -83,3 +83,4 @@ uploads/
 # Trae/IDE specific
 .trae/
 .reasonix/
+.codex-logs/

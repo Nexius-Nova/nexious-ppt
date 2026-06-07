@@ -1,6 +1,6 @@
 import { Router, Response, Request } from 'express';
-import { getDefaultApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
+import { resolveGenerationApiKey } from '../services/modelSelection.js';
 import {
   buildStrategistPrompt,
   parseStrategistOutput,
@@ -155,7 +155,7 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
   try {
     const input: StrategistInput = req.body;
 
-    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
+    const defaultKey = await resolveGenerationApiKey(req.userId!, 'text', input.textModelId);
     if (!defaultKey) {
       return res.status(400).json({ success: false, message: '未配置文本模型' });
     }
@@ -207,9 +207,9 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
 
 router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { spec, lock, slide, imageUrl } = req.body;
+    const { spec, lock, slide, imageUrl, textModelId } = req.body;
 
-    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
+    const defaultKey = await resolveGenerationApiKey(req.userId!, 'text', textModelId);
     if (!defaultKey) {
       return res.status(400).json({ success: false, message: '未配置文本模型' });
     }
@@ -321,7 +321,7 @@ router.post('/export-pptx', authMiddleware, async (req: AuthRequest, res: Respon
 
 router.post('/jobs/generate', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { projectId, title, input, projectState, includeImages } = req.body || {};
+    const { projectId, title, input, projectState, includeImages, resumeStage } = req.body || {};
     if (!projectId || !input || typeof input !== 'object') {
       return res.status(400).json({ success: false, message: '缺少生成任务参数' });
     }
@@ -332,6 +332,7 @@ router.post('/jobs/generate', authMiddleware, async (req: AuthRequest, res: Resp
       input,
       projectState,
       includeImages,
+      resumeStage: resumeStage === 'images' || resumeStage === 'layout' ? resumeStage : 'outline',
     });
 
     res.status(202).json({ success: true, data: job });
@@ -369,7 +370,7 @@ router.post('/jobs/export-pptx', authMiddleware, async (req: AuthRequest, res: R
 });
 
 router.get('/jobs/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
-  const job = getQueuedJob(req.params.id, req.userId!);
+  const job = await getQueuedJob(req.params.id, req.userId!);
   if (!job) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
@@ -377,7 +378,7 @@ router.get('/jobs/:id', authMiddleware, async (req: AuthRequest, res: Response) 
 });
 
 router.get('/jobs/:id/events', authMiddleware, async (req: AuthRequest, res: Response) => {
-  const ok = subscribeQueuedJob(req.params.id, req.userId!, res);
+  const ok = await subscribeQueuedJob(req.params.id, req.userId!, res);
   if (!ok) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
@@ -396,7 +397,7 @@ router.post('/jobs/:id/cancel', authMiddleware, async (req: AuthRequest, res: Re
 });
 
 router.get('/jobs/:id/download', authMiddleware, async (req: AuthRequest, res: Response) => {
-  const artifact = getExportArtifact(req.params.id, req.userId!);
+  const artifact = await getExportArtifact(req.params.id, req.userId!);
   if (!artifact) {
     return res.status(404).json({ success: false, message: '导出文件不存在或尚未完成' });
   }

@@ -4,9 +4,11 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { query } from '../db/connection.js';
+import { deleteGeneratedAssetUrl } from '../utils/generatedAssets.js';
+import { generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
 
 const router = Router();
-const PROMPT_PREVIEW_DIR = path.join(process.cwd(), '.generated', 'images', 'prompt-previews');
+const PROMPT_PREVIEW_DIR = path.join(generatedImagesRoot, 'prompt-previews');
 const MAX_PREVIEW_IMAGE_BYTES = 8 * 1024 * 1024;
 const PREVIEW_IMAGE_TYPES: Record<string, string> = {
   'image/png': 'png',
@@ -14,10 +16,6 @@ const PREVIEW_IMAGE_TYPES: Record<string, string> = {
   'image/webp': 'webp',
   'image/gif': 'gif',
 };
-
-function publicBaseUrl() {
-  return (process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/+$/, '');
-}
 
 function publicGeneratedImageUrl(pathname: string) {
   return `${publicBaseUrl()}${pathname.startsWith('/') ? pathname : `/${pathname}`}`;
@@ -113,7 +111,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { title, scene, content, preview_url } = req.body;
     const existing = await query(
-      'SELECT id FROM prompts WHERE id = ? AND user_id = ?',
+      'SELECT id, preview_url FROM prompts WHERE id = ? AND user_id = ?',
       [req.params.id, req.userId]
     );
     if (existing.length === 0) {
@@ -127,6 +125,11 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       'SELECT id, title, scene, content, preview_url, created_at, updated_at FROM prompts WHERE id = ?',
       [req.params.id]
     );
+    const oldPreviewUrl = existing[0]?.preview_url;
+    const nextPreviewUrl = preview_url || null;
+    if (oldPreviewUrl && oldPreviewUrl !== nextPreviewUrl) {
+      await deleteGeneratedAssetUrl(oldPreviewUrl).catch(() => undefined);
+    }
     res.json({ success: true, data: updated[0], message: '提示词更新成功' });
   } catch (error) {
     console.error('更新提示词失败:', error);
@@ -137,13 +140,14 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const existing = await query(
-      'SELECT id FROM prompts WHERE id = ? AND user_id = ?',
+      'SELECT id, preview_url FROM prompts WHERE id = ? AND user_id = ?',
       [req.params.id, req.userId]
     );
     if (existing.length === 0) {
       return res.status(404).json({ success: false, message: '提示词不存在' });
     }
     await query('DELETE FROM prompts WHERE id = ?', [req.params.id]);
+    await deleteGeneratedAssetUrl(existing[0]?.preview_url).catch(() => undefined);
     res.json({ success: true, message: '提示词删除成功' });
   } catch (error) {
     console.error('删除提示词失败:', error);

@@ -63,6 +63,22 @@ export async function getApiKeyById(id: number): Promise<ApiKey | null> {
 }
 
 /**
+ * 根据用户、类型和ID查询可用于生成的API密钥
+ */
+export async function getApiKeyByIdForUserAndType(
+  userId: number,
+  id: number,
+  type: 'text' | 'image',
+  activeOnly = true
+): Promise<ApiKey | null> {
+  const keys = await query<ApiKey>(
+    `SELECT * FROM api_keys WHERE id = ? AND user_id = ? AND type = ?${activeOnly ? ' AND is_active = 1' : ''} LIMIT 1`,
+    [id, userId, type]
+  );
+  return keys.length > 0 ? keys[0] : null;
+}
+
+/**
  * 根据用户ID查询所有API密钥
  */
 export async function getApiKeysByUserId(userId: number): Promise<ApiKey[]> {

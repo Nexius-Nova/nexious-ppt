@@ -6,6 +6,7 @@ import JSZip from 'jszip';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
+import { generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
 
 const PptxGen = (pptxgenModule as any).default || pptxgenModule;
 const MAX_EXPORT_CACHE_ITEMS = 120;
@@ -74,8 +75,8 @@ function escapeXmlText(value: unknown): string {
 }
 
 async function inlineRemoteImages(svg: string): Promise<string> {
-  const publicBaseUrl = (process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/+$/, '');
-  const generatedImageRoot = path.join(process.cwd(), '.generated', 'images');
+  const publicBase = publicBaseUrl();
+  const generatedImageRoot = generatedImagesRoot;
   const imgRegex = /<image\b([^>]*?)\/?\s*>/gi;
   const matches: Array<{ full: string; href: string }> = [];
   let m;
@@ -91,7 +92,7 @@ async function inlineRemoteImages(svg: string): Promise<string> {
   let result = svg;
   for (const match of matches) {
     try {
-      const fetchUrl = match.href.startsWith('/') ? `${publicBaseUrl}${match.href}` : match.href;
+      const fetchUrl = match.href.startsWith('/') ? `${publicBase}${match.href}` : match.href;
       const cachedDataUrl = remoteImageCache.get(fetchUrl);
       if (cachedDataUrl) {
         result = result.split(match.href).join(cachedDataUrl);
@@ -101,7 +102,7 @@ async function inlineRemoteImages(svg: string): Promise<string> {
       let contentType = 'image/png';
       let buf: Buffer;
       const localUrl = new URL(fetchUrl);
-      const publicUrl = new URL(publicBaseUrl);
+      const publicUrl = new URL(publicBase);
 
       if (localUrl.origin === publicUrl.origin && localUrl.pathname.startsWith('/generated-images/')) {
         const relativePath = decodeURIComponent(localUrl.pathname.replace(/^\/generated-images\/?/, ''));

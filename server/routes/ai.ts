@@ -5,13 +5,15 @@ import { randomUUID } from 'crypto';
 import net from 'net';
 import { getDefaultApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
+import { resolveGenerationApiKey } from '../services/modelSelection.js';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { buildOpenAIEndpoint, normalizeOpenAIBaseUrl } from '../utils/openaiUrl.js';
+import { generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
 
 const router = Router();
 
-const GENERATED_IMAGE_DIR = path.join(process.cwd(), '.generated', 'images');
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'http://localhost:3001';
+const GENERATED_IMAGE_DIR = generatedImagesRoot;
+const PUBLIC_BASE_URL = publicBaseUrl();
 
 interface Message {
   role: 'system' | 'user' | 'assistant';
@@ -753,9 +755,9 @@ router.get('/proxy-image', authMiddleware, async (req: AuthRequest, res: Respons
 
 router.post('/generate-image-stream', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { slideId, title, prompt, style } = req.body;
+    const { slideId, title, prompt, style, imageModelId } = req.body;
 
-    const defaultKey = await getDefaultApiKey(req.userId!, 'image');
+    const defaultKey = await resolveGenerationApiKey(req.userId!, 'image', imageModelId);
     if (!defaultKey) {
       return res.status(400).json({
         success: false,

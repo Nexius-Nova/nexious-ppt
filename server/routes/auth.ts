@@ -3,7 +3,8 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import path from 'path';
 import { promises as fs } from 'fs';
-import { createHash, randomInt, randomUUID } from 'crypto';
+import { createHash, randomInt, randomUUID, timingSafeEqual } from 'crypto';
+import { Redis } from 'ioredis';
 import {
   getUserById,
   getUserByEmail,
@@ -11,6 +12,8 @@ import {
   updateUser,
   deleteUser
 } from '../models/user.js';
+import { deleteGeneratedAssetUrl } from '../utils/generatedAssets.js';
+import { generatedAvatarsRoot } from '../utils/storage.js';
 
 const router = Router();
 const DEFAULT_JWT_SECRET = 'your-secret-key-change-in-production';
@@ -28,6 +31,15 @@ const CAPTCHA_MAX_REQUESTS_PER_IP = Number(process.env.CAPTCHA_MAX_REQUESTS_PER_
 const CAPTCHA_EXPIRES_MS = 2 * 60 * 1000;
 const CAPTCHA_TOKEN_EXPIRES_MS = 3 * 60 * 1000;
 const CAPTCHA_MAX_ATTEMPTS = 4;
+const EMAIL_CODE_TTL_SECONDS = Math.max(60, Number(process.env.EMAIL_CODE_TTL_SECONDS || 5 * 60));
+const EMAIL_CODE_COOLDOWN_SECONDS = Math.max(30, Number(process.env.EMAIL_CODE_COOLDOWN_SECONDS || 60));
+const EMAIL_CODE_MAX_PER_HOUR = Math.max(1, Number(process.env.EMAIL_CODE_MAX_PER_HOUR || 6));
+const EMAIL_CODE_MAX_VERIFY_ATTEMPTS = Math.max(1, Number(process.env.EMAIL_CODE_MAX_VERIFY_ATTEMPTS || 5));
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const EMAIL_FROM = process.env.EMAIL_FROM || 'Nexious API <noreply@nexious-api.com>';
+const REDIS_URL = process.env.REDIS_URL || process.env.BULLMQ_REDIS_URL || '';
+const AUTH_REDIS_PREFIX = process.env.AUTH_REDIS_PREFIX || 'nexious:auth';
+const EMAIL_CODE_SECRET = process.env.EMAIL_CODE_SECRET || JWT_SECRET;
 
 const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 const AVATAR_MIME_EXT: Record<string, string> = {
@@ -48,6 +60,9 @@ const captchaChallenges = new Map<string, {
   target: { x: number; y?: number; width?: number; height?: number; tolerance?: number };
 }>();
 const captchaTokens = new Map<string, { key: string; expiresAt: number; used: boolean }>();
+let authRedis: Redis | null = null;
+
+type EmailCodePurpose = 'register' | 'reset-password' | 'change-password';
 
 type CaptchaVerifyResult =
   | { ok: true; captchaToken: string; expiresIn: number }
@@ -87,6 +102,177 @@ function isValidEmail(email: string): boolean {
 
 function isStrongPassword(password: string): boolean {
   return password.length >= 8 && password.length <= 128 && /[A-Za-z]/.test(password) && /\d/.test(password);
+}
+
+function redisRetryStrategy(times: number) {
+  return Math.min(Math.max(times, 1) * 500, 5000);
+}
+
+function getAuthRedis(): Redis {
+  if (!REDIS_URL) {
+    throw new Error('邮件验证码服务未配置 Redis，请设置 REDIS_URL');
+  }
+  if (!authRedis) {
+    authRedis = new Redis(REDIS_URL, {
+      maxRetriesPerRequest: 2,
+      enableReadyCheck: false,
+      connectTimeout: 5000,
+      retryStrategy: redisRetryStrategy,
+    });
+    authRedis.on('error', (error) => {
+      console.error('邮件验证码 Redis 连接错误:', error.message);
+    });
+    authRedis.on('end', () => {
+      authRedis = null;
+    });
+  }
+  return authRedis;
+}
+
+function hashValue(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function emailCodeKey(email: string, purpose: EmailCodePurpose): string {
+  return `${AUTH_REDIS_PREFIX}:email-code:${purpose}:${hashValue(email)}`;
+}
+
+function emailCodeAttemptsKey(email: string, purpose: EmailCodePurpose): string {
+  return `${AUTH_REDIS_PREFIX}:email-code-attempts:${purpose}:${hashValue(email)}`;
+}
+
+function emailCodeCooldownKey(req: Request, email: string, purpose: EmailCodePurpose): string {
+  return `${AUTH_REDIS_PREFIX}:email-code-cooldown:${purpose}:${hashValue(email)}:${hashValue(clientIp(req))}`;
+}
+
+function emailCodeHourlyKey(req: Request, email: string, purpose: EmailCodePurpose): string {
+  return `${AUTH_REDIS_PREFIX}:email-code-hour:${purpose}:${hashValue(email)}:${hashValue(clientIp(req))}`;
+}
+
+function hashEmailCode(email: string, purpose: EmailCodePurpose, code: string): string {
+  return createHash('sha256')
+    .update(`${EMAIL_CODE_SECRET}:${purpose}:${email}:${code}`)
+    .digest('hex');
+}
+
+function safeEqualHex(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
+}
+
+function emailCodePurposeLabel(purpose: EmailCodePurpose): string {
+  if (purpose === 'register') return '注册账号';
+  if (purpose === 'reset-password') return '重置密码';
+  return '修改密码';
+}
+
+function normalizeEmailCode(value: unknown): string {
+  return String(value || '').replace(/\D/g, '').slice(0, 6);
+}
+
+async function enforceEmailCodeRateLimit(req: Request, email: string, purpose: EmailCodePurpose) {
+  const redis = getAuthRedis();
+  const cooldownKey = emailCodeCooldownKey(req, email, purpose);
+  const cooldownTtl = await redis.ttl(cooldownKey);
+  if (cooldownTtl > 0) {
+    return { ok: false as const, retryAfter: cooldownTtl, message: `验证码发送太频繁，请 ${cooldownTtl} 秒后再试` };
+  }
+
+  const hourlyKey = emailCodeHourlyKey(req, email, purpose);
+  const hourlyCount = await redis.incr(hourlyKey);
+  if (hourlyCount === 1) await redis.expire(hourlyKey, 3600);
+  if (hourlyCount > EMAIL_CODE_MAX_PER_HOUR) {
+    return { ok: false as const, retryAfter: await redis.ttl(hourlyKey), message: '验证码请求过于频繁，请稍后再试' };
+  }
+
+  await redis.set(cooldownKey, '1', 'EX', EMAIL_CODE_COOLDOWN_SECONDS);
+  return { ok: true as const };
+}
+
+async function sendEmailCode(email: string, purpose: EmailCodePurpose, code: string) {
+  if (!RESEND_API_KEY) {
+    throw new Error('邮件发送服务未配置 RESEND_API_KEY');
+  }
+
+  const label = emailCodePurposeLabel(purpose);
+  const subject = `Nexious PPT ${label}验证码`;
+  const text = `你的 Nexious PPT ${label}验证码是：${code}。验证码 ${Math.floor(EMAIL_CODE_TTL_SECONDS / 60)} 分钟内有效，请勿转发给他人。`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.7;color:#111827;">
+      <h2 style="margin:0 0 12px;font-size:18px;">Nexious PPT ${label}</h2>
+      <p style="margin:0 0 12px;">你的邮箱验证码是：</p>
+      <p style="margin:0 0 16px;font-size:28px;font-weight:700;letter-spacing:4px;">${code}</p>
+      <p style="margin:0;color:#6B7280;">验证码 ${Math.floor(EMAIL_CODE_TTL_SECONDS / 60)} 分钟内有效。如非本人操作，请忽略此邮件。</p>
+    </div>
+  `;
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: EMAIL_FROM,
+      to: [email],
+      subject,
+      html,
+      text,
+    }),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const message = typeof data?.message === 'string' ? data.message : `HTTP ${response.status}`;
+    throw new Error(`Resend 邮件发送失败：${message}`);
+  }
+}
+
+async function createAndSendEmailCode(req: Request, email: string, purpose: EmailCodePurpose) {
+  const rateLimit = await enforceEmailCodeRateLimit(req, email, purpose);
+  if (!rateLimit.ok) return rateLimit;
+
+  const redis = getAuthRedis();
+  const code = String(randomInt(100000, 1000000));
+  await redis.set(
+    emailCodeKey(email, purpose),
+    JSON.stringify({ hash: hashEmailCode(email, purpose, code), createdAt: Date.now() }),
+    'EX',
+    EMAIL_CODE_TTL_SECONDS
+  );
+  await redis.del(emailCodeAttemptsKey(email, purpose));
+  await sendEmailCode(email, purpose, code);
+  return { ok: true as const };
+}
+
+async function consumeEmailCode(email: string, purpose: EmailCodePurpose, rawCode: unknown) {
+  const code = normalizeEmailCode(rawCode);
+  if (!code || code.length !== 6) {
+    return { ok: false as const, message: '请输入 6 位邮箱验证码' };
+  }
+
+  const redis = getAuthRedis();
+  const key = emailCodeKey(email, purpose);
+  const attemptsKey = emailCodeAttemptsKey(email, purpose);
+  const stored = await redis.get(key);
+  if (!stored) {
+    return { ok: false as const, message: '邮箱验证码已过期，请重新获取' };
+  }
+
+  const attempts = await redis.incr(attemptsKey);
+  if (attempts === 1) await redis.expire(attemptsKey, EMAIL_CODE_TTL_SECONDS);
+  if (attempts > EMAIL_CODE_MAX_VERIFY_ATTEMPTS) {
+    await redis.del(key, attemptsKey);
+    return { ok: false as const, message: '验证码错误次数过多，请重新获取' };
+  }
+
+  const payload = JSON.parse(stored) as { hash?: string };
+  if (!payload.hash || !safeEqualHex(payload.hash, hashEmailCode(email, purpose, code))) {
+    return { ok: false as const, message: '邮箱验证码不正确' };
+  }
+
+  await redis.del(key, attemptsKey);
+  return { ok: true as const };
 }
 
 function rateKey(req: Request, scope: string): string {
@@ -569,6 +755,123 @@ router.post('/captcha/verify', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/email-code', async (req: Request, res: Response) => {
+  try {
+    if (isRateLimited(authRequests, rateKey(req, 'email-code'), AUTH_MAX_REQUESTS, AUTH_WINDOW_MS)) {
+      return res.status(429).json({
+        success: false,
+        code: 'AUTH_RATE_LIMITED',
+        message: '请求过于频繁，请稍后再试'
+      });
+    }
+
+    const email = normalizeEmail(req.body?.email);
+    const purpose = String(req.body?.purpose || '') as EmailCodePurpose;
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: '请输入有效邮箱'
+      });
+    }
+    if (purpose !== 'register' && purpose !== 'reset-password') {
+      return res.status(400).json({
+        success: false,
+        message: '验证码用途不正确'
+      });
+    }
+
+    const existingUser = await getUserByEmail(email);
+    if (purpose === 'register' && existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: '该邮箱已被注册'
+      });
+    }
+
+    if (purpose === 'reset-password' && !existingUser) {
+      return res.json({
+        success: true,
+        data: { expiresIn: EMAIL_CODE_TTL_SECONDS, cooldown: EMAIL_CODE_COOLDOWN_SECONDS },
+        message: '如果邮箱存在，验证码已发送'
+      });
+    }
+
+    const result = await createAndSendEmailCode(req, email, purpose);
+    if (!result.ok) {
+      return res.status(429).json({
+        success: false,
+        code: 'EMAIL_CODE_RATE_LIMITED',
+        data: { retryAfter: result.retryAfter },
+        message: result.message
+      });
+    }
+
+    res.json({
+      success: true,
+      data: { expiresIn: EMAIL_CODE_TTL_SECONDS, cooldown: EMAIL_CODE_COOLDOWN_SECONDS },
+      message: '邮箱验证码已发送'
+    });
+  } catch (error) {
+    console.error('发送邮箱验证码错误:', error);
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error && /Redis|RESEND_API_KEY/.test(error.message)
+        ? error.message
+        : '邮箱验证码发送失败'
+    });
+  }
+});
+
+router.post('/me/email-code', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({
+        success: false,
+        message: '未授权'
+      });
+    }
+    if (isRateLimited(authRequests, rateKey(req, 'me-email-code'), AUTH_MAX_REQUESTS, AUTH_WINDOW_MS)) {
+      return res.status(429).json({
+        success: false,
+        code: 'AUTH_RATE_LIMITED',
+        message: '请求过于频繁，请稍后再试'
+      });
+    }
+
+    const user = await getUserById(req.userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: '用户不存在'
+      });
+    }
+
+    const result = await createAndSendEmailCode(req, user.email, 'change-password');
+    if (!result.ok) {
+      return res.status(429).json({
+        success: false,
+        code: 'EMAIL_CODE_RATE_LIMITED',
+        data: { retryAfter: result.retryAfter },
+        message: result.message
+      });
+    }
+
+    res.json({
+      success: true,
+      data: { expiresIn: EMAIL_CODE_TTL_SECONDS, cooldown: EMAIL_CODE_COOLDOWN_SECONDS },
+      message: '邮箱验证码已发送'
+    });
+  } catch (error) {
+    console.error('发送修改密码邮箱验证码错误:', error);
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error && /Redis|RESEND_API_KEY/.test(error.message)
+        ? error.message
+        : '邮箱验证码发送失败'
+    });
+  }
+});
+
 router.post('/register', async (req: Request, res: Response) => {
   try {
     if (isRateLimited(authRequests, rateKey(req, 'register'), AUTH_MAX_REQUESTS, AUTH_WINDOW_MS)) {
@@ -582,6 +885,7 @@ router.post('/register', async (req: Request, res: Response) => {
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || '');
     const name = String(req.body?.name || '').trim().slice(0, 80);
+    const emailCode = req.body?.emailCode ?? req.body?.code;
 
     if (!isValidEmail(email)) {
       return res.status(400).json({
@@ -602,6 +906,15 @@ router.post('/register', async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         message: '该邮箱已被注册'
+      });
+    }
+
+    const emailCodeResult = await consumeEmailCode(email, 'register', emailCode);
+    if (!emailCodeResult.ok) {
+      return res.status(400).json({
+        success: false,
+        code: 'EMAIL_CODE_INVALID',
+        message: emailCodeResult.message
       });
     }
 
@@ -630,6 +943,73 @@ router.post('/register', async (req: Request, res: Response) => {
       success: false,
       message: '注册失败',
       error: process.env.NODE_ENV === 'development' ? (error as Error).message : undefined
+    });
+  }
+});
+
+router.post('/reset-password', async (req: Request, res: Response) => {
+  try {
+    if (isRateLimited(authRequests, rateKey(req, 'reset-password'), AUTH_MAX_REQUESTS, AUTH_WINDOW_MS)) {
+      return res.status(429).json({
+        success: false,
+        code: 'AUTH_RATE_LIMITED',
+        message: '请求过于频繁，请稍后再试'
+      });
+    }
+
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || '');
+    const emailCode = req.body?.emailCode ?? req.body?.code;
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: '请输入有效邮箱'
+      });
+    }
+    if (!isStrongPassword(password)) {
+      return res.status(400).json({
+        success: false,
+        message: '新密码至少 8 位，且需要包含字母和数字'
+      });
+    }
+
+    const user = await getUserByEmail(email);
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: '邮箱验证码不正确或已过期'
+      });
+    }
+
+    const emailCodeResult = await consumeEmailCode(email, 'reset-password', emailCode);
+    if (!emailCodeResult.ok) {
+      return res.status(400).json({
+        success: false,
+        code: 'EMAIL_CODE_INVALID',
+        message: emailCodeResult.message
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+    const success = await updateUser(user.id, { password_hash: passwordHash });
+    if (!success) {
+      return res.status(400).json({
+        success: false,
+        message: '重置密码失败'
+      });
+    }
+
+    clearLoginFailures(loginAttemptKey(req, email));
+    res.json({
+      success: true,
+      message: '密码已重置，请使用新密码登录'
+    });
+  } catch (error) {
+    console.error('重置密码错误:', error);
+    res.status(500).json({
+      success: false,
+      message: '重置密码失败'
     });
   }
 });
@@ -761,7 +1141,15 @@ router.put('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
     }
 
     const { name, avatar, currentPassword, password } = req.body;
+    const emailCode = req.body?.emailCode ?? req.body?.code;
     const updateData: any = {};
+    const oldUser = await getUserById(req.userId);
+    if (!oldUser) {
+      return res.status(404).json({
+        success: false,
+        message: '用户不存在'
+      });
+    }
 
     if (name !== undefined) updateData.name = String(name || '').trim().slice(0, 80);
     if (avatar !== undefined) {
@@ -793,11 +1181,18 @@ router.put('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
           message: '新密码至少 8 位，且需要包含字母和数字'
         });
       }
-      const currentUser = await getUserById(req.userId);
-      if (!currentUser || !(await bcrypt.compare(currentPassword, currentUser.password_hash))) {
+      if (!(await bcrypt.compare(currentPassword, oldUser.password_hash))) {
         return res.status(400).json({
           success: false,
           message: '当前密码不正确'
+        });
+      }
+      const emailCodeResult = await consumeEmailCode(oldUser.email, 'change-password', emailCode);
+      if (!emailCodeResult.ok) {
+        return res.status(400).json({
+          success: false,
+          code: 'EMAIL_CODE_INVALID',
+          message: emailCodeResult.message
         });
       }
       updateData.password_hash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -819,6 +1214,9 @@ router.put('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
     }
 
     const user = await getUserById(req.userId);
+    if (avatar !== undefined && oldUser.avatar && oldUser.avatar !== (updateData.avatar || null)) {
+      await deleteGeneratedAssetUrl(oldUser.avatar).catch(() => undefined);
+    }
     res.json({
       success: true,
       data: {
@@ -867,7 +1265,8 @@ router.put(
         });
       }
 
-      const avatarDir = path.join(process.cwd(), '.generated', 'avatars');
+      const oldUser = await getUserById(req.userId);
+      const avatarDir = generatedAvatarsRoot;
       await fs.mkdir(avatarDir, { recursive: true });
       const fileName = `${req.userId}-${Date.now()}-${randomUUID()}.${ext}`;
       const filePath = path.join(avatarDir, fileName);
@@ -876,6 +1275,7 @@ router.put(
       const avatarUrl = `/avatars/${fileName}`;
       const success = await updateUser(req.userId, { avatar: avatarUrl });
       if (!success) {
+        await deleteGeneratedAssetUrl(avatarUrl).catch(() => undefined);
         return res.status(400).json({
           success: false,
           message: '头像保存失败'
@@ -883,6 +1283,9 @@ router.put(
       }
 
       const user = await getUserById(req.userId);
+      if (oldUser?.avatar && oldUser.avatar !== avatarUrl) {
+        await deleteGeneratedAssetUrl(oldUser.avatar).catch(() => undefined);
+      }
       res.json({
         success: true,
         data: {
@@ -912,6 +1315,7 @@ router.delete('/me', authMiddleware, async (req: AuthRequest, res: Response) => 
       });
     }
 
+    const oldUser = await getUserById(req.userId);
     const success = await deleteUser(req.userId);
     if (!success) {
       return res.status(400).json({
@@ -920,6 +1324,7 @@ router.delete('/me', authMiddleware, async (req: AuthRequest, res: Response) => 
       });
     }
 
+    await deleteGeneratedAssetUrl(oldUser?.avatar).catch(() => undefined);
     res.json({
       success: true,
       message: '账户已删除'
