@@ -117,9 +117,14 @@ BullMQ 更推荐 `maxmemory-policy noeviction`。如果 Redis 设置了会驱逐
 - [ecosystem.config.cjs](ecosystem.config.cjs)：PM2 配置。
 - [nginx.conf](nginx.conf)：Nginx 模板。
 - [deploy.sh](deploy.sh)：一键部署脚本。
-- [deploy/README.md](deploy/README.md)：部署说明。
 
-本地执行：
+在服务器项目目录中直接执行：
+
+```bash
+bash deploy.sh
+```
+
+也可以从本地电脑推送部署：
 
 ```bash
 DEPLOY_HOST=你的服务器IP \
@@ -132,7 +137,7 @@ STORAGE_ROOT=/var/lib/nexious-ppt \
 bash deploy.sh
 ```
 
-首次部署时脚本会在服务器创建 `.env` 并停止。补齐数据库、JWT、`ENCRYPTION_KEY`、模型和邮件配置后，再执行一次部署脚本。
+首次部署时脚本会创建 `.env` 并停止。补齐数据库、JWT、`ENCRYPTION_KEY`、模型和邮件配置后，再执行一次部署脚本。
 
 Cloudflare Tunnel ingress 示例：
 
