@@ -31,7 +31,7 @@ render_nginx() {
     -e "s|\${DOMAIN}|${DOMAIN}|g" \
     -e "s|\${APP_DIR}|${APP_DIR}|g" \
     -e "s|\${APP_PORT}|${APP_PORT}|g" \
-    deploy/nginx.conf
+    nginx.conf
 }
 
 require_cmd pnpm

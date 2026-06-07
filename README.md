@@ -115,8 +115,8 @@ BullMQ 更推荐 `maxmemory-policy noeviction`。如果 Redis 设置了会驱逐
 项目已提供：
 
 - [ecosystem.config.cjs](ecosystem.config.cjs)：PM2 配置。
-- [deploy/nginx.conf](deploy/nginx.conf)：Nginx 模板。
-- [deploy/deploy.sh](deploy/deploy.sh)：一键部署脚本。
+- [nginx.conf](nginx.conf)：Nginx 模板。
+- [deploy.sh](deploy.sh)：一键部署脚本。
 - [deploy/README.md](deploy/README.md)：部署说明。
 
 本地执行：
@@ -129,7 +129,7 @@ DOMAIN=nexious-ppt.xyz \
 APP_PORT=3001 \
 NGINX_PORT=8081 \
 STORAGE_ROOT=/var/lib/nexious-ppt \
-bash deploy/deploy.sh
+bash deploy.sh
 ```
 
 首次部署时脚本会在服务器创建 `.env` 并停止。补齐数据库、JWT、`ENCRYPTION_KEY`、模型和邮件配置后，再执行一次部署脚本。
