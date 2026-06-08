@@ -15,13 +15,51 @@ export interface NativeSvgPptxResult {
 
 export interface NativeSvgPptxAnimationOptions {
   enabled?: boolean;
-  effect?: 'fade' | 'wipe' | 'zoom' | 'auto' | 'none';
+  effect?: NativeSvgPptxAnimationEffect;
   duration?: number;
   stagger?: number;
   trigger?: 'after-previous' | 'with-previous' | 'on-click';
-  transitionEffect?: 'fade' | 'push' | 'wipe' | 'none';
+  transitionEffect?: NativeSvgPptxTransitionEffect;
   transitionDuration?: number;
 }
+
+export type NativeSvgPptxAnimationEffect =
+  | 'none'
+  | 'appear'
+  | 'fade'
+  | 'fly'
+  | 'cut'
+  | 'zoom'
+  | 'wipe'
+  | 'split'
+  | 'blinds'
+  | 'checkerboard'
+  | 'dissolve'
+  | 'random_bars'
+  | 'peek'
+  | 'wheel'
+  | 'box'
+  | 'circle'
+  | 'diamond'
+  | 'plus'
+  | 'strips'
+  | 'wedge'
+  | 'stretch'
+  | 'expand'
+  | 'swivel'
+  | 'auto'
+  | 'mixed'
+  | 'random';
+
+export type NativeSvgPptxTransitionEffect =
+  | 'none'
+  | 'fade'
+  | 'push'
+  | 'wipe'
+  | 'split'
+  | 'strips'
+  | 'cover'
+  | 'random';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,6 +74,7 @@ export async function exportNativeEditablePptx(
 ): Promise<NativeSvgPptxResult> {
   const tracePath = `${outputPath}.trace.json`;
   const notesPath = path.join(projectPath, 'notes', 'export-notes.json');
+  const animationConfigPath = path.join(projectPath, 'animations.json');
   const args = [
     CLI_PATH,
     '--project', projectPath,
@@ -45,6 +84,7 @@ export async function exportNativeEditablePptx(
     '--height', String(spec.canvas.height),
     '--notes-json', notesPath,
     '--trace-json', tracePath,
+    '--animation-config', animationConfigPath,
   ];
 
   const animationOptions = normalizeAnimationOptions(animation);
@@ -120,7 +160,7 @@ function parseCliPayload(stdout: string): Record<string, any> | null {
 
 function normalizeAnimationOptions(animation?: NativeSvgPptxAnimationOptions): Required<NativeSvgPptxAnimationOptions> {
   const enabled = Boolean(animation?.enabled);
-  const effect = ['fade', 'wipe', 'zoom', 'auto', 'none'].includes(String(animation?.effect))
+  const effect = isAnimationEffect(animation?.effect)
     ? animation!.effect!
     : 'fade';
   const duration = clampNumber(animation?.duration, 0.1, 3, 0.45);
@@ -128,11 +168,46 @@ function normalizeAnimationOptions(animation?: NativeSvgPptxAnimationOptions): R
   const trigger = animation?.trigger === 'with-previous' || animation?.trigger === 'on-click'
     ? animation.trigger
     : 'after-previous';
-  const transitionEffect = ['fade', 'push', 'wipe', 'none'].includes(String(animation?.transitionEffect))
+  const transitionEffect = isTransitionEffect(animation?.transitionEffect)
     ? animation!.transitionEffect!
     : 'fade';
   const transitionDuration = clampNumber(animation?.transitionDuration, 0.1, 3, 0.45);
   return { enabled, effect, duration, stagger, trigger, transitionEffect, transitionDuration };
+}
+
+function isAnimationEffect(value: unknown): value is NativeSvgPptxAnimationEffect {
+  return [
+    'none',
+    'appear',
+    'fade',
+    'fly',
+    'cut',
+    'zoom',
+    'wipe',
+    'split',
+    'blinds',
+    'checkerboard',
+    'dissolve',
+    'random_bars',
+    'peek',
+    'wheel',
+    'box',
+    'circle',
+    'diamond',
+    'plus',
+    'strips',
+    'wedge',
+    'stretch',
+    'expand',
+    'swivel',
+    'auto',
+    'mixed',
+    'random',
+  ].includes(String(value));
+}
+
+function isTransitionEffect(value: unknown): value is NativeSvgPptxTransitionEffect {
+  return ['none', 'fade', 'push', 'wipe', 'split', 'strips', 'cover', 'random'].includes(String(value));
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {

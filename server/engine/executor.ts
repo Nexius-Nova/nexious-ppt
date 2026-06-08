@@ -1,5 +1,6 @@
 import type { DesignSpec, SpecLock, SpecSlide } from './spec.js';
 import { renderSpecLockMarkdown } from './ppt-exporter.js';
+import { shouldUseContainFitForSlide } from './imageComposition.js';
 
 const IMAGE_INTENT_PATTERN =
   /(配图|图片|插图|图示|示意图|视觉|场景图|海报|照片|封面图|背景图|产品图|架构图|流程图|路线图|信息图|生成图|image|illustration|visual|photo|poster|diagram|infographic)/i;
@@ -14,11 +15,16 @@ export interface ImageSlot {
   fit: 'cover' | 'contain';
 }
 
-export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock): string {
+export interface ExecutorPromptContext {
+  iconGuide?: string;
+  chartTemplateSvg?: string;
+}
+
+export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock, context: ExecutorPromptContext = {}): string {
   const { canvas } = spec;
   const specLockMarkdown = renderSpecLockMarkdown({ ...lock, skillExtensions: [] });
 
-  return `你是 PPT Master 的 Executor，只负责当前单页 SVG 排版。
+  return `你是 Nexious PPT 的 Executor，只负责当前单页 SVG 排版。
 
 硬性要求：
 1. 只输出 SVG，不要 Markdown，不要解释。
@@ -31,8 +37,14 @@ export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock): str
 8. 模板、提示词和 Skill 已经在 Strategist 阶段折算进规格；本阶段不要追加 Skill 规则。
 9. 不要输出通用灰底 bullet 页。必须根据 layout/rhythm 设计当前页构图：cover 强视觉中心，toc 有目录结构，content-chart 有图表结构，content-image 有图片区，ending 有收束感。即使没有图片，也要用 SVG 形状、分栏、编号、轴线或信息框表达差异。
 
+Animation export structure:
+- Use meaningful top-level <g> groups for visible animated content: title-block, hero-visual, key-message, chart-area, timeline, content-card-1, content-card-2, summary-bar.
+- Keep background/chrome/static decoration in ids containing background, bg, header, footer, or chrome.
+- Do not wrap the whole slide in one visible group; split important content so PPTX export can animate key elements naturally.
+
 spec_lock:
-${specLockMarkdown}`;
+${specLockMarkdown}
+${context.iconGuide ? `\nNexious PPT icon guide:\n${context.iconGuide}` : ''}`;
 }
 
 export function buildExecutorPagePrompt(
@@ -40,7 +52,8 @@ export function buildExecutorPagePrompt(
   spec: DesignSpec,
   lock: SpecLock,
   imageUrl?: string,
-  imageSlot: ImageSlot = calculateImageSlot(slide, spec)
+  imageSlot: ImageSlot = calculateImageSlot(slide, spec),
+  context: ExecutorPromptContext = {}
 ): string {
   const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
   const rhythm = lock.pageRhythm[pageKey] || slide.rhythm;
@@ -69,6 +82,7 @@ export function buildExecutorPagePrompt(
 - notes: ${slide.speakerNotes || '无'}
 ${chart ? `- chart: ${chart}` : ''}
 - image: ${imageInstruction}
+${context.chartTemplateSvg ? `\nNexious PPT chart template SVG reference. Learn only structure, coordinates, hierarchy, and visual proportion; replace all sample content with this slide's real content:\n${context.chartTemplateSvg}` : ''}
 
 设计方向：${spec.visualTheme.style}
 请让本页构图明显匹配 layout=${layout} 与 rhythm=${rhythm}，不要复用上一页版式。
@@ -130,26 +144,26 @@ export function calculateImageSlot(slide: SpecSlide, spec: DesignSpec): ImageSlo
     const height = Math.round(canvas.height * 0.62);
     const x = Math.round((canvas.width - width) / 2);
     const y = Math.round(canvas.height * 0.2);
-    return { x, y, width, height, aspectRatio: width / height, placement: 'center', fit: 'cover' };
+    return { x, y, width, height, aspectRatio: width / height, placement: 'center', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
   }
 
   if (layout.includes('image-text')) {
     const width = Math.round(canvas.width * 0.38);
     const height = Math.round(contentHeight * 0.72);
-    return { x: marginX, y: top, width, height, aspectRatio: width / height, placement: 'left', fit: 'cover' };
+    return { x: marginX, y: top, width, height, aspectRatio: width / height, placement: 'left', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
   }
 
   if (layout.includes('text-image') || layout.includes('content-image')) {
     const width = Math.round(canvas.width * 0.38);
     const height = Math.round(contentHeight * 0.72);
     const x = canvas.width - marginX - width;
-    return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: 'cover' };
+    return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
   }
 
   const width = Math.round(canvas.width * 0.34);
   const height = Math.round(contentHeight * 0.62);
   const x = canvas.width - marginX - width;
-  return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: 'cover' };
+  return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
 }
 
 function buildGeneratedImageGroup(slide: SpecSlide, spec: DesignSpec, imageUrl: string, imageSlot = calculateImageSlot(slide, spec)): string {

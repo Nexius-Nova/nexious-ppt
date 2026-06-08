@@ -1137,6 +1137,9 @@ onBeforeUnmount(stopStatusPolling);
 }
 
 .package-view {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.72fr) minmax(0, 1.35fr) minmax(260px, 0.93fr);
+  align-items: start;
   gap: 12px;
   overflow: hidden;
 }
@@ -1153,8 +1156,16 @@ onBeforeUnmount(stopStatusPolling);
 
 .package-view__summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: 1fr;
+  align-self: stretch;
   gap: 8px;
+  min-width: 0;
+  max-height: min(58vh, 560px);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--color-surface);
 }
 
 .package-view__summary div {
@@ -1182,11 +1193,7 @@ onBeforeUnmount(stopStatusPolling);
 }
 
 .package-view__grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
-  align-items: start;
-  gap: 12px;
-  min-height: 0;
+  display: contents;
 }
 
 .package-view__panel {
@@ -1447,9 +1454,12 @@ onBeforeUnmount(stopStatusPolling);
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .package-view__grid,
-  .package-view__summary {
+  .package-view {
     grid-template-columns: 1fr;
+  }
+
+  .package-view__summary {
+    max-height: none;
   }
 
   .package-view__panel--content {

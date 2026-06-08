@@ -646,6 +646,18 @@ export interface GeneratedImage {
   errorMessage?: string;
 }
 
+export interface ParsedInputFile {
+  name: string;
+  kind: 'text' | 'document' | 'spreadsheet' | 'presentation' | 'pdf' | 'image' | 'unsupported';
+  status: 'parsed' | 'partial' | 'failed';
+  text: string;
+  summary: string;
+  mimeType: string;
+  extension: string;
+  warnings: string[];
+  metadata: Record<string, unknown>;
+}
+
 export interface StreamCallbacks {
   onStart?: (message: string) => void;
   onContent?: (content: string) => void;
@@ -676,11 +688,11 @@ export interface QueueJobSnapshot {
 export interface PptxExportOptions {
   animation?: {
     enabled?: boolean;
-    effect?: 'fade' | 'wipe' | 'zoom' | 'auto' | 'none';
+    effect?: 'none' | 'appear' | 'fade' | 'fly' | 'cut' | 'zoom' | 'wipe' | 'split' | 'blinds' | 'checkerboard' | 'dissolve' | 'random_bars' | 'peek' | 'wheel' | 'box' | 'circle' | 'diamond' | 'plus' | 'strips' | 'wedge' | 'stretch' | 'expand' | 'swivel' | 'auto' | 'mixed' | 'random';
     duration?: number;
     stagger?: number;
     trigger?: 'after-previous' | 'with-previous' | 'on-click';
-    transitionEffect?: 'fade' | 'push' | 'wipe' | 'none';
+    transitionEffect?: 'none' | 'fade' | 'push' | 'wipe' | 'split' | 'strips' | 'cover' | 'random';
     transitionDuration?: number;
   };
 }
@@ -1287,6 +1299,28 @@ export const promptApi = {
     api.post<{ url: string }>('/api/prompts/preview-image', data),
 
   delete: (id: number) => api.delete(`/api/prompts/${id}`)
+};
+
+export const inputFileApi = {
+  parse: (data: { filename: string; dataBase64: string; mimeType?: string; textModelId?: string | null }) =>
+    api.post<ParsedInputFile>('/api/input-files/parse', data, { timeoutMs: 180000 }),
+  parseUrl: (data: { url: string }) =>
+    api.post<{ ok: boolean; text: string; warnings: string[]; metadata: Record<string, unknown> }>('/api/input-files/parse-url', data, { timeoutMs: 180000 }),
+  enhanceContext: (data: {
+    content: string;
+    files: Array<Partial<ParsedInputFile>>;
+    skillChunks: string[];
+  }) =>
+    api.post<{
+      summary: {
+        originalContent: string;
+        fileSummaries: Array<{ name: string; kind: string; status: string; summary: string; warnings: string[] }>;
+        imageSummaries: Array<{ name: string; summary: string }>;
+        formulaCandidates: string[];
+        sourceMap: Array<{ type: string; name: string; chars: number }>;
+      };
+      markdown: string;
+    }>('/api/input-files/enhance-context', data, { timeoutMs: 120000 }),
 };
 
 export const skillApi = {

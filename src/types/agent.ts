@@ -26,6 +26,11 @@ export interface UploadedFileContent {
   dataBase64?: string;
   mimeType?: string;
   extension?: string;
+  kind?: 'text' | 'document' | 'spreadsheet' | 'presentation' | 'pdf' | 'image' | 'unsupported';
+  status?: 'parsed' | 'partial' | 'failed';
+  summary?: string;
+  warnings?: string[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface AgentParameters {
@@ -156,6 +161,13 @@ export interface PptProjectState {
   input: DeckInput;
   uploadedFileContents?: UploadedFileContent[];
   processedInputContent?: string;
+  inputEnhancementSummary?: {
+    originalContent: string;
+    fileSummaries: Array<{ name: string; kind: string; status: string; summary: string; warnings: string[] }>;
+    imageSummaries: Array<{ name: string; summary: string }>;
+    formulaCandidates: string[];
+    sourceMap: Array<{ type: string; name: string; chars: number }>;
+  } | null;
   parameters: AgentParameters;
   modelSelection?: ProjectModelSelection;
   workflowContext?: WorkflowContext | null;

@@ -10,6 +10,7 @@ import { authMiddleware, AuthRequest } from './auth.js';
 import { buildOpenAIEndpoint, normalizeOpenAIBaseUrl } from '../utils/openaiUrl.js';
 import { generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
 import { assertImageUploadSafe, normalizeContentType } from '../utils/uploadSecurity.js';
+import { buildImageSlotPrompt, type ImageSlotHint } from '../engine/imageComposition.js';
 
 const router = Router();
 
@@ -277,12 +278,10 @@ async function generateWithOpenAIProtocol(
   style: string,
   baseUrl: string,
   config: ImageProviderConfig,
-  imageSlot?: { width: number; height: number; aspectRatio: number; placement?: string }
+  imageSlot?: ImageSlotHint
 ): Promise<string> {
   const url = buildOpenAIEndpoint(baseUrl, '/images/generations', config.defaultBaseUrl);
-  const slotPrompt = imageSlot
-    ? `最终会放入 PPT 图片槽位：${Math.round(imageSlot.width)}x${Math.round(imageSlot.height)}，比例 ${imageSlot.aspectRatio.toFixed(2)}:1，位置 ${imageSlot.placement || 'content'}。请按该比例组织构图，主体居中并填满槽位，四周不要留大空白，避免重要内容贴边，适合被 cover 裁切。`
-    : '横向幻灯片插图构图，主体居中且填满画面，不要大面积空白边距。';
+  const slotPrompt = buildImageSlotPrompt(imageSlot, prompt);
   const fullPrompt = [
     prompt,
     getStylePrompt(style),
@@ -318,7 +317,7 @@ export async function generateImage(
   prompt: string,
   style: string,
   baseUrl: string,
-  imageSlot?: { width: number; height: number; aspectRatio: number; placement?: string }
+  imageSlot?: ImageSlotHint
 ): Promise<string> {
   const effectiveProvider = resolveProvider(provider, model);
   const config = IMAGE_PROVIDERS[effectiveProvider] || IMAGE_PROVIDERS.openai;

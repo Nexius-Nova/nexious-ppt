@@ -6,6 +6,7 @@ import type {
   ConfigOptionKey,
   DeckInput,
   InputProcessStep,
+  PptProjectState,
   PromptDefinition,
   SkillDefinition,
   UploadedFileContent,
@@ -40,6 +41,7 @@ export const useInputStore = defineStore('agentInput', () => {
   const inputProcessSteps = ref<InputProcessStep[]>([]);
   const uploadedFileContents = ref<UploadedFileContent[]>([]);
   const processedInputContent = ref('');
+  const inputEnhancementSummary = ref<PptProjectState['inputEnhancementSummary']>(null);
   const selectedPromptId = ref('');
   const selectedTextModelId = ref<string | null>(null);
   const selectedImageModelId = ref<string | null>(null);
@@ -68,6 +70,7 @@ export const useInputStore = defineStore('agentInput', () => {
     inputProcessSteps,
     uploadedFileContents,
     processedInputContent,
+    inputEnhancementSummary,
     selectedPromptId,
     selectedTextModelId,
     selectedImageModelId,

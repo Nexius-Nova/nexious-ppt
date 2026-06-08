@@ -2,8 +2,8 @@
 import { storeToRefs } from 'pinia';
 import { computed, ref, watch } from 'vue';
 import { analyzeDeckInput, exportDeck, generateSlideImages } from '@/services/agentSimulator';
-import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi, generationJobApi, configApi } from '@/services/api';
-import type { GenerationJobStatus, QueueJobSnapshot, RunConfig } from '@/services/api';
+import { promptApi, skillApi, templateApi, workflowApi, aiApi, versionApi, projectApi, generationJobApi, configApi, inputFileApi } from '@/services/api';
+import type { GenerationJobStatus, ParsedInputFile, QueueJobSnapshot, RunConfig } from '@/services/api';
 import { applyTemplateLayoutParams, getTemplateColors } from '@/composables/templateColors';
 import { slideNeedsImage } from '@/utils/slideVisuals';
 import { useApiKeyStore } from './apiKeyStore';
@@ -246,10 +246,15 @@ const cloneConfigOptions = (): ConfigOptionGroups => ({
     { value: 'disabled', label: '关闭' }
   ],
   animationEffect: [
-    { value: 'auto', label: '默认无动画' },
+    { value: 'auto', label: 'AI 自动' },
     { value: 'fade', label: '柔和淡入' },
     { value: 'wipe', label: '逐步展开' },
-    { value: 'zoom', label: '重点聚焦' }
+    { value: 'fly', label: '飞入呈现' },
+    { value: 'zoom', label: '重点聚焦' },
+    { value: 'dissolve', label: '溶解显现' },
+    { value: 'wheel', label: '轮盘展开' },
+    { value: 'mixed', label: '混合动效' },
+    { value: 'random', label: '随机动效' }
   ]
 });
 
@@ -328,12 +333,13 @@ const OUTLINE_STREAM_FLUSH_INTERVAL_MS = 120;
 const LAYOUT_GENERATION_CONCURRENCY = 3;
 const PROJECT_STATE_SYNC_INTERVAL_MS = 1800;
 const PROJECT_STATE_SYNC_PAGE_BATCH = 2;
-const TEXT_FILE_PATTERN = /\.(txt|md|markdown|csv|json|log)$/i;
-const DOCX_FILE_PATTERN = /\.docx$/i;
-const PARSE_WITH_SKILL_FILE_PATTERN = /\.(pdf|ppt|pptx)$/i;
 const MAX_FILE_TEXT_CHARS = 120_000;
+const MAX_UPLOAD_FILE_BYTES = 18 * 1024 * 1024;
+const SUPPORTED_INPUT_FILE_PATTERN = /\.(txt|md|markdown|csv|json|log|html|htm|xml|docx|xlsx|xlsm|pptx|pdf|png|jpe?g|webp|gif|doc|xls|ppt)$/i;
 const SKILL_CONTEXT_START = '【Skill 处理结果（自动生成，可重新运行刷新）】';
 const SKILL_CONTEXT_END = '【Skill 处理结果结束】';
+const ANIMATION_INTENT_PATTERN = /(动画|动效|动态|转场|入场|出场|飞入|淡入|缩放|擦除|逐步出现|逐个出现|放映效果|animation|animate|transition|entrance|motion|fade|wipe|zoom)/i;
+const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'，。；、)）\]]+/gi;
 const normalizeProjectText = (value: unknown) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const stripFileExtension = (fileName: string) => fileName.replace(/\.[^.]+$/, '');
 const inferInputTitle = (content: string, files: string[]) => {
@@ -344,6 +350,7 @@ const inferInputTitle = (content: string, files: string[]) => {
   const firstFileName = files[0] ? stripFileExtension(files[0]).trim() : '';
   return firstFileName.slice(0, 28) || '未命名 PPT';
 };
+const wantsAnimationEffects = (value: string) => ANIMATION_INTENT_PATTERN.test(value);
 const projectIdentityKey = (project: Pick<PptProject, 'title' | 'topic'>) =>
   `${normalizeProjectText(project.title)}::${normalizeProjectText(project.topic)}`;
 
@@ -509,6 +516,7 @@ export const useAgentStore = defineStore('agent', () => {
     inputProcessSteps,
     uploadedFileContents,
     processedInputContent,
+    inputEnhancementSummary,
     selectedPromptId,
     selectedTextModelId,
     selectedImageModelId,
@@ -1068,6 +1076,7 @@ export const useAgentStore = defineStore('agent', () => {
       input: { topic: '', content: '', files: [] },
       uploadedFileContents: [],
       processedInputContent: '',
+      inputEnhancementSummary: null,
       parameters: normalizeAgentParameters(),
       modelSelection: {
         textModelId: null,
@@ -1134,8 +1143,14 @@ export const useAgentStore = defineStore('agent', () => {
         dataBase64: typeof file.dataBase64 === 'string' ? file.dataBase64 : undefined,
         mimeType: typeof file.mimeType === 'string' ? file.mimeType : undefined,
         extension: typeof file.extension === 'string' ? file.extension : undefined,
-      })).filter((file) => file.name && (file.text || file.dataBase64)),
+        kind: typeof file.kind === 'string' ? file.kind as UploadedFileContent['kind'] : undefined,
+        status: typeof file.status === 'string' ? file.status as UploadedFileContent['status'] : undefined,
+        summary: typeof file.summary === 'string' ? file.summary : undefined,
+        warnings: Array.isArray(file.warnings) ? file.warnings.map((item) => String(item)).filter(Boolean) : undefined,
+        metadata: file.metadata && typeof file.metadata === 'object' ? { ...file.metadata } : undefined,
+      })).filter((file) => file.name && (file.text || file.dataBase64 || file.status === 'failed' || file.summary)),
       processedInputContent: String(state.processedInputContent || ''),
+      inputEnhancementSummary: normalizeInputEnhancementSummary(state.inputEnhancementSummary),
       parameters: normalizeAgentParameters(state.parameters || fallback.parameters),
       modelSelection,
       workflowContext,
@@ -1151,6 +1166,40 @@ export const useAgentStore = defineStore('agent', () => {
       svgPages: (state.svgPages || []).map(page => ({ ...page })),
       configOptions: normalizeConfigOptions(state.configOptions || fallback.configOptions),
       activeQueueJob: normalizeActiveQueueJob(state.activeQueueJob),
+    };
+  }
+
+  function normalizeInputEnhancementSummary(
+    value?: PptProjectState['inputEnhancementSummary'] | null
+  ): PptProjectState['inputEnhancementSummary'] {
+    if (!value || typeof value !== 'object') return null;
+    return {
+      originalContent: String(value.originalContent || ''),
+      fileSummaries: Array.isArray(value.fileSummaries)
+        ? value.fileSummaries.map((item) => ({
+            name: String(item.name || ''),
+            kind: String(item.kind || 'file'),
+            status: String(item.status || 'partial'),
+            summary: String(item.summary || ''),
+            warnings: Array.isArray(item.warnings) ? item.warnings.map((warning) => String(warning)).filter(Boolean) : [],
+          })).filter((item) => item.name || item.summary)
+        : [],
+      imageSummaries: Array.isArray(value.imageSummaries)
+        ? value.imageSummaries.map((item) => ({
+            name: String(item.name || ''),
+            summary: String(item.summary || ''),
+          })).filter((item) => item.name || item.summary)
+        : [],
+      formulaCandidates: Array.isArray(value.formulaCandidates)
+        ? value.formulaCandidates.map((item) => String(item)).filter(Boolean)
+        : [],
+      sourceMap: Array.isArray(value.sourceMap)
+        ? value.sourceMap.map((item) => ({
+            type: String(item.type || 'file'),
+            name: String(item.name || ''),
+            chars: Math.max(0, Number(item.chars) || 0),
+          })).filter((item) => item.name || item.chars > 0)
+        : [],
     };
   }
 
@@ -1197,10 +1246,15 @@ export const useAgentStore = defineStore('agent', () => {
 
   function upsertGeneratedImage(image: GeneratedImage) {
     const existingIdx = images.value.findIndex(img => img.slideId === image.slideId);
+    const existingImage = existingIdx >= 0 ? images.value[existingIdx] : null;
+    const nextImage: GeneratedImage = {
+      ...image,
+      selected: image.error ? (image.selected ?? existingImage?.selected ?? true) : true,
+    };
     if (existingIdx >= 0) {
-      images.value[existingIdx] = image;
+      images.value[existingIdx] = nextImage;
     } else {
-      images.value = [...images.value, image];
+      images.value = [...images.value, nextImage];
     }
   }
 
@@ -1225,11 +1279,15 @@ export const useAgentStore = defineStore('agent', () => {
 
     if (gate.total === 0) {
       setStepStatus('images', 'done', 100);
+      waitingForImageRetry.value = false;
       return gate;
     }
 
     const progress = Math.min(100, Math.round((gate.readyCount / gate.total) * 100));
     setStepStatus('images', gate.complete ? 'done' : statusWhenIncomplete, gate.complete ? 100 : progress);
+    if (gate.complete) {
+      waitingForImageRetry.value = false;
+    }
     return gate;
   }
 
@@ -1252,25 +1310,6 @@ export const useAgentStore = defineStore('agent', () => {
     return gate;
   }
 
-  async function readDocxText(file: File) {
-    const { default: JSZip } = await import('jszip');
-    const zip = await JSZip.loadAsync(await file.arrayBuffer());
-    const documentFile = zip.file('word/document.xml');
-    if (!documentFile) return '';
-
-    const xml = await documentFile.async('string');
-    const doc = new DOMParser().parseFromString(xml, 'application/xml');
-    return Array.from(doc.getElementsByTagName('w:p'))
-      .map((paragraph) =>
-        Array.from(paragraph.getElementsByTagName('w:t'))
-          .map((node) => node.textContent || '')
-          .join('')
-          .trim()
-      )
-      .filter(Boolean)
-      .join('\n');
-  }
-
   function fileToBase64(file: File) {
     return new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -1285,10 +1324,15 @@ export const useAgentStore = defineStore('agent', () => {
 
   function snapshotProjectState(options: { persistable?: boolean } = {}): PptProjectState {
     const persistable = options.persistable ?? false;
+    const safeUploadedFileContents = uploadedFileContents.value.map((file) => ({
+      ...file,
+      dataBase64: persistable ? undefined : file.dataBase64,
+    }));
     return {
       input: { ...input.value, files: [...input.value.files] },
-      uploadedFileContents: uploadedFileContents.value.map((file) => ({ ...file })),
+      uploadedFileContents: safeUploadedFileContents,
       processedInputContent: processedInputContent.value,
+      inputEnhancementSummary: inputEnhancementSummary.value ? normalizeInputEnhancementSummary(inputEnhancementSummary.value) : null,
       parameters: { ...parameters.value },
       modelSelection: {
         textModelId: selectedTextModelId.value,
@@ -1357,6 +1401,7 @@ export const useAgentStore = defineStore('agent', () => {
     input.value = { ...normalizedState.input, files: [...normalizedState.input.files] };
     uploadedFileContents.value = normalizedState.uploadedFileContents?.map((file) => ({ ...file })) || [];
     processedInputContent.value = normalizedState.processedInputContent || '';
+    inputEnhancementSummary.value = normalizedState.inputEnhancementSummary || null;
     parameters.value = normalizeAgentParameters(normalizedState.parameters);
     selectedTextModelId.value = normalizedState.modelSelection?.textModelId || null;
     selectedImageModelId.value = normalizedState.modelSelection?.imageModelId || null;
@@ -2305,6 +2350,21 @@ export const useAgentStore = defineStore('agent', () => {
     return false;
   }
 
+  function exportReadiness() {
+    const totalPages = layoutPageCount();
+    if (totalPages <= 0) return { ready: false, totalPages, completedPages: 0, message: '请先生成大纲和页面后再导出。' };
+    const completedPages = completedLeadingLayoutPages(totalPages);
+    if (hasPendingLayoutPages(totalPages)) {
+      return {
+        ready: false,
+        totalPages,
+        completedPages,
+        message: `页面尚未全部生成完成：已完成 ${completedPages}/${totalPages} 页，请先完成页面生成后再导出。`,
+      };
+    }
+    return { ready: true, totalPages, completedPages: totalPages, message: '' };
+  }
+
   function completedLeadingLayoutPages(totalPages = layoutPageCount()) {
     if (totalPages <= 0) return 0;
     const pagesByNumber = new Map(svgPages.value.map(page => [page.pageNumber, page]));
@@ -2508,6 +2568,18 @@ export const useAgentStore = defineStore('agent', () => {
   function compactMultiline(value: string, maxLength = 900) {
     const normalized = value.trim().replace(/\n{3,}/g, '\n\n');
     return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+  }
+
+  function extractInputUrls(text: string) {
+    return Array.from(new Set((text.match(URL_PATTERN) || []).map((url) => url.replace(/[)\]）。，；、]+$/g, '')))).slice(0, 8);
+  }
+
+  function buildEnhancedInputContent(baseContent: string, summaryMarkdown: string, chunks: string[]) {
+    return [
+      summaryMarkdown.trim(),
+      baseContent.trim(),
+      chunks.length ? `${SKILL_CONTEXT_START}\n${chunks.join('\n\n')}\n${SKILL_CONTEXT_END}` : '',
+    ].filter(Boolean).join('\n\n');
   }
 
   function inputStepById(id: InputProcessStep['id']) {
@@ -2793,6 +2865,7 @@ export const useAgentStore = defineStore('agent', () => {
     }
     const content = buildInputSourceContext(userContent);
     processedInputContent.value = '';
+    inputEnhancementSummary.value = null;
     const files = [...input.value.files];
     const blockedSkills = enabledSkills.value.filter((skill) =>
       Number.isFinite(Number(skill.id)) &&
@@ -2812,6 +2885,15 @@ export const useAgentStore = defineStore('agent', () => {
       pushLog(message);
       syncToProject();
       throw new Error(message);
+    }
+
+    if (parameters.value.animationEnabled === 'auto' && wantsAnimationEffects(`${userContent}\n${input.value.topic}`)) {
+      parameters.value = {
+        ...parameters.value,
+        animationEnabled: 'enabled',
+        animationEffect: parameters.value.animationEffect === 'auto' ? 'auto' : parameters.value.animationEffect,
+      };
+      pushLog('检测到用户要求动画效果，已自动启用 PPTX 元素入场动画和页面转场。');
     }
 
     const hasGenerationControls = Boolean(
@@ -2838,18 +2920,46 @@ export const useAgentStore = defineStore('agent', () => {
     const topicSkills = autoSelectSkillsByCategory('主题提炼', selectionOptions);
     const constraintSkills = autoSelectSkillsByCategory('生成约束', selectionOptions);
     const skillContextChunks: string[] = [];
+    const inputUrls = extractInputUrls(userContent);
 
     try {
       setInputProcessStep('collect', {
         status: 'running',
         progress: 45,
-        detail: collectSkills.length ? `自动选择 ${collectSkills.length} 个资料收集 Skill` : files.length ? `已接收 ${files.length} 个文件，正在整理资料` : '正在整理输入资料',
+        detail: collectSkills.length
+          ? `自动选择 ${collectSkills.length} 个资料收集 Skill`
+          : inputUrls.length
+            ? `检测到 ${inputUrls.length} 个网页链接，正在解析`
+            : files.length
+              ? `已接收 ${files.length} 个文件，正在整理资料`
+              : '正在整理输入资料',
         logs: collectSkills.length
           ? collectSkills.map((item) => `${item.skill.name}：${item.reason}`).join('\n')
           : searchIntent
             ? '检测到联网/搜索意图，但当前没有可用的资料收集 Skill。'
             : '',
       });
+
+      if (inputUrls.length) {
+        const parsedUrlChunks: string[] = [];
+        for (const [index, url] of inputUrls.entries()) {
+          setInputProcessStep('collect', {
+            status: 'running',
+            progress: Math.min(62, 46 + Math.round((index / Math.max(1, inputUrls.length)) * 12)),
+            detail: `正在解析网页 ${index + 1}/${inputUrls.length}`,
+            logs: appendInputStepLog('collect', url),
+          });
+          const response = await inputFileApi.parseUrl({ url });
+          if (!response.success || !response.data?.ok || !response.data.text) {
+            throw new Error(response.message || `网页解析失败：${url}`);
+          }
+          parsedUrlChunks.push(`### 网页资料 - ${url}\n${response.data.text}`);
+        }
+        if (parsedUrlChunks.length) {
+          skillContextChunks.push(compactMultiline(parsedUrlChunks.join('\n\n'), 12000));
+          pushLog(`已解析 ${parsedUrlChunks.length} 个网页链接并合并到资料上下文。`);
+        }
+      }
 
       if (collectSkills.length) {
         for (const item of collectSkills) {
@@ -2904,6 +3014,9 @@ export const useAgentStore = defineStore('agent', () => {
       });
       setStepStatus('input', 'running', 20);
 
+      const failedBuiltInFiles = uploadedFileContents.value.filter((file) => file.status === 'failed');
+      const partialBuiltInFiles = uploadedFileContents.value.filter((file) => file.status === 'partial');
+
       if (files.length && fileParseSkills.length) {
         setInputProcessStep('file-parse', {
           status: 'running',
@@ -2946,11 +3059,28 @@ export const useAgentStore = defineStore('agent', () => {
           }
         }
       } else {
+        if (failedBuiltInFiles.length) {
+          const message = `以下文件未能完成内置解析：${failedBuiltInFiles.map((file) => `${file.name}${file.summary ? `（${compactMultiline(file.summary, 80)}）` : ''}`).join('、')}。请更换为可解析格式，或添加并测试通过文件解析/OCR Skill 后重试。`;
+          setInputProcessStep('file-parse', {
+            status: 'failed',
+            progress: 100,
+            detail: message,
+            error: message,
+            logs: failedBuiltInFiles.map((file) => `${file.name}: ${(file.warnings || [file.summary]).filter(Boolean).join('；')}`).join('\n'),
+          });
+          pushLog(message);
+          throw new Error(message);
+        }
         setInputProcessStep('file-parse', {
           status: files.length ? 'running' : 'skipped',
           progress: files.length ? 55 : 100,
-          detail: files.length ? '未找到可用文件解析 Skill，正在使用内置读取流程' : '未上传文件，跳过',
-          logs: files.length ? '当前没有可用的文件解析 Skill，上传文件会通过内置读取结果进入资料上下文。' : '',
+          detail: files.length ? '正在使用内置文件读取和图片识别结果' : '未上传文件，跳过',
+          logs: files.length
+            ? [
+                '当前没有额外文件解析 Skill，已使用内置读取结果进入资料上下文。',
+                partialBuiltInFiles.length ? `部分解析：${partialBuiltInFiles.map((file) => file.name).join('、')}` : '',
+              ].filter(Boolean).join('\n')
+            : '',
         });
         if (files.length) {
           await new Promise((resolve) => window.setTimeout(resolve, 180));
@@ -2958,7 +3088,11 @@ export const useAgentStore = defineStore('agent', () => {
         setInputProcessStep('file-parse', {
           status: files.length ? 'done' : 'skipped',
           progress: 100,
-          detail: files.length ? '上传文件已通过内置读取流程合并到资料' : '未上传文件，跳过',
+          detail: files.length
+            ? partialBuiltInFiles.length
+              ? `上传文件已合并到资料，其中 ${partialBuiltInFiles.length} 个为部分解析`
+              : '上传文件已通过内置读取/识别合并到资料'
+            : '未上传文件，跳过',
         });
       }
       setStepStatus('input', 'running', 48);
@@ -3068,7 +3202,26 @@ export const useAgentStore = defineStore('agent', () => {
       });
       setStepStatus('input', 'running', 90);
 
-      processedInputContent.value = buildSkillContextContent(content, skillContextChunks);
+      const enhancedResponse = await inputFileApi.enhanceContext({
+        content: userContent,
+        files: uploadedFileContents.value.map((file) => ({
+          name: file.name,
+          kind: file.kind,
+          status: file.status,
+          text: file.text,
+          summary: file.summary,
+          warnings: file.warnings,
+          metadata: file.metadata,
+        })),
+        skillChunks: skillContextChunks,
+      });
+      const enhancedMarkdown = enhancedResponse.success && enhancedResponse.data?.markdown
+        ? enhancedResponse.data.markdown
+        : '';
+      inputEnhancementSummary.value = enhancedResponse.success && enhancedResponse.data?.summary
+        ? normalizeInputEnhancementSummary(enhancedResponse.data.summary)
+        : null;
+      processedInputContent.value = buildEnhancedInputContent(content, enhancedMarkdown, skillContextChunks);
       setInputProcessStep('ready', {
         status: 'running',
         progress: 92,
@@ -3077,7 +3230,7 @@ export const useAgentStore = defineStore('agent', () => {
           : uploadedFileContents.value.length
             ? `已整理用户输入和 ${uploadedFileContents.value.length} 个上传文件`
             : '已整理用户输入内容',
-        processedText: compactMultiline(processedInputContent.value, 1200),
+        processedText: compactMultiline(enhancedMarkdown || processedInputContent.value, 1400),
       });
       if (skillContextChunks.length) {
         pushLog(`已将 ${skillContextChunks.length} 段 Skill 处理结果整理到生成就绪文案。`);
@@ -3997,6 +4150,7 @@ export const useAgentStore = defineStore('agent', () => {
   async function runImages(ctx: RunContext = createRunContext()) {
     if (!checkActivePpt() || !checkApiKeys()) return false;
     if (!isRunContextActive(ctx)) return false;
+    const shouldResumeWorkflowWhenReady = Boolean(waitingForImageRetry.value && activeStep.value === 'images');
 
     if (outline.value.length === 0) {
       await runStrategist(ctx);
@@ -4007,7 +4161,6 @@ export const useAgentStore = defineStore('agent', () => {
     activeStep.value = 'images';
     setStepStatus('images', 'running', 0);
     generatedSlides.value = new Set();
-    waitingForImageRetry.value = false;
     pushLog('开始按需生成图片。');
 
     try {
@@ -4016,7 +4169,12 @@ export const useAgentStore = defineStore('agent', () => {
       if (slidesRequiringImages.length === 0) {
         pushLog('本次不需要图片。');
         setStepStatus('images', 'done', 100);
+        waitingForImageRetry.value = false;
         await syncToProjectNow();
+        if (shouldResumeWorkflowWhenReady && isRunContextActive(ctx)) {
+          pushLog('图片已全部就绪，继续生成页面。');
+          await resumeWorkflowFromStage('layout');
+        }
         return true;
       }
 
@@ -4026,7 +4184,12 @@ export const useAgentStore = defineStore('agent', () => {
       if (pendingSlides.length === 0) {
         pushLog('图片已完成。');
         setStepStatus('images', 'done', 100);
+        waitingForImageRetry.value = false;
         await syncToProjectNow();
+        if (shouldResumeWorkflowWhenReady && isRunContextActive(ctx)) {
+          pushLog('图片已全部就绪，继续生成页面。');
+          await resumeWorkflowFromStage('layout');
+        }
         return true;
       }
 
@@ -4109,8 +4272,13 @@ export const useAgentStore = defineStore('agent', () => {
 
       pushLog(`图片生成完成，共 ${gate.readyCount} 张。`);
       setStepStatus('images', 'done', 100);
+      waitingForImageRetry.value = false;
       if (!isRunContextActive(ctx)) return false;
       await syncToProjectNow();
+      if (shouldResumeWorkflowWhenReady && isRunContextActive(ctx)) {
+        pushLog('图片已全部生成，继续生成页面。');
+        await resumeWorkflowFromStage('layout');
+      }
       return true;
     } catch (error) {
       if (!isRunContextActive(ctx)) return false;
@@ -4829,6 +4997,16 @@ export const useAgentStore = defineStore('agent', () => {
     }
     if (outline.value.length === 0) return;
 
+    const readiness = exportReadiness();
+    if (!readiness.ready) {
+      pushLog(readiness.message);
+      toastStore.warning('暂不能导出', readiness.message);
+      activeStep.value = 'layout';
+      updateLayoutStepAfterPageRetry();
+      await syncToProjectNow();
+      throw new Error(readiness.message);
+    }
+
     activeStep.value = 'preview';
     setStepStatus('preview', 'running', 40);
     pushLog(`开始导出 ${format.toUpperCase()}。`);
@@ -4902,72 +5080,115 @@ export const useAgentStore = defineStore('agent', () => {
   async function attachFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
 
+    const toastStore = useToastStore();
     const fileList = Array.from(files);
     const existingFileNames = new Set(input.value.files);
     const existingParsedByName = new Map(uploadedFileContents.value.map((file) => [file.name, file]));
     const acceptedNames: string[] = [];
     const skippedFiles: string[] = [];
-    const binarySkillFiles: string[] = [];
+    const parsedFiles: string[] = [];
+    const partialFiles: string[] = [];
+    const failedFiles: string[] = [];
 
     for (const file of fileList) {
       if (existingFileNames.has(file.name)) continue;
-      const isTextFile = file.type.startsWith('text/') || TEXT_FILE_PATTERN.test(file.name);
-      const isDocxFile = DOCX_FILE_PATTERN.test(file.name);
-      const isSkillParseFile = PARSE_WITH_SKILL_FILE_PATTERN.test(file.name);
-      if (!isTextFile && !isDocxFile && !isSkillParseFile) {
+      if (!SUPPORTED_INPUT_FILE_PATTERN.test(file.name) && !file.type.startsWith('text/') && !file.type.startsWith('image/')) {
         skippedFiles.push(file.name);
         continue;
       }
+      if (file.size > MAX_UPLOAD_FILE_BYTES) {
+        skippedFiles.push(`${file.name}（超过 ${Math.round(MAX_UPLOAD_FILE_BYTES / 1024 / 1024)}MB）`);
+        continue;
+      }
+
+      acceptedNames.push(file.name);
+      existingFileNames.add(file.name);
+      existingParsedByName.set(file.name, {
+        name: file.name,
+        text: '',
+        mimeType: file.type || 'application/octet-stream',
+        extension: file.name.split('.').pop()?.toLowerCase() || '',
+        status: 'partial',
+        summary: '正在解析文件...',
+        warnings: [],
+      });
+      input.value.files = [...input.value.files, file.name];
+      uploadedFileContents.value = input.value.files
+        .map((name) => existingParsedByName.get(name))
+        .filter(Boolean) as UploadedFileContent[];
+      syncToProject();
 
       try {
-        acceptedNames.push(file.name);
-        existingFileNames.add(file.name);
-        if (isSkillParseFile) {
-          existingParsedByName.set(file.name, {
-            name: file.name,
-            text: '',
-            dataBase64: await fileToBase64(file),
-            mimeType: file.type || 'application/octet-stream',
-            extension: file.name.split('.').pop()?.toLowerCase() || '',
-          });
-          binarySkillFiles.push(file.name);
-          continue;
+        const dataBase64 = await fileToBase64(file);
+        const response = await inputFileApi.parse({
+          filename: file.name,
+          dataBase64,
+          mimeType: file.type || 'application/octet-stream',
+          textModelId: selectedTextModelId.value,
+        });
+
+        if (!response.success || !response.data) {
+          throw new Error(response.message || '文件解析失败');
         }
 
-        const text = isDocxFile ? await readDocxText(file) : await file.text();
-        const clippedText = text.length > MAX_FILE_TEXT_CHARS
-          ? `${text.slice(0, MAX_FILE_TEXT_CHARS)}\n\n[文件内容较长，已截取前 ${MAX_FILE_TEXT_CHARS} 字符]`
-          : text;
-        if (clippedText.trim()) {
-          existingParsedByName.set(file.name, {
-            name: file.name,
-            text: clippedText.trim(),
-            mimeType: file.type || 'text/plain',
-            extension: file.name.split('.').pop()?.toLowerCase() || '',
-          });
-        }
-      } catch {
-        skippedFiles.push(file.name);
+        const parsed = response.data as ParsedInputFile;
+        const clippedText = parsed.text.length > MAX_FILE_TEXT_CHARS
+          ? `${parsed.text.slice(0, MAX_FILE_TEXT_CHARS)}\n\n[文件内容较长，已截取前 ${MAX_FILE_TEXT_CHARS} 字符]`
+          : parsed.text;
+        existingParsedByName.set(file.name, {
+          name: parsed.name || file.name,
+          text: clippedText.trim(),
+          mimeType: parsed.mimeType || file.type || 'application/octet-stream',
+          extension: parsed.extension || file.name.split('.').pop()?.toLowerCase() || '',
+          kind: parsed.kind,
+          status: parsed.status,
+          summary: parsed.summary,
+          warnings: parsed.warnings || [],
+          metadata: parsed.metadata || {},
+        });
+        if (parsed.status === 'parsed') parsedFiles.push(file.name);
+        else if (parsed.status === 'partial') partialFiles.push(file.name);
+        else failedFiles.push(file.name);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '文件解析失败';
+        existingParsedByName.set(file.name, {
+          name: file.name,
+          text: '',
+          mimeType: file.type || 'application/octet-stream',
+          extension: file.name.split('.').pop()?.toLowerCase() || '',
+          kind: 'unsupported',
+          status: 'failed',
+          summary: message,
+          warnings: [message],
+        });
+        failedFiles.push(file.name);
       }
+
+      uploadedFileContents.value = input.value.files
+        .map((name) => existingParsedByName.get(name))
+        .filter(Boolean) as UploadedFileContent[];
+      processedInputContent.value = '';
+      inputEnhancementSummary.value = null;
+      syncToProject();
     }
 
-    input.value.files = [...input.value.files, ...acceptedNames];
     uploadedFileContents.value = input.value.files
       .map((name) => existingParsedByName.get(name))
       .filter(Boolean) as UploadedFileContent[];
     processedInputContent.value = '';
+    inputEnhancementSummary.value = null;
 
-    const readableAddedCount = acceptedNames.length - binarySkillFiles.length;
-    pushLog(readableAddedCount > 0
-      ? `已读取 ${readableAddedCount} 个资料文件，文件正文将进入输入阶段处理流。`
-      : `已记录 ${input.value.files.length} 个资料文件。`);
-
-    if (binarySkillFiles.length > 0) {
-      pushLog(`已接收 ${binarySkillFiles.join('、')}，将交给可用的文件解析 Skill 处理。`);
+    if (acceptedNames.length > 0) {
+      pushLog(`已接收 ${acceptedNames.length} 个资料文件：${[
+        parsedFiles.length ? `${parsedFiles.length} 个已解析` : '',
+        partialFiles.length ? `${partialFiles.length} 个部分解析` : '',
+        failedFiles.length ? `${failedFiles.length} 个解析失败` : '',
+      ].filter(Boolean).join('，') || '等待解析' }。`);
     }
 
     if (skippedFiles.length > 0) {
-      pushLog(`以下文件暂未解析正文：${skippedFiles.join('、')}。`);
+      pushLog(`以下文件暂未接收：${skippedFiles.join('、')}。`);
+      toastStore.warning('部分文件未接收', skippedFiles.slice(0, 3).join('、'));
     }
 
     syncToProject();
@@ -4977,6 +5198,7 @@ export const useAgentStore = defineStore('agent', () => {
     input.value.files = input.value.files.filter((name) => name !== fileName);
     uploadedFileContents.value = uploadedFileContents.value.filter((file) => file.name !== fileName);
     processedInputContent.value = '';
+    inputEnhancementSummary.value = null;
     pushLog(`已删除上传文件：${fileName}`);
     syncToProject();
   }
@@ -4984,7 +5206,7 @@ export const useAgentStore = defineStore('agent', () => {
   async function fetchPrompts() {
     try {
       const response = await promptApi.getAll();
-      if (response.success && response.data && response.data.length > 0) {
+      if (response.success && Array.isArray(response.data)) {
         const apiBaseUrl = (import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
         const resolvePreviewUrl = (url?: string | null) => {
           if (!url) return '';
@@ -4992,7 +5214,7 @@ export const useAgentStore = defineStore('agent', () => {
           if (url.startsWith('/generated-images/')) return `${apiBaseUrl}${url}`;
           return url;
         };
-        prompts.value = response.data.map((p: any) => ({
+        const serverPrompts = response.data.map((p: any) => ({
           id: String(p.id),
           title: p.title,
           scene: p.scene || '',
@@ -5000,6 +5222,12 @@ export const useAgentStore = defineStore('agent', () => {
           previewUrl: resolvePreviewUrl(p.preview_url),
           updatedAt: new Date(p.updated_at || p.created_at).getTime()
         }));
+        prompts.value = serverPrompts;
+
+        if (selectedPromptId.value && !serverPrompts.some((prompt) => prompt.id === selectedPromptId.value)) {
+          selectedPromptId.value = '';
+          persistCurrentSelectionToActiveProject();
+        }
       }
     } catch (error) {
       console.error('加载提示词失败，使用默认数据:', error);
@@ -5040,8 +5268,8 @@ export const useAgentStore = defineStore('agent', () => {
   async function fetchTemplates() {
     try {
       const response = await templateApi.getAll();
-      if (response.success && response.data && response.data.length > 0) {
-        templates.value = response.data.map((t: any) => ({
+      if (response.success && Array.isArray(response.data)) {
+        const serverTemplates = response.data.map((t: any) => ({
           id: String(t.id),
           name: t.name,
           category: t.category || '',
@@ -5057,6 +5285,17 @@ export const useAgentStore = defineStore('agent', () => {
             accent: t.accent || '#334155'
           })
         }));
+        templates.value = serverTemplates;
+
+        if (selectedTemplate.value) {
+          const latestTemplate = serverTemplates.find((template) => template.id === selectedTemplate.value?.id);
+          if (latestTemplate) {
+            selectedTemplate.value = snapshotTemplateAsset(latestTemplate);
+            persistCurrentSelectionToActiveProject();
+          } else {
+            clearGalleryTemplate();
+          }
+        }
       }
     } catch (error) {
       console.error('加载模板失败，使用默认数据', error);
@@ -5288,6 +5527,8 @@ export const useAgentStore = defineStore('agent', () => {
     enabledSkills,
     prompts,
     inputProcessSteps,
+    uploadedFileContents,
+    inputEnhancementSummary,
     pptProjects,
     templates,
     selectedTemplate,
@@ -5347,6 +5588,7 @@ export const useAgentStore = defineStore('agent', () => {
     deleteSlideImage,
     deleteSvgPage,
     updateSvgPageText,
+    exportReadiness,
     retryingPageNumbers,
     runLayout,
     runOutline,

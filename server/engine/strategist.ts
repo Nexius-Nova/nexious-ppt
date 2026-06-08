@@ -2,6 +2,9 @@ import type { DesignSpec, SpecSlide, SkillExtension } from './spec.js';
 import { CANVAS_FORMATS, normalizeColors, normalizeTypography } from './spec.js';
 
 type TemplatePreviewSlide = { title: string; layout: string; description?: string; svg?: string; pageNumber?: number; visualSummary?: string };
+export interface StrategistPromptContext {
+  chartCatalog?: string;
+}
 const MAX_TEMPLATE_SVG_SNIPPET_CHARS = 1600;
 const templatePreviewSummaryCache = new Map<string, string>();
 
@@ -72,7 +75,7 @@ function getPreferredMode(tone: string): DesignSpec['visualTheme']['mode'] {
   return MODE_BY_TONE[tone] || 'versatile';
 }
 
-export function buildStrategistPrompt(input: StrategistInput): { system: string; user: string } {
+export function buildStrategistPrompt(input: StrategistInput, context: StrategistPromptContext = {}): { system: string; user: string } {
   const canvas = CANVAS_FORMATS.ppt169;
   const selectedTemplate = sanitizeTemplateAsset(input.templateAsset);
   const safeInput = { ...input, templateAsset: selectedTemplate };
@@ -88,7 +91,7 @@ export function buildStrategistPrompt(input: StrategistInput): { system: string;
     strategistPrompt: s.instruction || undefined,
   }));
 
-  const system = `你是 PPT Master 流程中的 Strategist。你的任务是把用户输入转换为可执行的 PPT 设计规格 JSON，后续 Executor 会逐页生成 SVG 并导出 PowerPoint。
+  const system = `你是 Nexious PPT 流程中的 Strategist。你的任务是把用户输入转换为可执行的 PPT 设计规格 JSON，后续 Executor 会逐页生成 SVG 并导出 PowerPoint。
 
 只输出严格 JSON，不要输出 Markdown，不要解释。JSON 必须符合以下结构：
 {
@@ -165,7 +168,15 @@ ${skillExtensions.length > 0 ? `\n启用的 Skill 扩展：\n${skillExtensions.m
 
 请输出完整 JSON。`;
 
-  return { system, user };
+  const systemWithNexiousCharts = context.chartCatalog
+    ? `${system}
+
+Nexious PPT 图表模板库：
+当页面需要图表、流程、矩阵、时间线、信息图或框架表达时，优先从下列 key 中选择最贴合的 chartHint；没有合适模板时可以留空，但 layout 仍要准确。
+${context.chartCatalog}`
+    : system;
+
+  return { system: systemWithNexiousCharts, user };
 }
 
 export function parseStrategistOutput(raw: string, input: StrategistInput): DesignSpec {

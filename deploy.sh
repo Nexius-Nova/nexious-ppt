@@ -52,7 +52,7 @@ ensure_env_file() {
     -e "s|^VITE_API_URL=.*|VITE_API_URL=${PUBLIC_BASE_URL}|" \
     -e "s|^STORAGE_ROOT=.*|STORAGE_ROOT=${STORAGE_ROOT}|" \
     .env
-  echo "已创建 .env，请补齐数据库、JWT、ENCRYPTION_KEY、模型和邮件配置后重新运行部署脚本。"
+  echo "已创建 .env，请补齐数据库、JWT、ENCRYPTION_KEY、模型、Redis、Resend 邮件等配置后重新运行部署脚本。"
   exit 1
 }
 
@@ -81,11 +81,12 @@ ensure_python_runtime() {
   venv_dir="$(resolve_python_venv_dir "${app_dir}")"
 
   if command -v apt-get >/dev/null 2>&1; then
-    echo "==> 安装 Python 与 SVG/PPTX 系统依赖"
+    echo "==> 安装 Python、文件解析、SVG/PPTX 导出系统依赖"
     run_sudo apt-get update
     run_sudo apt-get install -y \
       build-essential \
       pkg-config \
+      pandoc \
       python3 \
       python3-dev \
       python3-pip \
@@ -98,6 +99,12 @@ ensure_python_runtime() {
       libgdk-pixbuf-2.0-0 \
       libgdk-pixbuf-2.0-dev \
       libffi-dev \
+      libxml2-dev \
+      libxslt1-dev \
+      zlib1g-dev \
+      libjpeg-dev \
+      libopenjp2-7 \
+      libopenjp2-7-dev \
       shared-mime-info
   fi
 
@@ -108,7 +115,7 @@ ensure_python_runtime() {
     python3 -m venv "${venv_dir}"
   fi
 
-  echo "==> 安装 PPTX 导出 Python 依赖"
+  echo "==> 安装 PPT 文件解析、网页转 Markdown、SVG 质量检查、公式渲染、动画 PPTX 导出依赖"
   "${venv_dir}/bin/python" -m pip install --upgrade pip
   "${venv_dir}/bin/python" -m pip install -r "${app_dir}/server/requirements.txt"
 
@@ -145,7 +152,7 @@ deploy_here() {
 
   corepack enable >/dev/null 2>&1 || true
 
-  echo "==> 安装依赖"
+  echo "==> 安装 Node 依赖"
   pnpm install --frozen-lockfile
 
   ensure_python_runtime "${app_dir}"
@@ -200,7 +207,7 @@ deploy_remote() {
     -e "${rsync_ssh}" \
     ./ "${ssh_target}:${app_dir}/"
 
-  echo "==> 在服务器执行本机部署"
+  echo "==> 在服务器执行部署"
   ssh -p "${deploy_port}" "${ssh_target}" \
     "cd '${app_dir}' && APP_DIR='${app_dir}' APP_NAME='${APP_NAME}' PM2_APP_NAME='${PM2_APP_NAME}' DOMAIN='${DOMAIN}' APP_PORT='${APP_PORT}' NGINX_PORT='${NGINX_PORT}' STORAGE_ROOT='${STORAGE_ROOT}' PUBLIC_BASE_URL='${PUBLIC_BASE_URL}' CORS_ORIGINS='${CORS_ORIGINS}' PYTHON_VENV_DIR='${PYTHON_VENV_DIR}' bash deploy.sh"
 }

@@ -13,18 +13,27 @@ import {
   buildExecutorSystemPrompt,
   buildSpecLock,
   buildStrategistPrompt,
+  buildSvgQualityRepairPrompt,
   calculateImageSlot,
   cleanSvgOutput,
   ensureImageUsedInSvg,
+  finalizeSvgQuality,
   parseStrategistOutput,
+  summarizeSvgQualityIssues,
 } from '../engine/index.js';
 import { streamText } from './textModel.js';
 import { generateImage, persistDataImage } from '../routes/ai.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { DesignSpec, ImageSlot, SpecLock, SpecSlide, StrategistInput } from '../engine/index.js';
+import { buildSlideImagePrompt, inferImageCompositionIntent } from '../engine/imageComposition.js';
 import { exportWithNexiousPpt, type PptExportOptions, type PptExportPage } from '../engine/ppt-exporter.js';
 import { generatedExportsRoot } from '../utils/storage.js';
 import { deriveWorkflowTransition, workflowStepProgress, workflowStepStatus } from './workflowStateMachine.js';
+import {
+  getChartCatalog,
+  getChartSvg,
+  getIconGuide,
+} from './pptEnhancements.js';
 
 type QueuedJobKind = 'generate' | 'export';
 type QueuedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -157,11 +166,44 @@ let redisQueueInitPromise: Promise<boolean> | null = null;
 let redisQueuePrecheckFailed = false;
 let redisQueuePrecheckRetryAt = 0;
 let redisQueuePrecheckWarningLogged = false;
+const redisConnectionWarningAt = new Map<string, number>();
 const activeRedisJobs = new Map<string, QueuedJob>();
 const projectStateQueueSyncAt = new Map<string, number>();
 
 function redisRetryStrategy(times: number) {
   return Math.min(Math.max(times, 1) * 500, 5000);
+}
+
+function formatRedisError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message?: unknown }).message || error);
+  }
+  return String(error);
+}
+
+function logRedisWarning(label: string, error: unknown, intervalMs = 30 * 1000) {
+  const now = Date.now();
+  const lastAt = redisConnectionWarningAt.get(label) || 0;
+  if (now - lastAt < intervalMs) return;
+  redisConnectionWarningAt.set(label, now);
+  console.warn(`${label}不可用：${formatRedisError(error)}`);
+}
+
+function attachRedisConnectionLogger(client: Redis, label: string) {
+  client.on('error', (error) => {
+    logRedisWarning(label, error);
+  });
+  client.on('ready', () => {
+    redisConnectionWarningAt.delete(label);
+  });
+  return client;
+}
+
+function attachBullMqErrorLogger(target: Queue | Worker, label: string) {
+  target.on('error', (error) => {
+    logRedisWarning(label, error);
+  });
 }
 
 function redisSnapshotKey(id: string) {
@@ -196,13 +238,13 @@ function shouldUseRedisQueue() {
   return Boolean(USE_REDIS_QUEUE && redisQueueReady && redisConnection && generateQueue && exportQueue);
 }
 
-function createRedisConnection() {
-  return new Redis(REDIS_URL, {
+function createRedisConnection(label = 'Redis 队列连接') {
+  return attachRedisConnectionLogger(new Redis(REDIS_URL, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
     connectTimeout: 5000,
     retryStrategy: redisRetryStrategy,
-  });
+  }), label);
 }
 
 function createBullRedisOptions() {
@@ -245,7 +287,7 @@ async function precheckRedisQueue() {
   redisQueuePrecheckFailed = false;
   redisQueuePrecheckRetryAt = 0;
 
-  const probe = createRedisConnection();
+  const probe = createRedisConnection('Redis 队列预检连接');
   try {
     await probe.ping();
     const info = parseRedisInfo(await probe.info());
@@ -288,7 +330,7 @@ async function precheckRedisQueue() {
         ? error
         : new Error('生产环境 Redis 队列预检失败');
     }
-    console.warn('Redis 队列预检失败，已降级到内存队列，30 秒后会自动重试。', error);
+    logRedisWarning('Redis 队列预检失败，已降级到内存队列，30 秒后会自动重试。', error);
     return false;
   } finally {
     await probe.quit().catch(() => probe.disconnect());
@@ -364,7 +406,7 @@ async function initializeRedisQueue() {
   try {
     if (!await precheckRedisQueue()) return false;
 
-    redisConnection = createRedisConnection();
+    redisConnection = createRedisConnection('Redis 队列主连接');
 
     generateQueue = new Queue(bullQueueName('generate'), {
       connection: createBullRedisOptions(),
@@ -376,6 +418,8 @@ async function initializeRedisQueue() {
       prefix: REDIS_KEY_PREFIX,
       skipVersionCheck: true,
     });
+    attachBullMqErrorLogger(generateQueue, 'BullMQ 生成队列');
+    attachBullMqErrorLogger(exportQueue, 'BullMQ 导出队列');
 
     generateWorker = new Worker(
       bullQueueName('generate'),
@@ -417,8 +461,8 @@ async function initializeRedisQueue() {
       }
     );
 
-    generateWorker.on('error', (error) => console.warn('BullMQ generation worker error', error));
-    exportWorker.on('error', (error) => console.warn('BullMQ export worker error', error));
+    attachBullMqErrorLogger(generateWorker, 'BullMQ 生成 worker');
+    attachBullMqErrorLogger(exportWorker, 'BullMQ 导出 worker');
 
     await redisConnection.ping();
     redisQueueReady = true;
@@ -432,7 +476,7 @@ async function initializeRedisQueue() {
         ? error
         : new Error('生产环境 Redis 队列初始化失败');
     }
-    console.warn('Redis 队列不可用，已回退到内存队列。', error);
+    logRedisWarning('Redis 队列不可用，已回退到内存队列。', error);
     await shutdownRedisQueue().catch(() => {});
     return false;
   }
@@ -927,7 +971,8 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   if (resumeStage === 'outline') {
     await updateJob(job, { phase: 'outline', progress: 8, message: '正在生成大纲' });
     await assertJobActive(job);
-    const { system, user } = buildStrategistPrompt(input);
+    const chartCatalog = await getChartCatalog();
+    const { system, user } = buildStrategistPrompt(input, { chartCatalog });
     const streamedSlideIds = new Set<string>();
     let partialOutline: SpecSlide[] = [];
     let lastOutlineJobUpdateAt = 0;
@@ -1045,14 +1090,7 @@ function slideNeedsImageServer(slide: SpecSlide) {
 }
 
 function imagePromptForSlide(slide: SpecSlide, spec?: DesignSpec) {
-  const basePrompt = slide.visualPrompt || [slide.title, ...(slide.bullets || [])].filter(Boolean).join('，');
-  if (!spec) return basePrompt;
-  const slot = calculateImageSlot(slide, spec);
-  return [
-    basePrompt,
-    `最终用于第 ${slide.pageNumber} 页 PPT 图片槽位，槽位坐标 x=${slot.x}, y=${slot.y}, width=${slot.width}, height=${slot.height}, 比例 ${slot.aspectRatio.toFixed(2)}:1，位置 ${slot.placement}`,
-    '请按该槽位比例构图，主体居中并填满画面，避免大面积留白、边缘裁切重要内容、文字水印和截图边框'
-  ].join('。');
+  return buildSlideImagePrompt(slide, spec ? calculateImageSlot(slide, spec) : undefined);
 }
 
 function findReadyServerImage(images: any[], slideId: string) {
@@ -1120,7 +1158,11 @@ async function generateSlideImageForQueue(
   await assertJobActive(job);
   const imageSlot = calculateImageSlot(slide, spec);
   const prompt = imagePromptForSlide(slide, spec);
-  const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, job.payload.input.imageStyle, config.baseUrl, imageSlot);
+  const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, job.payload.input.imageStyle, config.baseUrl, {
+    ...imageSlot,
+    layout: slide.layout,
+    intent: inferImageCompositionIntent(slide),
+  });
   await assertJobActive(job);
   const url = await persistDataImage(rawImageUrl, slide.id);
 
@@ -1402,8 +1444,11 @@ async function generatePageSvg(
   } as any;
 
   const imageSlot = calculateImageSlot(slide, spec);
-  const systemPrompt = buildExecutorSystemPrompt(slimSpec, slimLock);
-  const userPrompt = buildExecutorPagePrompt(slide, slimSpec, slimLock, imageUrl, imageSlot);
+  const iconGuide = await getIconGuide(slimLock.iconStyle);
+  const chartTemplateSvg = await getChartSvg(slimLock.pageCharts[pageKey] || slide.chartHint);
+  const executorContext = { iconGuide, chartTemplateSvg };
+  const systemPrompt = buildExecutorSystemPrompt(slimSpec, slimLock, executorContext);
+  const userPrompt = buildExecutorPagePrompt(slide, slimSpec, slimLock, imageUrl, imageSlot, executorContext);
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1412,11 +1457,23 @@ async function generatePageSvg(
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ]);
-      const svg = ensureImageUsedInSvg(cleanSvgOutput(output), slide, spec, imageUrl);
-      if (!svg || !svg.includes('<svg') || !svg.includes('</svg>')) {
+      const rawSvg = ensureImageUsedInSvg(cleanSvgOutput(output), slide, spec, imageUrl);
+      if (!rawSvg || !rawSvg.includes('<svg') || !rawSvg.includes('</svg>')) {
         throw new Error('AI 返回的 SVG 内容不完整');
       }
-      return svg;
+      let quality = finalizeSvgQuality(rawSvg, spec, slide, imageSlot, imageUrl);
+      if (quality.blockingIssues.length) {
+        const repairOutput = await streamText(provider, apiKey, baseUrl, model, [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, imageSlot, quality.blockingIssues, imageUrl) },
+        ]);
+        const repairedSvg = ensureImageUsedInSvg(cleanSvgOutput(repairOutput), slide, spec, imageUrl);
+        quality = finalizeSvgQuality(repairedSvg || quality.svg, spec, slide, imageSlot, imageUrl);
+      }
+      if (quality.blockingIssues.length && attempt < 3) {
+        throw new Error(`页面质量检查未通过：${summarizeSvgQualityIssues(quality.blockingIssues, 3)}`);
+      }
+      return quality.svg;
     } catch (error) {
       lastError = error;
     }

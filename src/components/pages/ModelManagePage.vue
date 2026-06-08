@@ -36,6 +36,9 @@ type ManagedModel = TextModelConfig | ImageModelConfig;
 
 const apiKeyStore = useApiKeyStore();
 const toastStore = useToastStore();
+const emit = defineEmits<{
+  changed: [];
+}>();
 const {
   textModels,
   imageModels,
@@ -64,6 +67,29 @@ const testingModel = ref<string | null>(null);
 
 const currentModels = computed<ManagedModel[]>(() => activeTab.value === 'text' ? textModels.value : imageModels.value);
 const currentActiveModel = computed<ManagedModel | undefined>(() => activeTab.value === 'text' ? activeTextModel.value : activeImageModel.value);
+const modelHealthItems = computed(() => [
+  {
+    id: 'text',
+    label: '文本模型',
+    value: textModels.value.length,
+    ready: textModels.value.some((model) => model.hasKey),
+    icon: Cpu
+  },
+  {
+    id: 'image',
+    label: '图片模型',
+    value: imageModels.value.length,
+    ready: imageModels.value.some((model) => model.hasKey),
+    icon: Image
+  },
+  {
+    id: 'default',
+    label: '默认连接',
+    value: [activeTextModel.value, activeImageModel.value].filter(Boolean).length,
+    ready: Boolean(activeTextModel.value && activeImageModel.value),
+    icon: CheckCircle2
+  }
+]);
 
 onMounted(() => {
   apiKeyStore.fetchApiKeys();
@@ -140,6 +166,7 @@ async function saveModel() {
   }
 
   closeModal();
+  emit('changed');
 }
 
 function deleteModel(model: ManagedModel) {
@@ -165,6 +192,7 @@ async function confirmDeleteModel() {
 
   showDeleteModal.value = false;
   modelToDelete.value = null;
+  emit('changed');
 }
 
 async function setActiveModel(model: ManagedModel) {
@@ -173,6 +201,7 @@ async function setActiveModel(model: ManagedModel) {
   } else {
     await apiKeyStore.setActiveImageModel(model.id);
   }
+  emit('changed');
 }
 
 async function testModel(model: ManagedModel, type: ModelType) {
@@ -224,6 +253,18 @@ function getProviderLabel(model: ManagedModel) {
         <span class="model-hero__eyebrow">模型管理</span>
         <h2>管理 PPT 生成所需的模型连接</h2>
         <p>文本模型负责理解和生成内容，图像模型负责页面配图。这里只管理连接，不参与工作流风格选择。</p>
+      </div>
+      <div class="model-health">
+        <div
+          v-for="item in modelHealthItems"
+          :key="item.id"
+          class="model-health__item"
+          :class="{ 'model-health__item--ready': item.ready }"
+        >
+          <component :is="item.icon" :size="15" />
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </div>
       </div>
       <div class="model-hero__status" :class="{ 'model-hero__status--ready': isFullyConfigured }">
         <component :is="isFullyConfigured ? ShieldCheck : AlertTriangle" :size="20" />
@@ -436,10 +477,10 @@ function getProviderLabel(model: ManagedModel) {
 
 .model-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
-  gap: 16px;
-  align-items: stretch;
-  padding: 20px;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 380px) minmax(220px, 300px);
+  gap: 12px;
+  align-items: center;
+  padding: 14px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-surface);
@@ -451,7 +492,7 @@ function getProviderLabel(model: ManagedModel) {
 
 .model-hero__eyebrow {
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: 5px;
   color: var(--color-accent);
   font-size: 12px;
   font-weight: 700;
@@ -460,24 +501,65 @@ function getProviderLabel(model: ManagedModel) {
 .model-hero h2 {
   margin: 0;
   color: var(--color-text);
-  font-size: 24px;
-  line-height: 1.25;
+  font-size: 18px;
+  line-height: 1.3;
 }
 
 .model-hero p {
   max-width: 660px;
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.model-health {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.model-health__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  color: var(--color-warning);
+  background: var(--color-panel);
+}
+
+.model-health__item--ready {
+  color: var(--color-success);
+}
+
+.model-health__item span {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-health__item strong {
+  color: var(--color-text);
+  font-family: var(--font-mono);
   font-size: 13px;
-  line-height: 1.7;
 }
 
 .model-hero__status {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
-  padding: 16px;
+  min-height: 52px;
+  padding: 10px 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   color: var(--color-warning);
@@ -496,7 +578,7 @@ function getProviderLabel(model: ManagedModel) {
 
 .model-hero__status strong {
   color: var(--color-text);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .model-hero__status span {

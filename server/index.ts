@@ -19,6 +19,7 @@ import workflowRoutes from './routes/workflows.js';
 import versionRoutes from './routes/versions.js';
 import generateRoutes from './routes/generate.js';
 import generationJobRoutes from './routes/generationJobs.js';
+import inputFileRoutes from './routes/inputFiles.js';
 import { shutdownRedisQueue } from './services/generationQueue.js';
 import { generatedAvatarsRoot, generatedImagesRoot } from './utils/storage.js';
 
@@ -118,6 +119,7 @@ app.use('/api/workflows', workflowRoutes);
 app.use('/api/versions', versionRoutes);
 app.use('/api/generation-jobs', generationJobRoutes);
 app.use('/api/generate', generateRoutes);
+app.use('/api/input-files', inputFileRoutes);
 
 app.use((req, res) => {
   const requestId = (req as any).requestId || res.getHeader('X-Request-Id');

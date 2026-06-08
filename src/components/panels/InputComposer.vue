@@ -5,10 +5,11 @@ import UiCard from '@/components/ui/UiCard.vue';
 import UiField from '@/components/ui/UiField.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import UiTextarea from '@/components/ui/UiTextarea.vue';
+import UiButton from '@/components/ui/UiButton.vue';
 import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import TemplatePreviewDeck from '@/components/common/TemplatePreviewDeck.vue';
 import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
-import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, ImageModelConfig, InputProcessStep, PromptDefinition, PptTemplate, SkillDefinition, TemplateAsset, TemplateAssetSettings, TextModelConfig } from '@/types/agent';
+import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, ImageModelConfig, InputProcessStep, PromptDefinition, PptTemplate, SkillDefinition, TemplateAsset, TemplateAssetSettings, TextModelConfig, UploadedFileContent } from '@/types/agent';
 
 type TemplatePreviewSlide = NonNullable<TemplateAssetSettings['previewSlides']>[number];
 type ComposerModule = 'prompt' | 'template' | 'skills' | 'config';
@@ -27,6 +28,9 @@ const props = defineProps<{
   selectedImageModelId: string | null;
   skills: SkillDefinition[];
   inputProcessSteps: InputProcessStep[];
+  uploadedFileContents: UploadedFileContent[];
+  resourcesSyncing?: boolean;
+  lastResourceSyncedAt?: number;
 }>();
 
 const emit = defineEmits<{
@@ -40,6 +44,7 @@ const emit = defineEmits<{
   'toggle-skill': [skillId: string];
   attach: [files: FileList | null];
   'remove-file': [fileName: string];
+  'open-resource': [module: ComposerModule];
   run: [];
 }>();
 
@@ -47,6 +52,8 @@ const fileTypeIcons: Record<string, any> = {
   image: ImageIcon,
   default: FileText
 };
+
+const fileStatusByName = computed(() => new Map(props.uploadedFileContents.map((file) => [file.name, file])));
 
 const previewingTemplateSlide = ref<{ slide: TemplatePreviewSlide; index: number } | null>(null);
 const activeModule = ref<ComposerModule | null>(null);
@@ -91,6 +98,9 @@ const fileCount = computed(() => props.modelValue.files.length);
 const contentPreview = computed(() =>
   hasContent.value ? compactText(props.modelValue.content, 120) : '等待输入资料、目标或会议纪要'
 );
+const completedInputStepCount = computed(() =>
+  props.inputProcessSteps.filter((step) => ['done', 'skipped'].includes(step.status)).length
+);
 const readinessScore = computed(() => {
   const steps = props.inputProcessSteps;
   if (steps.some((step) => step.status !== 'idle')) {
@@ -121,6 +131,25 @@ const activeModuleSubtitle = computed(() => {
   if (activeModule.value === 'template') return '选择 PPT 的视觉参考';
   if (activeModule.value === 'skills') return '选择本次输入阶段要调用的能力';
   return '调整页数、摘要、语言、图像和导出动画';
+});
+
+const resourceSyncText = computed(() => {
+  if (props.resourcesSyncing) return '正在同步资源';
+  if (!props.lastResourceSyncedAt) return '资源待同步';
+  return `已同步 ${new Date(props.lastResourceSyncedAt).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit'
+  })}`;
+});
+
+const activeResourceText = computed(() => {
+  const items = [
+    selectedPrompt.value ? `提示词：${selectedPrompt.value.title}` : '',
+    props.selectedTemplate ? `模板：${props.selectedTemplate.name}` : '',
+    selectedSkillCount.value ? `Skill：${selectedSkillCount.value}` : '',
+    activeConfigCount.value ? `配置：${activeConfigCount.value}` : ''
+  ].filter(Boolean);
+  return items.length ? items.join(' · ') : '使用默认配置';
 });
 
 const skillGroups = computed(() =>
@@ -179,8 +208,8 @@ const autoOptionByKey: Record<ConfigOptionKey, { label: string; value: string; d
   tone: { label: 'AI 自动', value: 'auto', description: '由场景决定表达风格' },
   imageStyle: { label: 'AI 自动', value: 'auto', description: '由页面内容决定图像方向' },
   skillIntensity: { label: 'AI 自动', value: '0', description: '由 AI 判断是否增强' },
-  animationEnabled: { label: '默认关闭', value: 'auto', description: '未明确选择时不添加 PPTX 动画' },
-  animationEffect: { label: '默认无动画', value: 'auto', description: '启用动画后再选择具体入场效果' }
+  animationEnabled: { label: 'AI 自动', value: 'auto', description: '输入提到动画时自动启用 PPTX 动画' },
+  animationEffect: { label: 'AI 自动', value: 'auto', description: '启用动画后自动选择适合页面元素的入场效果' }
 };
 
 function getParameterOptions(key: ConfigOptionKey): Array<{ label: string; value: string; description?: string }> {
@@ -198,6 +227,29 @@ function getFileIcon(fileName: string) {
     return fileTypeIcons.image;
   }
   return fileTypeIcons.default;
+}
+
+function fileInfo(fileName: string) {
+  return fileStatusByName.value.get(fileName);
+}
+
+function fileStatusClass(fileName: string) {
+  const status = fileInfo(fileName)?.status || 'partial';
+  return `input-composer__file-tag--${status}`;
+}
+
+function fileStatusLabel(fileName: string) {
+  const file = fileInfo(fileName);
+  if (!file) return '等待解析';
+  if (file.status === 'parsed') return file.kind === 'image' ? '已识别' : '已解析';
+  if (file.status === 'failed') return '解析失败';
+  return '部分解析';
+}
+
+function fileStatusTitle(fileName: string) {
+  const file = fileInfo(fileName);
+  if (!file) return '文件正在等待解析';
+  return [file.summary, ...(file.warnings || [])].filter(Boolean).join('\n') || fileStatusLabel(fileName);
 }
 
 function updateParameter(key: ConfigOptionKey, value: string) {
@@ -320,94 +372,84 @@ function handleFileChange(event: Event) {
           </span>
           <div>
             <span>AI PPT Agent</span>
-            <h2>把资料、目标或文件发给我</h2>
-            <p>我会先理解输入，再整理资料并进入 PPT 大纲生成。</p>
+            <h2>把资料发给我，我来生成 PPT</h2>
+            <p>{{ workflowSummary }}</p>
           </div>
           <strong>{{ readinessScore }}%</strong>
         </header>
 
-        <div class="agent-thread__messages">
-          <article class="agent-message agent-message--assistant">
-            <span class="agent-message__avatar">
-              <Sparkles :size="15" />
+        <section class="input-brief" aria-label="当前输入状态">
+          <div class="input-brief__main">
+            <strong>{{ fileCount ? `${fileCount} 个附件` : hasContent ? '已输入需求' : '等待输入' }}</strong>
+            <span>{{ contentPreview }}</span>
+          </div>
+          <div class="input-brief__meta">
+            <span :class="{ 'input-brief__sync--loading': resourcesSyncing }">
+              <Loader2 v-if="resourcesSyncing" :size="13" class="spin" />
+              <CheckCircle2 v-else :size="13" />
+              {{ resourceSyncText }}
             </span>
-            <div class="agent-message__bubble">
-              <strong>我会按这个顺序处理输入</strong>
-              <p>{{ workflowSummary }}</p>
-            </div>
-          </article>
+            <span>{{ activeResourceText }}</span>
+          </div>
+        </section>
 
-          <article v-if="hasContent || fileCount" class="agent-message agent-message--user">
-            <span class="agent-message__avatar">你</span>
-            <div class="agent-message__bubble">
-              <strong>{{ fileCount ? `${fileCount} 个附件` : '输入需求' }}</strong>
-              <p>{{ contentPreview }}</p>
+        <section class="input-flow-card" aria-label="输入阶段执行轨迹">
+          <header class="input-flow__intro">
+            <div>
+              <span>执行轨迹</span>
+              <h3>输入阶段处理流</h3>
             </div>
-          </article>
+            <strong>{{ completedInputStepCount }}/{{ inputProcessSteps.length }} · {{ readinessScore }}%</strong>
+          </header>
 
-          <article class="agent-message agent-message--assistant agent-message--wide">
-            <span class="agent-message__avatar">
-              <Sparkles :size="15" />
-            </span>
-            <div class="agent-message__bubble">
-              <header class="input-flow__intro">
-                <div>
-                  <span>执行轨迹</span>
-                  <h3>输入阶段处理流</h3>
+          <ol class="input-flow__steps">
+            <li
+              v-for="(step, index) in inputProcessSteps"
+              :key="step.id"
+              class="input-flow-step"
+              :class="`input-flow-step--${step.status}`"
+            >
+              <span class="input-flow-step__rail" aria-hidden="true" />
+              <span class="input-flow-step__icon">
+                <component
+                  :is="inputStepIcon(step)"
+                  :size="16"
+                  :class="{ spin: step.status === 'running' }"
+                />
+              </span>
+              <div class="input-flow-step__body">
+                <div class="input-flow-step__head">
+                  <strong>{{ index + 1 }}. {{ step.title }}</strong>
+                  <span>{{ inputStepStateLabel(step) }} · {{ step.progress }}%</span>
                 </div>
-                <strong>{{ readinessScore }}%</strong>
-              </header>
-
-              <ol class="input-flow__steps">
-                <li
-                  v-for="(step, index) in inputProcessSteps"
-                  :key="step.id"
-                  class="input-flow-step"
-                  :class="`input-flow-step--${step.status}`"
-                >
-                  <span class="input-flow-step__rail" aria-hidden="true" />
-                  <span class="input-flow-step__icon">
-                    <component
-                      :is="inputStepIcon(step)"
-                      :size="16"
-                      :class="{ spin: step.status === 'running' }"
-                    />
-                  </span>
-                  <div class="input-flow-step__body">
-                    <div class="input-flow-step__head">
-                      <strong>{{ index + 1 }}. {{ step.title }}</strong>
-                      <span>{{ inputStepStateLabel(step) }} · {{ step.progress }}%</span>
+                <p>{{ step.detail || step.description }}</p>
+                <div v-if="step.skillName || step.error" class="input-flow-step__meta">
+                  <span v-if="step.skillName">Skill：{{ step.skillName }}</span>
+                  <span v-if="step.error">原因：{{ resultPreview(step.error, 180) }}</span>
+                </div>
+                <div v-if="hasStepResult(step)" class="input-flow-step__result">
+                  <p v-if="step.processedText" class="input-flow-step__processed">
+                    {{ resultPreview(step.processedText, step.id === 'ready' ? 1200 : 420) }}
+                  </p>
+                  <details v-if="step.logs || step.output" class="input-flow-step__details">
+                    <summary>查看执行过程和返回内容</summary>
+                    <div v-if="step.logs" class="input-flow-step__log">
+                      <strong>过程日志</strong>
+                      <pre>{{ resultPreview(step.logs, 700) }}</pre>
                     </div>
-                    <p>{{ step.detail || step.description }}</p>
-                    <div v-if="step.skillName || step.error" class="input-flow-step__meta">
-                      <span v-if="step.skillName">Skill：{{ step.skillName }}</span>
-                      <span v-if="step.error">原因：{{ resultPreview(step.error, 180) }}</span>
+                    <div v-if="step.output" class="input-flow-step__log">
+                      <strong>返回内容</strong>
+                      <pre>{{ resultPreview(step.output, 700) }}</pre>
                     </div>
-                    <div v-if="hasStepResult(step)" class="input-flow-step__result">
-                      <p v-if="step.processedText" class="input-flow-step__processed">
-                        {{ resultPreview(step.processedText, step.id === 'ready' ? 1200 : 420) }}
-                      </p>
-                      <details v-if="step.logs || step.output" class="input-flow-step__details">
-                        <summary>查看执行过程和返回内容</summary>
-                        <div v-if="step.logs" class="input-flow-step__log">
-                          <strong>过程日志</strong>
-                          <pre>{{ resultPreview(step.logs, 700) }}</pre>
-                        </div>
-                        <div v-if="step.output" class="input-flow-step__log">
-                          <strong>返回内容</strong>
-                          <pre>{{ resultPreview(step.output, 700) }}</pre>
-                        </div>
-                      </details>
-                    </div>
-                    <div v-if="step.status === 'running'" class="input-flow-step__bar" aria-hidden="true">
-                      <span :style="{ width: `${step.progress}%` }" />
-                    </div>
-                  </div>
-                </li>
-              </ol>
-            </div>
-          </article>
-        </div>
+                  </details>
+                </div>
+                <div v-if="step.status === 'running'" class="input-flow-step__bar" aria-hidden="true">
+                  <span :style="{ width: `${step.progress}%` }" />
+                </div>
+              </div>
+            </li>
+          </ol>
+        </section>
       </section>
 
       <div class="input-composer__dock">
@@ -443,6 +485,10 @@ function handleFileChange(event: Event) {
                 </div>
               </div>
               <p v-else class="prompt-selector__hint">可为空；选择后会和资料内容一起发送给 AI。</p>
+              <div v-if="!prompts.length" class="resource-empty">
+                <span>暂无提示词，可先到提示词管理中创建。</span>
+                <UiButton size="sm" variant="secondary" @click="$emit('open-resource', 'prompt')">去添加</UiButton>
+              </div>
             </div>
 
             <div v-else-if="activeModule === 'template'" class="template-selector">
@@ -471,6 +517,10 @@ function handleFileChange(event: Event) {
               <p v-else class="template-selector__hint">
                 {{ templateOptions.length ? '未选择时由 AI 自主设计。' : '模板广场暂无模板。' }}
               </p>
+              <div v-if="!templateOptions.length" class="resource-empty">
+                <span>暂无模板，可导入 PPT 或创建模板方案。</span>
+                <UiButton size="sm" variant="secondary" @click="$emit('open-resource', 'template')">去添加</UiButton>
+              </div>
             </div>
 
             <div v-else-if="activeModule === 'skills'" class="skill-picker" aria-label="本次使用的 Skill">
@@ -517,10 +567,17 @@ function handleFileChange(event: Event) {
                   <p v-else class="skill-picker-group__empty">暂无此类 Skill</p>
                 </section>
               </div>
-              <p v-else class="skill-selector__hint">Skill 管理中还没有可选择的 Skill。</p>
+              <div v-else class="resource-empty">
+                <span>Skill 管理中还没有可选择的 Skill。</span>
+                <UiButton size="sm" variant="secondary" @click="$emit('open-resource', 'skills')">去添加</UiButton>
+              </div>
             </div>
 
             <div v-else class="parameter-panel" aria-label="PPT 生成参数">
+              <div v-if="!textModels.length || !imageModels.length" class="resource-empty resource-empty--models">
+                <span>文本模型和图片模型需要至少各配置一个，生成流程才完整。</span>
+                <UiButton size="sm" variant="secondary" @click="$emit('open-resource', 'config')">去配置模型</UiButton>
+              </div>
               <section class="parameter-models" aria-label="当前 PPT 使用的模型">
                 <UiField label="文本模型" hint="仅影响当前 PPT；留空时使用模型管理页的默认文本模型">
                   <UiSelect
@@ -578,9 +635,16 @@ function handleFileChange(event: Event) {
             />
 
             <div v-if="modelValue.files.length" class="input-composer__files">
-              <span v-for="file in modelValue.files" :key="file" class="input-composer__file-tag">
+              <span
+                v-for="file in modelValue.files"
+                :key="file"
+                class="input-composer__file-tag"
+                :class="fileStatusClass(file)"
+                :title="fileStatusTitle(file)"
+              >
                 <component :is="getFileIcon(file)" :size="12" />
-                {{ file }}
+                <span class="input-composer__file-name">{{ file }}</span>
+                <small>{{ fileStatusLabel(file) }}</small>
                 <button type="button" title="删除文件" @click="$emit('remove-file', file)">
                   <X :size="12" />
                 </button>
@@ -594,7 +658,7 @@ function handleFileChange(event: Event) {
                   <input
                     type="file"
                     multiple
-                    accept=".txt,.md,.markdown,.csv,.json,.log,.docx,.pdf,.ppt,.pptx,image/*"
+                    accept=".txt,.md,.markdown,.csv,.json,.log,.html,.htm,.xml,.doc,.docx,.xls,.xlsx,.xlsm,.ppt,.pptx,.pdf,image/*"
                     @change="handleFileChange"
                   />
                 </label>
@@ -695,34 +759,32 @@ function handleFileChange(event: Event) {
 <style scoped>
 .input-composer {
   display: grid;
-  grid-template-rows: minmax(320px, 1fr) auto;
+  grid-template-rows: minmax(260px, 1fr) auto;
   min-height: calc(100vh - 260px);
   background: var(--color-card);
 }
 
 .agent-thread {
   display: grid;
-  gap: 18px;
+  align-content: start;
+  gap: 12px;
   justify-self: center;
-  width: min(880px, 100%);
+  width: min(820px, 100%);
   min-height: 0;
-  padding: 22px 22px 240px;
+  padding: 28px 22px 210px;
 }
 
 .agent-thread__hero {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 14px;
-  background: var(--color-surface);
+  padding: 4px 0 2px;
+  background: transparent;
 }
 
-.agent-thread__bot,
-.agent-message__avatar {
+.agent-thread__bot {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
@@ -732,113 +794,110 @@ function handleFileChange(event: Event) {
 }
 
 .agent-thread__bot {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
 }
 
-.agent-thread__hero div,
-.agent-message__bubble,
-.input-flow__intro div {
+.agent-thread__hero div {
   display: grid;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
 }
 
-.agent-thread__hero span,
-.input-flow__intro span {
+.agent-thread__hero span {
   color: var(--color-accent);
   font-size: 12px;
   font-weight: 800;
 }
 
-.agent-thread__hero h2,
-.input-flow__intro h3 {
+.agent-thread__hero h2 {
   margin: 0;
   color: var(--color-text);
-  font-size: 17px;
+  font-size: 20px;
   font-weight: 850;
   letter-spacing: 0;
 }
 
-.agent-thread__hero p,
-.input-flow__intro p {
+.agent-thread__hero p {
   margin: 0;
   color: var(--color-muted);
   font-size: 13px;
-  line-height: 1.65;
+  line-height: 1.5;
 }
 
-.agent-thread__hero > strong,
-.input-flow__intro > strong {
+.agent-thread__hero > strong {
   color: var(--color-text);
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1;
 }
 
-.agent-thread__messages {
-  display: grid;
-  gap: 14px;
-  min-width: 0;
-}
-
-.agent-message {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-width: 0;
-}
-
-.agent-message--user {
-  justify-content: flex-end;
-}
-
-.agent-message--user .agent-message__avatar {
-  order: 2;
-  color: var(--color-text);
-}
-
-.agent-message__avatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  color: var(--color-muted);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.agent-message__bubble {
-  max-width: min(720px, calc(100% - 42px));
+.input-brief,
+.input-flow-card {
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  padding: 12px 14px;
   background: var(--color-surface);
-  box-shadow: var(--shadow-sm);
 }
 
-.agent-message--user .agent-message__bubble {
-  background: var(--color-accent-soft);
-  border-color: color-mix(in srgb, var(--color-accent) 34%, var(--color-border));
+.input-brief {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
 }
 
-.agent-message--wide .agent-message__bubble {
-  width: min(760px, calc(100% - 42px));
-  max-width: none;
-  padding: 14px;
+.input-brief__main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
-.agent-message__bubble strong {
+.input-brief__main strong {
   color: var(--color-text);
-  font-size: 13px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 850;
 }
 
-.agent-message__bubble p {
-  margin: 0;
+.input-brief__main span {
+  overflow: hidden;
   color: var(--color-muted);
   font-size: 13px;
-  line-height: 1.58;
-  overflow-wrap: anywhere;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.input-brief__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.input-brief__meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.input-brief__sync--loading {
+  color: var(--color-accent-strong) !important;
+  background: var(--color-accent-soft) !important;
+}
+
+.input-flow-card {
+  display: grid;
+  overflow: hidden;
 }
 
 .input-flow__intro {
@@ -848,14 +907,42 @@ function handleFileChange(event: Event) {
   gap: 12px;
   min-width: 0;
   border-bottom: 1px solid var(--color-border);
-  padding-bottom: 12px;
+  padding: 12px;
+}
+
+.input-flow__intro div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.input-flow__intro span {
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.input-flow__intro h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.input-flow__intro strong {
+  color: var(--color-muted);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .input-flow__steps {
   display: grid;
   gap: 0;
   margin: 0;
-  padding: 2px 0 0;
+  padding: 12px;
   list-style: none;
 }
 
@@ -935,8 +1022,7 @@ function handleFileChange(event: Event) {
   padding-bottom: 0;
 }
 
-.input-flow-step__head,
-.input-flow__footer {
+.input-flow-step__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1073,40 +1159,6 @@ function handleFileChange(event: Event) {
   transition: width 0.2s ease;
 }
 
-.input-flow__footer {
-  border-top: 1px solid var(--color-border);
-  padding-top: 12px;
-  color: var(--color-subtle);
-  font-size: 12px;
-}
-
-.input-flow__footer > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.input-flow__footer button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 7px 10px;
-  background: var(--color-card);
-  color: var(--color-text);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
-}
-
-.input-flow__footer button:hover {
-  border-color: var(--color-accent);
-  background: var(--color-accent-soft);
-  color: var(--color-accent-strong);
-}
-
 .input-composer__dock {
   position: sticky;
   bottom: 0;
@@ -1114,7 +1166,7 @@ function handleFileChange(event: Event) {
   display: grid;
   gap: 8px;
   justify-self: center;
-  width: min(880px, 100%);
+  width: min(820px, 100%);
   padding: 10px 22px 14px;
   border-top: 1px solid var(--color-border);
   background: var(--color-card);
@@ -1127,8 +1179,8 @@ function handleFileChange(event: Event) {
 .doubao-composer__box {
   display: grid;
   gap: 8px;
-  border: 1px solid var(--color-accent);
-  border-radius: 20px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 14px;
   padding: 10px 12px;
   background: var(--color-surface);
   box-shadow: var(--shadow-sm);
@@ -1136,16 +1188,16 @@ function handleFileChange(event: Event) {
 }
 
 .doubao-composer__box:focus-within {
-  border-color: var(--color-accent-hover);
-  box-shadow: 0 0 0 3px var(--color-accent-soft);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-soft);
 }
 
 .doubao-composer__textarea {
-  min-height: 56px;
-  max-height: 150px;
+  min-height: 52px;
+  max-height: 132px;
   resize: vertical;
   border: 0;
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 2px 6px;
   background: transparent;
   color: var(--color-text);
@@ -1221,7 +1273,7 @@ function handleFileChange(event: Event) {
   gap: 6px;
   min-height: 30px;
   max-width: 100%;
-  border-radius: 8px;
+  border-radius: 7px;
   padding: 0 7px;
   background: transparent;
   font-size: 13px;
@@ -1242,8 +1294,8 @@ function handleFileChange(event: Event) {
   height: 18px;
   border-radius: 999px;
   padding: 0 5px;
-  background: var(--color-accent);
-  color: var(--color-inverse);
+  background: var(--color-panel);
+  color: var(--color-accent-strong);
   font-size: 11px;
   font-weight: 700;
 }
@@ -1258,8 +1310,8 @@ function handleFileChange(event: Event) {
 .doubao-composer__send {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   background: var(--color-accent);
   color: var(--color-inverse);
@@ -1397,6 +1449,29 @@ function handleFileChange(event: Event) {
 .prompt-selector__hint {
   margin: 0;
   line-height: 1.4;
+}
+
+.resource-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--color-panel);
+}
+
+.resource-empty span {
+  min-width: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.resource-empty--models {
+  margin-bottom: 2px;
 }
 
 .skill-picker {
@@ -1608,12 +1683,44 @@ function handleFileChange(event: Event) {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  max-width: min(100%, 360px);
   border: 1px solid var(--color-border);
   border-radius: 999px;
   padding: 3px 10px;
   color: var(--color-muted);
   font-size: 11px;
   background: var(--color-panel);
+}
+
+.input-composer__file-tag--parsed {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+
+.input-composer__file-tag--partial {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.input-composer__file-tag--failed {
+  border-color: var(--color-danger);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.input-composer__file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.input-composer__file-tag small {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 800;
 }
 
 .input-composer__file-tag button {
@@ -1750,11 +1857,10 @@ function handleFileChange(event: Event) {
   }
 
   .agent-thread {
-    padding: 14px 12px 280px;
+    padding: 16px 12px 240px;
   }
 
-  .agent-thread__hero,
-  .input-flow__intro {
+  .agent-thread__hero {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1766,19 +1872,13 @@ function handleFileChange(event: Event) {
     justify-self: start;
   }
 
-  .input-flow__intro,
   .input-flow-step__head {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .input-flow__intro > strong {
-    font-size: 20px;
-  }
-
-  .input-flow__footer button {
-    justify-content: center;
-    width: 100%;
+  .input-brief__main span {
+    white-space: normal;
   }
 
   .input-composer__dock {
@@ -1788,13 +1888,13 @@ function handleFileChange(event: Event) {
   }
 
   .doubao-composer__box {
-    border-radius: 18px;
+    border-radius: 12px;
     padding: 10px;
   }
 
   .doubao-composer__textarea {
-    min-height: 64px;
-    max-height: 140px;
+    min-height: 60px;
+    max-height: 136px;
     font-size: 14px;
   }
 
@@ -1832,6 +1932,11 @@ function handleFileChange(event: Event) {
 
   .parameter-models {
     grid-template-columns: 1fr;
+  }
+
+  .resource-empty {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .skill-option {

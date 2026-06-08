@@ -1,6 +1,6 @@
 import express, { Router, Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import jwt, { type SignOptions } from 'jsonwebtoken';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { createHash, randomInt, randomUUID, timingSafeEqual } from 'crypto';
@@ -69,6 +69,7 @@ const captchaChallenges = new Map<string, {
 }>();
 const captchaTokens = new Map<string, { key: string; expiresAt: number; used: boolean }>();
 let authRedis: Redis | null = null;
+let authRedisWarningAt = 0;
 
 type EmailCodePurpose = 'register' | 'reset-password' | 'change-password';
 
@@ -100,7 +101,12 @@ function refreshTokenExpiresAt(): Date {
 }
 
 function generateAccessToken(userId: number, sessionId: string): string {
-  return jwt.sign({ userId, sessionId, type: 'access' }, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRES_IN });
+  const options: SignOptions = { expiresIn: ACCESS_TOKEN_EXPIRES_IN as SignOptions['expiresIn'] };
+  return jwt.sign({ userId, sessionId, type: 'access' }, JWT_SECRET, options);
+}
+
+function isTokenVerifyFailure(result: TokenVerifyResult): result is Extract<TokenVerifyResult, { ok: false }> {
+  return result.ok === false;
 }
 
 function verifyAccessToken(token: string): TokenVerifyResult {
@@ -170,6 +176,21 @@ function redisRetryStrategy(times: number) {
   return Math.min(Math.max(times, 1) * 500, 5000);
 }
 
+function formatRedisError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message?: unknown }).message || error);
+  }
+  return String(error);
+}
+
+function logAuthRedisWarning(error: unknown) {
+  const now = Date.now();
+  if (now - authRedisWarningAt < 30 * 1000) return;
+  authRedisWarningAt = now;
+  console.warn(`邮箱验证码 Redis 连接不可用：${formatRedisError(error)}`);
+}
+
 function getAuthRedis(): Redis {
   if (!REDIS_URL) {
     throw new Error('邮件验证码服务未配置 Redis，请设置 REDIS_URL');
@@ -181,8 +202,9 @@ function getAuthRedis(): Redis {
       connectTimeout: 5000,
       retryStrategy: redisRetryStrategy,
     });
-    authRedis.on('error', (error) => {
-      console.error('邮件验证码 Redis 连接错误:', error.message);
+    authRedis.on('error', logAuthRedisWarning);
+    authRedis.on('ready', () => {
+      authRedisWarningAt = 0;
     });
     authRedis.on('end', () => {
       authRedis = null;
@@ -731,7 +753,7 @@ async function authMiddleware(req: AuthRequest, res: Response, next: NextFunctio
     const token = authHeader.substring(7);
     const decoded = verifyAccessToken(token);
 
-    if (!decoded.ok) {
+    if (isTokenVerifyFailure(decoded)) {
       return res.status(401).json({
         success: false,
         code: decoded.code,

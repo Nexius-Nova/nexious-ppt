@@ -4,3 +4,5 @@ export type { StrategistInput } from './strategist.js';
 export { buildStrategistPrompt, parseStrategistOutput } from './strategist.js';
 export type { ImageSlot } from './executor.js';
 export { buildExecutorSystemPrompt, buildExecutorPagePrompt, calculateImageSlot, cleanSvgOutput, ensureImageUsedInSvg, sanitizeGeneratedSvg } from './executor.js';
+export type { SvgQualityIssue, SvgQualityResult } from './svgQuality.js';
+export { buildSvgQualityRepairPrompt, finalizeSvgQuality, summarizeSvgQualityIssues } from './svgQuality.js';

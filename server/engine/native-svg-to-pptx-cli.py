@@ -13,6 +13,7 @@ if str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
 
 from svg_to_pptx.pptx_builder import create_pptx_with_native_svg
+from svg_to_pptx.animation_config import load_animation_config
 
 
 def _load_notes(notes_json: Path | None) -> dict[str, str]:
@@ -33,6 +34,14 @@ def _canvas_format(value: str | None, width: int, height: int) -> str | None:
 
 
 def main() -> int:
+    animation_choices = [
+        "none", "appear", "fade", "fly", "cut", "zoom", "wipe", "split",
+        "blinds", "checkerboard", "dissolve", "random_bars", "peek",
+        "wheel", "box", "circle", "diamond", "plus", "strips", "wedge",
+        "stretch", "expand", "swivel", "auto", "mixed", "random",
+    ]
+    transition_choices = ["none", "fade", "push", "wipe", "split", "strips", "cover", "random"]
+
     parser = argparse.ArgumentParser(description="Nexious native SVG to editable PPTX exporter")
     parser.add_argument("--project", required=True)
     parser.add_argument("--output", required=True)
@@ -41,11 +50,12 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--notes-json", default=None)
     parser.add_argument("--trace-json", default=None)
+    parser.add_argument("--animation-config", default=None)
     parser.add_argument("--merge-paragraphs", action="store_true", default=False)
-    parser.add_argument("--animation-effect", choices=["none", "fade", "wipe", "zoom", "auto"], default="none")
+    parser.add_argument("--animation-effect", choices=animation_choices, default="none")
     parser.add_argument("--animation-duration", type=float, default=0.45)
     parser.add_argument("--animation-stagger", type=float, default=0.18)
-    parser.add_argument("--transition-effect", choices=["none", "fade", "push", "wipe"], default="none")
+    parser.add_argument("--transition-effect", choices=transition_choices, default="none")
     parser.add_argument("--transition-duration", type=float, default=0.45)
     parser.add_argument(
         "--animation-trigger",
@@ -56,7 +66,9 @@ def main() -> int:
 
     project_path = Path(args.project)
     output_path = Path(args.output)
-    svg_dir = project_path / "svg_output"
+    svg_dir = project_path / "svg_final"
+    if not svg_dir.exists():
+        svg_dir = project_path / "svg_output"
     svg_files = sorted(svg_dir.glob("*.svg"))
     if not svg_files:
         print(json.dumps({"ok": False, "error": "No SVG files found"}, ensure_ascii=False))
@@ -64,6 +76,7 @@ def main() -> int:
 
     notes = _load_notes(Path(args.notes_json) if args.notes_json else None)
     trace_path = Path(args.trace_json) if args.trace_json else None
+    animation_config = load_animation_config(project_path, args.animation_config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     stdout_buffer = StringIO()
@@ -86,7 +99,7 @@ def main() -> int:
                 animation_duration=max(0.1, args.animation_duration),
                 animation_stagger=max(0, args.animation_stagger),
                 animation_trigger=args.animation_trigger,
-                animation_config=None,
+                animation_config=animation_config,
                 animation_cli_overrides={
                     "transition": True,
                     "transition_duration": True,

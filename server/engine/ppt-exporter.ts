@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DesignSpec, SpecLock } from './spec.js';
@@ -5,6 +6,12 @@ import { inlineRemoteImages } from './svg-to-pptx.js';
 import { exportNativeEditablePptx, type NativeSvgPptxAnimationOptions } from './native-svg-pptx.js';
 import { generatedProjectsRoot } from '../utils/storage.js';
 import { sanitizeGeneratedSvg } from './executor.js';
+import {
+  finalizeSvgProject,
+  writeAnimationConfig,
+  writeFormulaManifest,
+} from '../services/pptMasterAdapter.js';
+import { renderLatexManifest } from '../services/pptTools.js';
 
 export interface PptExportPage {
   pageNumber?: number;
@@ -24,6 +31,11 @@ export interface PptExportOptions {
 }
 
 const GENERATED_ROOT = generatedProjectsRoot;
+const PROJECT_ROOT = process.cwd();
+const SVG_QUALITY_CHECKER = path.join(PROJECT_ROOT, 'server', 'vendor', 'svg_quality', 'svg_quality_checker.py');
+const SVG_QUALITY_ROOT = path.dirname(SVG_QUALITY_CHECKER);
+const PYTHON_BIN = process.env.PYTHON || process.env.PYTHON_BIN || 'python';
+const SVG_QUALITY_TIMEOUT_MS = Number(process.env.SVG_QUALITY_TIMEOUT_MS || 60_000);
 
 export function renderSpecLockMarkdown(lock: SpecLock): string {
   const c = lock.colors;
@@ -175,6 +187,8 @@ export async function exportWithNexiousPpt(
     throw new Error('没有可导出的 SVG 页面');
   }
 
+  assertCompleteExportPages(pages, spec);
+
   const logs: string[] = [];
   const preparedPages = await Promise.all(
     pages.map(async (page, index) => {
@@ -191,6 +205,30 @@ export async function exportWithNexiousPpt(
 
   const fileName = `${sanitizeName(spec.projectInfo.title || 'nexious-deck')}_${Date.now()}.pptx`;
   const projectPath = await prepareExportDirectory(spec, lock, preparedPages, logs);
+  const formulaManifestPath = await writeFormulaManifest(projectPath, extractFormulaCandidatesFromExport(preparedPages, spec));
+  if (formulaManifestPath) {
+    logs.push(`公式清单已写入：${formulaManifestPath}`);
+    await renderLatexManifest(projectPath).then((result) => {
+      const output = clipToolOutput([result.stdout, result.stderr].filter(Boolean).join('\n'), 2000);
+      if (result.ok) {
+        logs.push('公式图片已渲染到导出快照 images 目录。');
+      } else {
+        logs.push(`公式图片渲染未完成，已保留公式清单并继续导出：${output || `exitCode=${result.exitCode}`}`);
+      }
+    }).catch((error) => {
+      logs.push(`公式图片渲染跳过：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+  await writeAnimationConfig(projectPath, preparedPages, spec, options.animation).then((configPath) => {
+    if (options.animation?.enabled) logs.push(`动画配置已写入：${configPath}`);
+  });
+  await runPptMasterSvgQualityCheck(projectPath, spec.canvas.format, logs);
+  await finalizeSvgProject(projectPath).then((result) => {
+    logs.push(`SVG 后处理完成：exitCode=${result.exitCode}`);
+    const output = clipToolOutput([result.stdout, result.stderr].filter(Boolean).join('\n'), 2000);
+    if (output) logs.push(output);
+  });
+  await runPptMasterSvgQualityCheck(path.join(projectPath, 'svg_final'), spec.canvas.format, logs);
   const exportPath = path.join(projectPath, 'exports', fileName);
   await mkdir(path.dirname(exportPath), { recursive: true });
 
@@ -212,6 +250,108 @@ export async function exportWithNexiousPpt(
 
   logs.push('内置导出器已完成 PPTX 生成。');
   return { buffer, fileName, projectPath, logs };
+}
+
+function isFallbackSvgPage(svg?: string) {
+  const value = String(svg || '');
+  return value.includes('本页待重试') || value.includes('待重试') || value.includes('page failed');
+}
+
+function assertCompleteExportPages(pages: PptExportPage[], spec: DesignSpec) {
+  const expected = Array.isArray(spec?.outline) ? spec.outline.length : 0;
+  if (expected <= 0) {
+    throw new Error('缺少完整大纲，无法导出 PPTX');
+  }
+  const pagesByNumber = new Map<number, PptExportPage>();
+  pages.forEach((page, index) => {
+    const pageNumber = Number(page.pageNumber || index + 1);
+    if (Number.isInteger(pageNumber) && pageNumber > 0) pagesByNumber.set(pageNumber, page);
+  });
+  const missing: number[] = [];
+  for (let pageNumber = 1; pageNumber <= expected; pageNumber += 1) {
+    const page = pagesByNumber.get(pageNumber);
+    if (!page?.svg || isFallbackSvgPage(page.svg)) missing.push(pageNumber);
+  }
+  if (missing.length) {
+    throw new Error(`页面尚未全部生成完成，缺少或待重试页面：${missing.slice(0, 12).join('、')}`);
+  }
+}
+
+async function runPptMasterSvgQualityCheck(projectPath: string, format: string, logs: string[]) {
+  const result = await runPythonTool(
+    [SVG_QUALITY_CHECKER, projectPath, '--format', format],
+    SVG_QUALITY_ROOT,
+    SVG_QUALITY_TIMEOUT_MS,
+    {
+      PYTHONPATH: [
+        SVG_QUALITY_ROOT,
+        path.join(PROJECT_ROOT, 'server', 'vendor'),
+        process.env.PYTHONPATH || '',
+      ].filter(Boolean).join(path.delimiter),
+      PYTHONIOENCODING: 'utf-8',
+      PYTHONUTF8: '1',
+    }
+  );
+  const output = clipToolOutput([result.stdout, result.stderr].filter(Boolean).join('\n'), 5000);
+  logs.push(`PPT Master SVG 质量检查完成：exitCode=${result.exitCode}`);
+  if (output) logs.push(output);
+  if (result.exitCode !== 0) {
+    throw new Error(`PPT Master SVG 质量检查未通过：${output || '请检查 SVG 页面规范'}`);
+  }
+}
+
+async function runPythonTool(
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  env: Record<string, string>,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(PYTHON_BIN, args, {
+      cwd,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+    });
+
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      resolve({
+        exitCode: 124,
+        stdout: Buffer.concat(stdout).toString('utf-8'),
+        stderr: `SVG 质量检查超时\n${Buffer.concat(stderr).toString('utf-8')}`,
+      });
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => stdout.push(Buffer.from(chunk)));
+    child.stderr.on('data', (chunk) => stderr.push(Buffer.from(chunk)));
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ exitCode: 1, stdout: '', stderr: error.message });
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        exitCode: code ?? 1,
+        stdout: Buffer.concat(stdout).toString('utf-8'),
+        stderr: Buffer.concat(stderr).toString('utf-8'),
+      });
+    });
+  });
+}
+
+function clipToolOutput(value: string, maxLength: number) {
+  const text = String(value || '').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 async function prepareExportDirectory(
@@ -453,6 +593,32 @@ function renderTotalNotes(pages: Array<{ pageNumber: number; speakerNotes: strin
 ${page.speakerNotes || spec.outline[index]?.speakerNotes || ''}
 `;
   }).join('\n---\n\n');
+}
+
+function extractFormulaCandidatesFromExport(
+  pages: Array<{ svg: string; speakerNotes: string }>,
+  spec: DesignSpec
+) {
+  const text = [
+    spec.projectInfo.title,
+    spec.projectInfo.topic,
+    ...spec.outline.flatMap((slide) => [
+      slide.title,
+      ...(slide.bullets || []),
+      slide.speakerNotes,
+      slide.visualPrompt,
+      slide.chartHint || '',
+    ]),
+    ...pages.flatMap((page) => [page.speakerNotes, page.svg.replace(/<[^>]+>/g, ' ')]),
+  ].join('\n');
+  const formulas: string[] = [];
+  const pattern = /(?:\$\$([\s\S]{2,300}?)\$\$|\$([^\n$]{2,180}?)\$|\\\(([\s\S]{2,180}?)\\\)|\\\[([\s\S]{2,300}?)\\\])/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const formula = (match[1] || match[2] || match[3] || match[4] || '').trim();
+    if (formula && /[=\\^_{}]/.test(formula)) formulas.push(formula);
+  }
+  return Array.from(new Set(formulas)).slice(0, 80);
 }
 
 function sanitizeName(value: string): string {

@@ -7,9 +7,11 @@ import {
   buildSpecLock,
   buildExecutorSystemPrompt,
   buildExecutorPagePrompt,
+  buildSvgQualityRepairPrompt,
   calculateImageSlot,
   cleanSvgOutput,
-  ensureImageUsedInSvg
+  ensureImageUsedInSvg,
+  finalizeSvgQuality
 } from '../engine/index.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { StrategistInput, DesignSpec, SpecLock, SpecSlide } from '../engine/index.js';
@@ -25,6 +27,11 @@ import {
   getQueuedJob,
   subscribeQueuedJob,
 } from '../services/generationQueue.js';
+import {
+  getChartCatalog,
+  getChartSvg,
+  getIconGuide,
+} from '../services/pptEnhancements.js';
 
 const router = Router();
 
@@ -54,27 +61,85 @@ function buildAttachmentDisposition(fileName: string): string {
 function normalizeExportOptions(value: any) {
   const animation = value?.animation;
   const animationEnabled = animation?.enabled === true;
+  const animationEffect = normalizeAnimationEffect(animation?.effect);
+  const transitionEffect = normalizeTransitionEffect(animation?.transitionEffect);
   return {
     animation: {
       enabled: animationEnabled,
-      effect: animationEnabled && ['fade', 'wipe', 'zoom'].includes(String(animation?.effect)) ? animation.effect : 'none',
-      duration: clampNumber(animation?.duration, 0.1, 3, 0.45),
-      stagger: clampNumber(animation?.stagger, 0, 3, 0.18),
+      effect: animationEnabled ? animationEffect : 'none',
+      duration: clampNumber(animation?.duration, 0.1, 3, 0.62),
+      stagger: clampNumber(animation?.stagger, 0, 3, 0.2),
       trigger: animation?.trigger === 'with-previous' || animation?.trigger === 'on-click'
         ? animation.trigger
         : 'after-previous',
-      transitionEffect: animationEnabled && ['fade', 'push', 'wipe'].includes(String(animation?.transitionEffect))
-        ? animation.transitionEffect
-        : 'none',
-      transitionDuration: clampNumber(animation?.transitionDuration, 0.1, 3, 0.45),
+      transitionEffect: animationEnabled ? transitionEffect : 'none',
+      transitionDuration: clampNumber(animation?.transitionDuration, 0.1, 3, 0.55),
     },
   };
+}
+
+function normalizeAnimationEffect(value: unknown) {
+  const effect = String(value || 'auto');
+  return [
+    'appear',
+    'fade',
+    'fly',
+    'cut',
+    'zoom',
+    'wipe',
+    'split',
+    'blinds',
+    'checkerboard',
+    'dissolve',
+    'random_bars',
+    'peek',
+    'wheel',
+    'box',
+    'circle',
+    'diamond',
+    'plus',
+    'strips',
+    'wedge',
+    'stretch',
+    'expand',
+    'swivel',
+    'auto',
+    'mixed',
+    'random',
+  ].includes(effect) ? effect : 'auto';
+}
+
+function normalizeTransitionEffect(value: unknown) {
+  const effect = String(value || 'push');
+  return ['fade', 'push', 'wipe', 'split', 'strips', 'cover', 'random'].includes(effect) ? effect : 'push';
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
   const number = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(max, Math.max(min, number));
+}
+
+function isFallbackSvgPage(svg?: string) {
+  return Boolean(svg && svg.includes('本页待重试'));
+}
+
+function validateExportPagesComplete(pages: any[], spec: DesignSpec) {
+  const expected = Array.isArray(spec?.outline) ? spec.outline.length : 0;
+  if (expected <= 0) throw new Error('缺少完整大纲，无法导出 PPTX');
+  const pagesByNumber = new Map<number, any>();
+  for (const page of pages) {
+    const pageNumber = Number(page?.pageNumber);
+    if (Number.isInteger(pageNumber) && pageNumber > 0) pagesByNumber.set(pageNumber, page);
+  }
+  const missing: number[] = [];
+  for (let pageNumber = 1; pageNumber <= expected; pageNumber += 1) {
+    const page = pagesByNumber.get(pageNumber);
+    if (!page?.svg || isFallbackSvgPage(String(page.svg))) missing.push(pageNumber);
+  }
+  if (missing.length) {
+    throw new Error(`页面尚未全部生成完成，缺少或待重试页面：${missing.slice(0, 12).join('、')}`);
+  }
 }
 
 function extractStreamingOutlineSlides(raw: string): SpecSlide[] {
@@ -166,7 +231,8 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
     const baseUrl = defaultKey.base_url || '';
     const model = defaultKey.model || 'gpt-4o';
 
-    const { system, user } = buildStrategistPrompt(input);
+    const chartCatalog = await getChartCatalog();
+    const { system, user } = buildStrategistPrompt(input, { chartCatalog });
     const estimatedTokens = Math.ceil((system.length + user.length) / 3);
     console.log(`[Strategist] systemPrompt=${system.length}chars, userPrompt=${user.length}chars, ~${estimatedTokens}tokens`);
     const messages: Message[] = [
@@ -238,19 +304,25 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
     let messages: Message[];
     const safeImageUrl = normalizeExecutorImageUrl(imageUrl);
     const imageSlot = calculateImageSlot(slide, spec);
-    const systemPrompt = buildExecutorSystemPrompt(spec, effectiveLock);
-    const userPrompt = buildExecutorPagePrompt(slide, spec, effectiveLock, safeImageUrl, imageSlot);
+    const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
+    const iconGuide = await getIconGuide(effectiveLock.iconStyle);
+    const chartTemplateSvg = await getChartSvg(effectiveLock.pageCharts?.[pageKey] || slide.chartHint);
+    const executorContext = { iconGuide, chartTemplateSvg };
+    const systemPrompt = buildExecutorSystemPrompt(spec, effectiveLock, executorContext);
+    const userPrompt = buildExecutorPagePrompt(slide, spec, effectiveLock, safeImageUrl, imageSlot, executorContext);
 
     const estimatedTokens = Math.ceil((systemPrompt.length + userPrompt.length) / 3);
     console.log(`[Executor] Page ${slide.pageNumber}: systemPrompt=${systemPrompt.length}chars, userPrompt=${userPrompt.length}chars, ~${estimatedTokens}tokens`);
 
     if (estimatedTokens > 500000) {
       console.warn(`[Executor] Page ${slide.pageNumber}: prompt too large (~${estimatedTokens}tokens), using simplified prompt`);
+      const imagePreserveAspectRatio = imageSlot.fit === 'contain' ? 'xMidYMid meet' : 'xMidYMid slice';
       const simplifiedSystem = `你是PPT SVG执行器。画布: ${spec.canvas.width}x${spec.canvas.height}。颜色: primary=${lock.colors.primary}, accent=${lock.colors.accent}, bg=${lock.colors.background}, text=${lock.colors.text}, surface=${lock.colors.surface}, muted=${lock.colors.muted}。字体: ${spec.typography.titleFamily}。输出纯SVG代码，viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"。禁止<style>,class,<foreignObject>,rgba()。`;
       const simplifiedUser = `生成第${slide.pageNumber}页SVG。标题: ${slide.title}。要点: ${slide.bullets.slice(0, 5).join(' | ')}。布局: ${slide.layout}。${safeImageUrl ? `必须使用图片：${safeImageUrl}，图片槽位固定为 x=${imageSlot.x}, y=${imageSlot.y}, width=${imageSlot.width}, height=${imageSlot.height}，写入 <image href="${safeImageUrl}" x="${imageSlot.x}" y="${imageSlot.y}" width="${imageSlot.width}" height="${imageSlot.height}" preserveAspectRatio="xMidYMid slice"/>。` : ''}输出纯SVG：`;
+      const normalizedSimplifiedUser = simplifiedUser.replace('preserveAspectRatio="xMidYMid slice"', `preserveAspectRatio="${imagePreserveAspectRatio}"`);
       messages = [
         { role: 'system', content: simplifiedSystem },
-        { role: 'user', content: simplifiedUser },
+        { role: 'user', content: normalizedSimplifiedUser },
       ];
     } else {
       messages = [
@@ -268,7 +340,18 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
 
     const fullContent = await streamText(provider, apiKey, baseUrl, model, messages, res);
 
-    const svg = ensureImageUsedInSvg(cleanSvgOutput(fullContent), slide, spec, safeImageUrl);
+    let svg = ensureImageUsedInSvg(cleanSvgOutput(fullContent), slide, spec, safeImageUrl);
+    let quality = finalizeSvgQuality(svg, spec, slide, imageSlot, safeImageUrl);
+    if (quality.blockingIssues.length) {
+      res.write(`data: ${JSON.stringify({ status: 'quality-check', phase: 'executor', pageNumber: slide.pageNumber, message: '正在修复页面布局质量问题' })}\n\n`);
+      const repairContent = await streamText(provider, apiKey, baseUrl, model, [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, imageSlot, quality.blockingIssues, safeImageUrl) },
+      ]);
+      svg = ensureImageUsedInSvg(cleanSvgOutput(repairContent), slide, spec, safeImageUrl);
+      quality = finalizeSvgQuality(svg || quality.svg, spec, slide, imageSlot, safeImageUrl);
+    }
+    svg = quality.svg;
 
     res.write(`data: ${JSON.stringify({ status: 'complete', phase: 'executor', pageNumber: slide.pageNumber, data: { svg } })}\n\n`);
     res.end();
@@ -349,6 +432,15 @@ router.post('/jobs/export-pptx', authMiddleware, async (req: AuthRequest, res: R
     const { projectId, title, pages, spec, lock, exportOptions } = req.body || {};
     if (!projectId || !spec || !Array.isArray(pages) || pages.length === 0) {
       return res.status(400).json({ success: false, message: '缺少导出任务参数' });
+    }
+
+    try {
+      validateExportPagesComplete(pages, spec);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error instanceof Error ? error.message : '页面尚未全部生成完成',
+      });
     }
 
     const job = await enqueueExportJob(req.userId!, {

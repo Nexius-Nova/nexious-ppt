@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   Bot,
   Loader2,
@@ -56,6 +56,22 @@ const messagesContainer = ref<HTMLDivElement | null>(null);
 const inputRef = ref<HTMLInputElement | null>(null);
 const confirmTarget = ref<ConfirmTarget | null>(null);
 const versions = ref<Array<{ id: string; label?: string; timestamp: number; slideCount: number }>>([]);
+const petPosition = ref({ x: 0, y: 0 });
+const viewportSize = ref({ width: 1280, height: 720 });
+const petReady = ref(false);
+const petBubbleAwake = ref(false);
+const suppressNextFabClick = ref(false);
+let petBubbleTimer: number | null = null;
+let petDragState:
+  | {
+      pointerId: number;
+      startX: number;
+      startY: number;
+      originX: number;
+      originY: number;
+      moved: boolean;
+    }
+  | null = null;
 const deleteConfirmMessage = computed(() => {
   if (!confirmTarget.value) return '';
   if (confirmTarget.value.type === 'page') {
@@ -86,6 +102,37 @@ const petHint = computed(() => {
   if (petMood.value === 'error') return '可以让我重试单页';
   if (petMood.value === 'success') return '可保存、导出或微调页面';
   return '模板、提示词、Skill 都能从这里控制';
+});
+const workflowSignal = computed(() =>
+  [
+    activeStep.value,
+    petMood.value,
+    isRunning.value ? 'running' : 'idle',
+    isPaused.value ? 'paused' : 'normal',
+    pauseRequested.value ? 'pause-requested' : 'no-pause-request',
+    steps.value.map((step) => `${step.id}:${step.status}`).join('|')
+  ].join('::')
+);
+const showPetBubble = computed(() => petBubbleAwake.value && !isOpen.value);
+const petFabStyle = computed(() => ({
+  transform: `translate3d(${petPosition.value.x}px, ${petPosition.value.y}px, 0)`,
+  opacity: petReady.value ? '1' : '0'
+}));
+const petBubbleSide = computed(() =>
+  petPosition.value.x > viewportSize.value.width / 2 ? 'left' : 'right'
+);
+const assistantPanelStyle = computed(() => {
+  const width = Math.min(420, Math.max(300, viewportSize.value.width - 32));
+  const height = Math.min(580, Math.max(360, viewportSize.value.height - 48));
+  const opensLeft = petPosition.value.x > viewportSize.value.width / 2;
+  const preferredX = opensLeft ? petPosition.value.x - width + 76 : petPosition.value.x;
+  const preferredY = petPosition.value.y - height + 72;
+  return {
+    left: `${clamp(preferredX, 16, viewportSize.value.width - width - 16)}px`,
+    top: `${clamp(preferredY, 16, viewportSize.value.height - height - 16)}px`,
+    width: `${width}px`,
+    height: `${height}px`
+  };
 });
 const slideOptions = computed(() => {
   const source = designSpec.value?.outline.length ? designSpec.value.outline : outline.value.map((slide, index) => ({
@@ -121,7 +168,21 @@ const suggestionChips = computed(() => {
 });
 
 onMounted(() => {
+  updateViewportSize();
+  resetPetPosition();
+  window.addEventListener('resize', handleViewportResize);
+  window.addEventListener('pointermove', handlePetPointerMove);
+  window.addEventListener('pointerup', handlePetPointerUp);
+  window.addEventListener('pointercancel', handlePetPointerUp);
   addWelcomeMessage();
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleViewportResize);
+  window.removeEventListener('pointermove', handlePetPointerMove);
+  window.removeEventListener('pointerup', handlePetPointerUp);
+  window.removeEventListener('pointercancel', handlePetPointerUp);
+  clearPetBubbleTimer();
 });
 
 watch(
@@ -140,9 +201,18 @@ watch(
 
 watch(isOpen, (open) => {
   if (open) {
+    petBubbleAwake.value = false;
     void loadVersions();
   }
 });
+
+watch(
+  workflowSignal,
+  (_next, previous) => {
+    if (!previous || isOpen.value) return;
+    wakePetBubble();
+  }
+);
 
 function addWelcomeMessage() {
   messages.value.push({
@@ -165,6 +235,101 @@ function toggle() {
     nextTick(() => inputRef.value?.focus());
     scrollToBottom();
   }
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (max < min) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function updateViewportSize() {
+  if (typeof window === 'undefined') return;
+  viewportSize.value = {
+    width: window.innerWidth,
+    height: window.innerHeight
+  };
+}
+
+function resetPetPosition() {
+  const x = viewportSize.value.width - 112;
+  const y = viewportSize.value.height - 112;
+  petPosition.value = {
+    x: clamp(x, 12, viewportSize.value.width - 88),
+    y: clamp(y, 12, viewportSize.value.height - 88)
+  };
+  petReady.value = true;
+}
+
+function clampPetPosition(x: number, y: number) {
+  return {
+    x: clamp(x, 12, viewportSize.value.width - 88),
+    y: clamp(y, 12, viewportSize.value.height - 88)
+  };
+}
+
+function handleViewportResize() {
+  updateViewportSize();
+  petPosition.value = clampPetPosition(petPosition.value.x, petPosition.value.y);
+}
+
+function clearPetBubbleTimer() {
+  if (petBubbleTimer) {
+    window.clearTimeout(petBubbleTimer);
+    petBubbleTimer = null;
+  }
+}
+
+function wakePetBubble() {
+  petBubbleAwake.value = true;
+  clearPetBubbleTimer();
+  petBubbleTimer = window.setTimeout(() => {
+    petBubbleAwake.value = false;
+    petBubbleTimer = null;
+  }, 3600);
+}
+
+function startPetDrag(event: PointerEvent) {
+  if (isOpen.value || event.button !== 0) return;
+  petDragState = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: petPosition.value.x,
+    originY: petPosition.value.y,
+    moved: false
+  };
+}
+
+function handlePetPointerMove(event: PointerEvent) {
+  if (!petDragState || event.pointerId !== petDragState.pointerId) return;
+  const deltaX = event.clientX - petDragState.startX;
+  const deltaY = event.clientY - petDragState.startY;
+  if (Math.abs(deltaX) + Math.abs(deltaY) > 4) {
+    petDragState.moved = true;
+    suppressNextFabClick.value = true;
+  }
+  petPosition.value = clampPetPosition(
+    petDragState.originX + deltaX,
+    petDragState.originY + deltaY
+  );
+}
+
+function handlePetPointerUp(event: PointerEvent) {
+  if (!petDragState || event.pointerId !== petDragState.pointerId) return;
+  if (petDragState.moved) {
+    window.setTimeout(() => {
+      suppressNextFabClick.value = false;
+    }, 180);
+  }
+  petDragState = null;
+}
+
+function handleFabClick() {
+  if (suppressNextFabClick.value) {
+    suppressNextFabClick.value = false;
+    return;
+  }
+  toggle();
 }
 
 function isCurrentProject(projectId: string) {
@@ -326,9 +491,11 @@ async function confirmDelete() {
     v-if="!isOpen"
     class="pet-fab"
     :class="`pet-fab--${petMood}`"
+    :style="petFabStyle"
     type="button"
     title="AI PPT 桌面助手"
-    @click="toggle"
+    @pointerdown="startPetDrag"
+    @click="handleFabClick"
   >
     <span class="pet-fab__halo" />
     <span class="pet-fab__body">
@@ -354,14 +521,20 @@ async function confirmDelete() {
         <span />
       </span>
     </span>
-    <span class="pet-fab__bubble">
+    <span
+      class="pet-fab__bubble"
+      :class="[
+        `pet-fab__bubble--${petBubbleSide}`,
+        { 'pet-fab__bubble--awake': showPetBubble }
+      ]"
+    >
       <strong>{{ petStatusText }}</strong>
       <small>{{ petHint }}</small>
     </span>
   </button>
 
   <Transition name="chat-slide">
-    <div v-if="isOpen" class="assistant-panel">
+    <div v-if="isOpen" class="assistant-panel" :style="assistantPanelStyle">
       <div class="assistant-header">
         <div class="assistant-header__pet" :class="`assistant-header__pet--${petMood}`">
           <Bot :size="18" />
@@ -447,8 +620,8 @@ async function confirmDelete() {
 <style scoped>
 .pet-fab {
   position: fixed;
-  right: 24px;
-  bottom: 24px;
+  left: 0;
+  top: 0;
   z-index: 9990;
   display: flex;
   align-items: center;
@@ -456,7 +629,14 @@ async function confirmDelete() {
   border: none;
   background: transparent;
   color: var(--color-text);
+  touch-action: none;
+  user-select: none;
   cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+
+.pet-fab:active {
+  cursor: grabbing;
 }
 
 .pet-fab__halo {
@@ -473,6 +653,7 @@ async function confirmDelete() {
 .pet-fab__body {
   position: relative;
   display: block;
+  flex: 0 0 auto;
   width: 76px;
   height: 70px;
   border: 2px solid var(--color-accent);
@@ -633,8 +814,11 @@ async function confirmDelete() {
 }
 
 .pet-fab__bubble {
+  position: absolute;
+  top: 8px;
   display: grid;
   gap: 2px;
+  width: max-content;
   max-width: 184px;
   padding: 10px 12px;
   border: 1px solid var(--color-border);
@@ -642,6 +826,28 @@ async function confirmDelete() {
   background: var(--color-surface);
   box-shadow: var(--shadow-panel);
   text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px) scale(0.98);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+
+.pet-fab__bubble--right {
+  left: 88px;
+}
+
+.pet-fab__bubble--left {
+  right: 88px;
+}
+
+.pet-fab:hover .pet-fab__bubble,
+.pet-fab:focus-visible .pet-fab__bubble,
+.pet-fab__bubble--awake {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
 }
 
 .pet-fab__bubble strong,
@@ -698,13 +904,9 @@ async function confirmDelete() {
 
 .assistant-panel {
   position: fixed;
-  right: 24px;
-  bottom: 24px;
   z-index: 9990;
   display: flex;
   flex-direction: column;
-  width: min(420px, calc(100vw - 32px));
-  height: min(580px, calc(100dvh - 48px));
   overflow: visible;
   border: 1px solid var(--color-border);
   border-radius: 14px;
@@ -1004,20 +1206,20 @@ async function confirmDelete() {
 
 @media (max-width: 640px) {
   .pet-fab {
-    right: 14px;
-    bottom: 76px;
+    gap: 0;
   }
 
   .pet-fab__bubble {
-    display: none;
+    top: auto;
+    right: 0;
+    bottom: 82px;
+    left: auto;
+    max-width: min(236px, calc(100vw - 28px));
   }
 
   .assistant-panel {
-    right: 10px;
-    bottom: 74px;
-    left: 10px;
-    width: auto;
-    height: min(560px, calc(100dvh - 92px));
+    max-width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
   }
 }
 </style>

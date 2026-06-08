@@ -87,6 +87,9 @@ type ImportedPptParseResult = {
 const toastStore = useToastStore();
 const agentStore = useAgentStore();
 const route = useRoute();
+const emit = defineEmits<{
+  changed: [];
+}>();
 
 const templates = ref<Template[]>([]);
 const loading = ref(false);
@@ -831,6 +834,7 @@ async function confirmImportTemplate() {
       importDraft.value = null;
       await fetchTemplates();
       await agentStore.fetchTemplates();
+      emit('changed');
     } else {
       toastStore.error(response.message || '添加模板失败');
     }
@@ -912,6 +916,7 @@ async function saveTemplate() {
       showEditor.value = false;
       await fetchTemplates();
       await agentStore.fetchTemplates();
+      emit('changed');
     } else {
       toastStore.error(response.message || '保存失败');
     }
@@ -964,6 +969,7 @@ async function confirmDeleteTemplate() {
       closeDeleteModal(true);
       await fetchTemplates();
       await agentStore.fetchTemplates();
+      emit('changed');
     } else {
       toastStore.error(response.message || '删除失败');
     }
@@ -1075,7 +1081,13 @@ onMounted(fetchTemplates);
           </div>
           <p>{{ template.description || normalizeSettings(template).styleGuide?.visualTone }}</p>
 
-          <div class="style-summary">
+          <div class="template-card__quick-meta">
+            <span class="template-card__swatch" :style="{ background: template.accent || '#334155' }" />
+            <span>{{ template.slide_count || 10 }} 页</span>
+            <span>{{ normalizeSettings(template).layoutGuide?.contentLayouts?.[0] || '通用布局' }}</span>
+          </div>
+
+          <div class="style-summary template-card__detail-only">
             <Palette :size="14" />
             <span>{{ normalizeSettings(template).styleGuide?.visualTone }}</span>
           </div>
@@ -1681,18 +1693,19 @@ onMounted(fetchTemplates);
 
 .template-preview {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  height: 174px;
-  padding: 18px 22px;
+  align-items: center;
+  justify-content: center;
+  height: 156px;
+  padding: 14px;
+  overflow: hidden;
   background: color-mix(in srgb, var(--accent) 10%, var(--color-panel));
   border-bottom: 1px solid var(--color-border);
 }
 
 .preview-deck {
   position: relative;
-  width: min(100%, 272px);
-  min-height: 136px;
+  width: min(100%, 248px);
+  height: 124px;
 }
 
 .preview-deck__slide {
@@ -1700,7 +1713,7 @@ onMounted(fetchTemplates);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 214px;
+  width: min(82%, 200px);
   aspect-ratio: 16 / 9;
   padding: 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--color-border));
@@ -1737,14 +1750,14 @@ onMounted(fetchTemplates);
 }
 
 .preview-deck__slide:nth-child(2) {
-  left: 32px;
-  top: 12px;
+  left: 24px;
+  top: 8px;
   z-index: 2;
 }
 
 .preview-deck__slide:nth-child(3) {
-  left: 58px;
-  top: 24px;
+  left: 48px;
+  top: 16px;
   z-index: 1;
 }
 
@@ -1806,7 +1819,7 @@ onMounted(fetchTemplates);
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 9px;
+  gap: 8px;
   padding: 14px 16px 12px;
 }
 
@@ -1837,6 +1850,35 @@ onMounted(fetchTemplates);
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.template-card__quick-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.template-card__quick-meta span:not(.template-card__swatch) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-card__swatch {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+}
+
+.template-card__detail-only {
+  display: none;
 }
 
 .style-summary,
@@ -2736,11 +2778,22 @@ onMounted(fetchTemplates);
   }
 
   .preview-deck {
-    min-height: 112px;
+    width: min(100%, 220px);
+    height: 112px;
   }
 
   .preview-deck__slide {
-    width: 180px;
+    width: min(82%, 178px);
+  }
+
+  .preview-deck__slide:nth-child(2) {
+    left: 20px;
+    top: 7px;
+  }
+
+  .preview-deck__slide:nth-child(3) {
+    left: 40px;
+    top: 14px;
   }
 
   .editor-nav {

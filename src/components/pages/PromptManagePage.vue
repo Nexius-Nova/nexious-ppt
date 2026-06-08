@@ -14,6 +14,9 @@ import { promptApi, type Prompt } from '@/services/api';
 import { translateErrorMessage } from '@/utils/errorMessages';
 
 const toastStore = useToastStore();
+const emit = defineEmits<{
+  changed: [];
+}>();
 
 const prompts = ref<Prompt[]>([]);
 const loading = ref(false);
@@ -163,6 +166,7 @@ async function savePrompt() {
       if (response.success) {
         toastStore.success('保存成功', '提示词已更新');
         await fetchPrompts();
+        emit('changed');
       }
     } else {
       const response = await promptApi.create({
@@ -174,6 +178,7 @@ async function savePrompt() {
       if (response.success) {
         toastStore.success('创建成功', '新提示词已添加');
         await fetchPrompts();
+        emit('changed');
       }
     }
     showModal.value = false;
@@ -205,6 +210,7 @@ async function confirmDeletePrompt() {
       toastStore.success('删除成功', '提示词已删除');
       closeDeleteModal(true);
       await fetchPrompts();
+      emit('changed');
     } else {
       toastStore.error('删除失败', response.message || '未知错误');
     }

@@ -147,10 +147,15 @@ router.post('/reset', async (req: AuthRequest, res: Response) => {
         type: 'select',
         value: 'auto',
         options: [
-          { value: 'auto', label: '默认无动画' },
+          { value: 'auto', label: 'AI 自动' },
           { value: 'fade', label: '柔和淡入' },
           { value: 'wipe', label: '逐步展开' },
-          { value: 'zoom', label: '重点聚焦' }
+          { value: 'fly', label: '飞入呈现' },
+          { value: 'zoom', label: '重点聚焦' },
+          { value: 'dissolve', label: '溶解显现' },
+          { value: 'wheel', label: '轮盘展开' },
+          { value: 'mixed', label: '混合动效' },
+          { value: 'random', label: '随机动效' }
         ],
         description: '导出 PPTX 时的元素入场动画方式'
       }

@@ -88,6 +88,7 @@ const {
   selectedTextModelId,
   selectedImageModelId,
   inputProcessSteps,
+  uploadedFileContents,
   templates,
   selectedTemplate,
   designSpec,
@@ -118,6 +119,8 @@ const exportHistory = ref<
 >([]);
 const previewingImage = ref<GeneratedImage | null>(null);
 const routeReady = ref(false);
+const resourcesSyncing = ref(false);
+const lastResourceSyncedAt = ref(0);
 
 useShortcuts([
   {
@@ -266,6 +269,10 @@ const layoutProgressPercent = computed(() => {
     Math.round((layoutCompletedPages.value / layoutTotalPages.value) * 100)
   );
 });
+const exportReadiness = computed(() => store.exportReadiness());
+const canExportDeck = computed(
+  () => exportReadiness.value.ready && !isExporting.value
+);
 const slidesNeedingImages = computed(() => {
   const slides = designSpec.value?.outline || outline.value;
   return slides.filter((slide: any) => slideNeedsImage(slide));
@@ -553,6 +560,7 @@ function canOpenWorkflowStep(step: WorkflowStepId) {
   if (step === "layout") {
     const layoutStep = stepState("layout");
     return Boolean(
+      (hasOutlineContent() && !hasPendingRequiredImages.value) ||
       svgPages.value.length > 0 ||
       layoutStep?.status === "running" ||
       layoutStep?.status === "done"
@@ -608,6 +616,104 @@ function goToWorkflowStep(step: WorkflowStepId) {
 
 let routeSyncToken = 0;
 let isSyncingRouteStep = false;
+let resourceRefreshPromise: Promise<void> | null = null;
+
+function reconcileSelectedModels() {
+  if (
+    selectedTextModelId.value &&
+    !textModels.value.some((model) => model.id === selectedTextModelId.value)
+  ) {
+    store.selectProjectTextModel(null);
+  }
+
+  if (
+    selectedImageModelId.value &&
+    !imageModels.value.some((model) => model.id === selectedImageModelId.value)
+  ) {
+    store.selectProjectImageModel(null);
+  }
+}
+
+async function refreshWorkspaceResources() {
+  if (resourceRefreshPromise) return resourceRefreshPromise;
+
+  resourcesSyncing.value = true;
+  resourceRefreshPromise = Promise.all([
+    store.fetchPrompts(),
+    store.fetchSkills(),
+    store.fetchTemplates(),
+    store.fetchConfigs(),
+    apiKeyStore.fetchApiKeys()
+  ])
+    .then(() => {
+      reconcileSelectedModels();
+      lastResourceSyncedAt.value = Date.now();
+    })
+    .finally(() => {
+      resourceRefreshPromise = null;
+      resourcesSyncing.value = false;
+    });
+
+  return resourceRefreshPromise;
+}
+
+async function refreshPromptResources() {
+  resourcesSyncing.value = true;
+  try {
+    await store.fetchPrompts();
+    lastResourceSyncedAt.value = Date.now();
+  } finally {
+    resourcesSyncing.value = false;
+  }
+}
+
+async function refreshSkillResources() {
+  resourcesSyncing.value = true;
+  try {
+    await store.fetchSkills();
+    lastResourceSyncedAt.value = Date.now();
+  } finally {
+    resourcesSyncing.value = false;
+  }
+}
+
+async function refreshTemplateResources() {
+  resourcesSyncing.value = true;
+  try {
+    await store.fetchTemplates();
+    lastResourceSyncedAt.value = Date.now();
+  } finally {
+    resourcesSyncing.value = false;
+  }
+}
+
+async function refreshModelResources() {
+  resourcesSyncing.value = true;
+  try {
+    await apiKeyStore.fetchApiKeys();
+    reconcileSelectedModels();
+    lastResourceSyncedAt.value = Date.now();
+  } finally {
+    resourcesSyncing.value = false;
+  }
+}
+
+function openComposerResource(module: "prompt" | "template" | "skills" | "config") {
+  const target: Record<typeof module, string> = {
+    prompt: "prompts",
+    template: "templates",
+    skills: "skills",
+    config: "models"
+  };
+  handleNavigate(target[module]);
+}
+
+async function handleRouteChange() {
+  await syncStepWithRoute();
+  if (isProjectRoute.value && isWorkflowTab(activeStep.value)) {
+    void refreshWorkspaceResources();
+  }
+}
 
 async function syncStepWithRoute() {
   const token = ++routeSyncToken;
@@ -653,7 +759,7 @@ async function syncStepWithRoute() {
 watch(
   () => route.fullPath,
   () => {
-    void syncStepWithRoute();
+    void handleRouteChange();
   }
 );
 
@@ -672,8 +778,11 @@ watch(
 );
 
 onMounted(async () => {
-  await store.initializeData();
+  await Promise.all([store.initializeData(), apiKeyStore.fetchApiKeys()]);
   await syncStepWithRoute();
+  if (isProjectRoute.value && isWorkflowTab(activeStep.value)) {
+    void refreshWorkspaceResources();
+  }
   void store.resumeRecoveredWorkflow();
 });
 
@@ -749,18 +858,44 @@ function buildExportOptions(format: "pptx" | "pdf"): PptxExportOptions {
   const enabledSetting = String(parameters.value.animationEnabled || "auto");
   const effectSetting = String(parameters.value.animationEffect || "auto");
   const enabled = format === "pptx" && enabledSetting === "enabled";
-  const effect = ["fade", "wipe", "zoom"].includes(effectSetting)
-    ? (effectSetting as "fade" | "wipe" | "zoom")
+  const effect = [
+    "appear",
+    "fade",
+    "fly",
+    "cut",
+    "zoom",
+    "wipe",
+    "split",
+    "blinds",
+    "checkerboard",
+    "dissolve",
+    "random_bars",
+    "peek",
+    "wheel",
+    "box",
+    "circle",
+    "diamond",
+    "plus",
+    "strips",
+    "wedge",
+    "stretch",
+    "expand",
+    "swivel",
+    "auto",
+    "mixed",
+    "random"
+  ].includes(effectSetting)
+    ? (effectSetting as NonNullable<PptxExportOptions["animation"]>["effect"])
     : "auto";
   return {
     animation: {
       enabled,
       effect: enabled ? effect : "none",
-      duration: 0.5,
-      stagger: 0.14,
+      duration: 0.62,
+      stagger: 0.2,
       trigger: "after-previous",
-      transitionEffect: enabled ? "fade" : "none",
-      transitionDuration: 0.45
+      transitionEffect: enabled ? "push" : "none",
+      transitionDuration: 0.55
     }
   };
 }
@@ -875,13 +1010,22 @@ async function retryImage(slideId: string) {
 
       <template v-else-if="isPageView">
         <MyPptPage v-if="activeStep === 'my-ppt'" />
-        <PromptManagePage v-else-if="activeStep === 'prompts'" />
+        <PromptManagePage
+          v-else-if="activeStep === 'prompts'"
+          @changed="refreshPromptResources"
+        />
         <SkillManagePage
           v-else-if="activeStep === 'skills'"
-          @changed="store.fetchSkills"
+          @changed="refreshSkillResources"
         />
-        <ModelManagePage v-else-if="activeStep === 'models'" />
-        <TemplateGalleryPage v-else-if="activeStep === 'templates'" />
+        <ModelManagePage
+          v-else-if="activeStep === 'models'"
+          @changed="refreshModelResources"
+        />
+        <TemplateGalleryPage
+          v-else-if="activeStep === 'templates'"
+          @changed="refreshTemplateResources"
+        />
         <RunConfigPage v-else-if="activeStep === 'config'" />
         <ProfilePage v-else-if="activeStep === 'profile'" />
       </template>
@@ -966,6 +1110,7 @@ async function retryImage(slideId: string) {
                   type="button"
                   :disabled="stage.disabled"
                   :aria-disabled="stage.disabled"
+                  :title="`${stage.title}：${stageLabel(stage.status, stage.skipped, stage.paused)}，${stage.metric}`"
                   :class="{
                     'pipeline-stage--active': activeStep === stage.id,
                     'pipeline-stage--running':
@@ -997,7 +1142,7 @@ async function retryImage(slideId: string) {
                       <UiBadge
                         :tone="
                           stage.paused
-                            ? 'danger'
+                            ? 'warning'
                             : stageTone(stage.status, stage.skipped)
                         "
                         size="sm"
@@ -1044,8 +1189,11 @@ async function retryImage(slideId: string) {
                     :selected-image-model-id="selectedImageModelId"
                     :skills="skills"
                     :input-process-steps="inputProcessSteps"
+                    :uploaded-file-contents="uploadedFileContents"
                     :templates="templates"
                     :selected-template="selectedTemplate"
+                    :resources-syncing="resourcesSyncing"
+                    :last-resource-synced-at="lastResourceSyncedAt"
                     @update:parameters="parameters = $event"
                     @select-prompt="store.selectPrompt"
                     @select-text-model="store.selectProjectTextModel"
@@ -1055,6 +1203,7 @@ async function retryImage(slideId: string) {
                     @clear-template="store.clearGalleryTemplate()"
                     @attach="store.attachFiles"
                     @remove-file="store.removeAttachedFile"
+                    @open-resource="openComposerResource"
                     @run="store.runFullWorkflow()"
                   />
                 </div>
@@ -1434,7 +1583,7 @@ async function retryImage(slideId: string) {
                     </div>
                     <UiButton
                       variant="primary"
-                      :disabled="isExporting || svgPages.length === 0"
+                      :disabled="!canExportDeck"
                       @click="
                         handleExport('pptx', {
                           filename: 'presentation',
@@ -1446,6 +1595,9 @@ async function retryImage(slideId: string) {
                       {{ isExporting ? "导出中..." : "导出 PPTX" }}
                     </UiButton>
                   </div>
+                  <p v-if="!exportReadiness.ready" class="preview-export-warning">
+                    {{ exportReadiness.message }}
+                  </p>
                   <UiProgress
                     v-if="isExporting"
                     :value="exportProgress"
@@ -2491,6 +2643,13 @@ async function retryImage(slideId: string) {
   max-height: 68vh;
   border-radius: 6px;
   object-fit: contain;
+}
+
+.preview-export-warning {
+  margin: 10px 0 0;
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 @keyframes spin {
