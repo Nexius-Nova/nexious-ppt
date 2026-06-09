@@ -994,7 +994,6 @@ onMounted(fetchTemplates);
   <div class="template-page">
     <header class="page-header">
       <div>
-        <p class="page-kicker">PPT 方案资产库</p>
         <h2>模板广场</h2>
         <p>管理可复用的主题风格、排版布局、大纲结构和示例预览。模板会在具体 PPT 的输入页中选择使用。</p>
       </div>
@@ -1602,7 +1601,6 @@ onMounted(fetchTemplates);
   display: none;
 }
 
-.page-kicker,
 .modal-kicker {
   margin: 0 0 4px;
   color: var(--color-accent);

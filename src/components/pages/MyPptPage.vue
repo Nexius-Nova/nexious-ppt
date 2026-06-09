@@ -476,17 +476,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="my-ppt-page">
-    <div class="page-header">
-      <div class="page-header__info">
-        <h2>我的 PPT</h2>
-        <p>管理您的所有 PPT 项目</p>
-      </div>
-      <UiButton @click="showCreateModal = true">
-        <Plus :size="14" />
-        新建项目
-      </UiButton>
-    </div>
-
     <div class="stats-grid">
       <div class="stat-card stat-card--total">
         <div class="stat-card__icon">
@@ -538,9 +527,13 @@ onBeforeUnmount(() => {
     <div class="search-bar">
       <UiInput
         v-model="searchQuery"
-        placeholder="搜索项目..."
+        placeholder="搜索我的PPT项目..."
         :prefix-icon="Search"
       />
+      <UiButton @click="showCreateModal = true">
+        <Plus :size="14" />
+        新建 PPT 项目
+      </UiButton>
     </div>
 
     <PageLoadingState v-if="loading && projects.length === 0" title="正在加载项目" description="正在同步我的 PPT 列表" />
@@ -563,7 +556,7 @@ onBeforeUnmount(() => {
         <div v-if="!searchQuery" class="empty-actions">
           <UiButton @click="showCreateModal = true">
             <Plus :size="14" />
-            新建项目
+            新建 PPT 项目
           </UiButton>
         </div>
       </UiEmpty>
@@ -699,26 +692,6 @@ onBeforeUnmount(() => {
   margin: 0 auto;
 }
 
-.page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.page-header__info h2 {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--color-text);
-}
-
-.page-header__info p {
-  margin: 4px 0 0;
-  font-size: 14px;
-  color: var(--color-subtle);
-}
-
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -795,7 +768,15 @@ onBeforeUnmount(() => {
 }
 
 .search-bar {
-  max-width: 400px;
+  display: grid;
+  grid-template-columns: minmax(260px, 400px) max-content;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.search-bar :deep(.ui-button) {
+  white-space: nowrap;
 }
 
 .loading-state {
@@ -1237,7 +1218,12 @@ onBeforeUnmount(() => {
   }
 
   .search-bar {
-    max-width: none;
+    grid-template-columns: 1fr;
+  }
+
+  .search-bar :deep(.ui-button) {
+    width: 100%;
+    justify-content: center;
   }
 
   .loading-state,

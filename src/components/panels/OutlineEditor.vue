@@ -443,6 +443,7 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   border: 1px solid var(--color-accent-soft);
   border-radius: var(--radius-md);
   background: var(--color-accent-soft);
+  margin-bottom: 10px;
 }
 
 .streaming-header {

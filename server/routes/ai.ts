@@ -260,14 +260,91 @@ function isAllowedProxyUrl(value: string): boolean {
 }
 
 export async function persistDataImage(imageUrl: string, slideId: string): Promise<string> {
+  if (!imageUrl) return imageUrl;
+  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+    return persistRemoteImage(imageUrl, slideId);
+  }
   if (!imageUrl.startsWith('data:image/')) return imageUrl;
   const match = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!match) return imageUrl;
 
   await mkdir(GENERATED_IMAGE_DIR, { recursive: true });
   const ext = imageExtension(match[1]);
-  const fileName = `${Date.now()}_${randomUUID()}.${ext}`;
+  const fileName = buildGeneratedImageFileName(slideId, ext);
   await writeFile(path.join(GENERATED_IMAGE_DIR, fileName), Buffer.from(match[2], 'base64'));
+  return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/generated-images/${fileName}`;
+}
+
+function buildGeneratedImageFileName(slideId: string, ext: string) {
+  const safeSlideId = String(slideId || 'slide')
+    .replace(/[^\p{L}\p{N}_-]+/gu, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48) || 'slide';
+  return `${safeSlideId}_${Date.now()}_${randomUUID()}.${ext}`;
+}
+
+function isPersistedGeneratedImageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const publicOrigin = new URL(PUBLIC_BASE_URL).origin;
+    return url.origin === publicOrigin && url.pathname.startsWith('/generated-images/');
+  } catch {
+    return false;
+  }
+}
+
+async function persistRemoteImage(imageUrl: string, slideId: string): Promise<string> {
+  if (isPersistedGeneratedImageUrl(imageUrl)) return imageUrl;
+  if (!isAllowedProxyUrl(imageUrl)) {
+    throw new Error('图片地址不允许保存，请使用公网 http/https 图片或 data:image 数据。');
+  }
+
+  const response = await fetch(imageUrl, {
+    headers: {
+      Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8',
+      'User-Agent': 'Nexious-PPT/1.0',
+    },
+    redirect: 'follow',
+  });
+  if (!response.ok) {
+    throw new Error(`远程图片下载失败 (${response.status})`);
+  }
+
+  const contentType = normalizeContentType(response.headers.get('content-type'));
+  if (!contentType.startsWith('image/')) {
+    throw new Error('远程地址返回的不是图片内容');
+  }
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > MAX_PROXY_IMAGE_BYTES) {
+    throw new Error(`远程图片超过大小限制（最大 ${Math.round(MAX_PROXY_IMAGE_BYTES / 1024 / 1024)}MB）`);
+  }
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('远程图片响应不可读取');
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = Buffer.from(value);
+    total += chunk.byteLength;
+    if (total > MAX_PROXY_IMAGE_BYTES) {
+      throw new Error(`远程图片超过大小限制（最大 ${Math.round(MAX_PROXY_IMAGE_BYTES / 1024 / 1024)}MB）`);
+    }
+    chunks.push(chunk);
+  }
+
+  const buffer = Buffer.concat(chunks);
+  const imageInfo = assertImageUploadSafe(buffer, {
+    label: '远程生成图片',
+    maxBytes: MAX_PROXY_IMAGE_BYTES,
+    declaredMime: contentType,
+    allowSvg: false,
+  });
+  await mkdir(GENERATED_IMAGE_DIR, { recursive: true });
+  const fileName = buildGeneratedImageFileName(slideId, imageInfo.extension || imageExtension(imageInfo.mimeType));
+  await writeFile(path.join(GENERATED_IMAGE_DIR, fileName), buffer);
   return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/generated-images/${fileName}`;
 }
 

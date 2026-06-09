@@ -1316,7 +1316,35 @@ async function updateSkillTestStatus(skillId: number, status: SkillTestStatus, l
   );
 }
 
-function buildSkillHealthInput(skill: any) {
+async function readSkillMarkdownSampleFile(skill: any) {
+  const packagePath = String(skill?.package_path || '');
+  if (!packagePath) return null;
+  const manifest = parseJsonRecord(skill?.manifest);
+  const skillMdPath = safeRelativePath(String(manifest.skillMdPath || manifest.skill_md_path || 'SKILL.md'));
+  const candidates = Array.from(new Set([skillMdPath, 'SKILL.md', 'skill.md'].filter(Boolean)));
+
+  for (const relativePath of candidates) {
+    const absolutePath = path.join(packagePath, relativePath);
+    if (!isPathInside(absolutePath, packagePath)) continue;
+    if (!(await fileExists(absolutePath))) continue;
+    const text = await fs.readFile(absolutePath, 'utf8');
+    return {
+      name: path.basename(relativePath) || 'skill.md',
+      text,
+      content: text,
+      markdown: text,
+      mimeType: 'text/markdown',
+      extension: 'md',
+      kind: 'document',
+      status: 'parsed',
+      summary: '使用 Skill 包内 skill.md 作为健康测试文件。',
+    };
+  }
+
+  return null;
+}
+
+async function buildSkillHealthInput(skill: any) {
   const testSample = parseJsonRecord(skill?.test_sample);
   if (Object.keys(testSample).length > 0) return testSample;
 
@@ -1336,11 +1364,21 @@ function buildSkillHealthInput(skill: any) {
   }
 
   if (isFileParse) {
-    const sampleFile = { name: 'sample.txt', text: '手机发展历程：从功能机到智能手机，再到 AI 终端。' };
+    const sampleFile = await readSkillMarkdownSampleFile(skill) || {
+      name: 'skill.md',
+      text: '文件解析 Skill 健康测试：请读取这段 Markdown 内容，并提取可用于生成 PPT 的主题和关键要点。',
+      content: '文件解析 Skill 健康测试：请读取这段 Markdown 内容，并提取可用于生成 PPT 的主题和关键要点。',
+      markdown: '文件解析 Skill 健康测试：请读取这段 Markdown 内容，并提取可用于生成 PPT 的主题和关键要点。',
+      mimeType: 'text/markdown',
+      extension: 'md',
+      kind: 'document',
+      status: 'parsed',
+      summary: '健康测试 Markdown 文件。',
+    };
     return {
       purpose: '文件解析',
       topic: 'Skill 健康测试',
-      content: '这是一个用于测试文件解析 Skill 的短文本资料，请提取主题和关键要点。',
+      content: '请解析随本次健康测试传入的 skill.md 文件，并返回可用于 PPT 输入阶段的 Markdown 文本摘要。',
       fileContents: [sampleFile],
       files: [sampleFile],
     };
@@ -1882,10 +1920,10 @@ export async function testSkillPackage(userId: number, skillId: number) {
     return { ok: false, runId: null, log };
   }
 
-  const runHealthCheck = () => runSkillPackage(userId, skillId, {
+  const runHealthCheck = async () => runSkillPackage(userId, skillId, {
     projectId: HEALTH_TEST_PROJECT_ID,
     phase: 'health-check',
-    input: buildSkillHealthInput(currentSkill),
+    input: await buildSkillHealthInput(currentSkill),
   });
 
   await updateSkillTestStatus(skillId, 'testing', '正在使用示例输入测试 Skill 是否可用。');
