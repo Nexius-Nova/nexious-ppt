@@ -647,6 +647,16 @@ export interface GeneratedImage {
   selected: boolean;
   error?: boolean;
   errorMessage?: string;
+  metadata?: {
+    width?: number;
+    height?: number;
+    contentType?: string;
+    bytes?: number;
+    checkedAt?: number;
+    ok?: boolean;
+    error?: string;
+    proxyUrl?: string;
+  };
 }
 
 export interface ParsedInputFile {
@@ -695,7 +705,7 @@ export interface PptxExportOptions {
     duration?: number;
     stagger?: number;
     trigger?: 'after-previous' | 'with-previous' | 'on-click';
-    transitionEffect?: 'none' | 'fade' | 'push' | 'wipe' | 'split' | 'strips' | 'cover' | 'random';
+    transitionEffect?: 'none' | 'fade' | 'push' | 'wipe' | 'split' | 'strips' | 'cover' | 'auto' | 'random';
     transitionDuration?: number;
   };
 }
@@ -1060,7 +1070,6 @@ export const aiApi = {
     }
 
     if (lastJob.status === 'failed') throw new Error(lastJob.errorMessage || '任务执行失败');
-    if (lastJob.status === 'cancelled') throw new Error('任务已取消');
     return lastJob;
   },
 

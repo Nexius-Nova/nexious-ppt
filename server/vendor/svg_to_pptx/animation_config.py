@@ -130,7 +130,7 @@ def _valid_animation_effect(effect: str) -> bool:
 
 
 def _valid_transition_effect(effect: str) -> bool:
-    return effect == 'none' or effect in TRANSITIONS
+    return effect == 'none' or effect in TRANSITIONS or effect in ('auto', 'random')
 
 
 def validate_animation_config(

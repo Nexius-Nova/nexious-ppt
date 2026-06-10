@@ -18,6 +18,13 @@ export interface ExecutorImageAsset {
   prompt?: string;
   purpose?: string;
   style?: string;
+  metadata?: {
+    width?: number;
+    height?: number;
+    contentType?: string;
+    bytes?: number;
+    ok?: boolean;
+  };
 }
 
 export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock, context: ExecutorPromptContext = {}): string {
@@ -37,6 +44,13 @@ export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock, cont
 8. 模板、提示词和 Skill 已经在 Strategist 阶段折算进规格；本阶段不要追加 Skill 规则。
 9. 不要输出通用灰底 bullet 页。必须根据 layout/rhythm 设计当前页构图：cover 强视觉中心，toc 有目录结构，content-chart 有图表结构，mixed-media/visual-focus/media-grid 表示视觉内容参与叙事但不固定图片位置，ending 有收束感。即使没有图片，也要用 SVG 形状、分栏、编号、轴线或信息框表达差异。
 10. 图片操作能力：可以对 <image> 自主设置 x/y/width/height；可以用 preserveAspectRatio="xMidYMid slice|meet|none" 做裁切或非等比缩放；可以用 transform="rotate(...)"、transform="scale(sx sy)" 或父级 <g transform="..."> 做旋转、等比/非等比缩放和平移；可以用 <clipPath> + rect/circle/ellipse/path/polygon 做规则或不规则剪切。图片不能越界、不能遮挡标题/正文/图表等关键信息。
+
+Layout safety rules:
+- Keep every text element inside the canvas and inside its visual container with at least 24px horizontal and 16px vertical padding.
+- Text in cards, labels, tables, timelines, axes and chart annotations must not touch edges, overflow, or collide with nearby components.
+- Reserve enough row height and column width before drawing tables, matrices, legends and multi-column blocks.
+- Images, icons, chart bars, connectors, decorative shapes and labels must not cover titles, body text, numbers, chart labels or formulas.
+- If content is dense, shorten wording, wrap with <tspan>, reduce font size, enlarge the container, or move elements. Never stack text on top of other text or components.
 
 Animation export structure:
 - Use meaningful top-level <g> groups for visible animated content: title-block, hero-visual, key-message, chart-area, timeline, content-card-1, content-card-2, summary-bar.
@@ -110,6 +124,7 @@ function normalizeExecutorImageAssets(input?: string | ExecutorImageAsset[]): Ex
       prompt: asset.prompt ? String(asset.prompt).slice(0, 360) : undefined,
       purpose: asset.purpose ? String(asset.purpose).slice(0, 80) : undefined,
       style: asset.style ? String(asset.style).slice(0, 80) : undefined,
+      metadata: asset.metadata,
     }));
 }
 

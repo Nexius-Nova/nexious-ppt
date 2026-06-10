@@ -10,6 +10,7 @@ export const useQueueStore = defineStore('agentQueue', () => {
     status: QueueJobSnapshot['status'];
     phase: string;
     progress: number;
+    resumeStage?: string | null;
     updatedAt: number;
   }>>({});
 

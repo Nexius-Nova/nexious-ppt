@@ -27,6 +27,8 @@ export interface StrategistInput {
   slideCount?: number;
   imageStyle: string;
   template: string;
+  animationEnabled?: string;
+  animationEffect?: string;
   textModelId?: string | number | null;
   imageModelId?: string | number | null;
   templateAsset?: {
@@ -75,6 +77,63 @@ function getPreferredMode(tone: string): DesignSpec['visualTheme']['mode'] {
   return MODE_BY_TONE[tone] || 'versatile';
 }
 
+function hasSelectedTemplate(input: StrategistInput) {
+  return Boolean(sanitizeTemplateAsset(input.templateAsset));
+}
+
+function hasSelectedPrompt(input: StrategistInput) {
+  return Boolean(String(input.promptId || '').trim() && String(input.promptContent || '').trim());
+}
+
+function userHasExplicitDesignStyle(input: StrategistInput) {
+  const text = `${input.topic || ''}\n${input.content || ''}`.toLowerCase();
+  return /(设计风格|视觉风格|ppt风格|演示风格|配色|色彩|颜色|主色|色系|版式|排版|商务风|科技风|极简|简约|高级感|活泼|可爱|学术风|咨询风|金融风|品牌风|国潮|赛博|扁平|手绘|minimal|business|consulting|tech|technology|academic|finance|color|palette|visual style|design style)/i.test(text);
+}
+
+function shouldUseAutonomousDesign(input: StrategistInput) {
+  return !hasSelectedTemplate(input) && !hasSelectedPrompt(input) && !userHasExplicitDesignStyle(input);
+}
+
+function wantsAnimationOutline(input: StrategistInput) {
+  const enabled = String(input.animationEnabled || 'auto').toLowerCase();
+  if (enabled === 'enabled' || enabled === 'true' || enabled === 'yes') return true;
+  if (enabled === 'disabled' || enabled === 'false' || enabled === 'none') return false;
+  return /(动画|动效|转场|入场|飞入|淡入|缩放|放映效果|animation|motion|transition)/i.test(`${input.topic || ''}\n${input.content || ''}`);
+}
+
+function buildAnimationGuide(input: StrategistInput) {
+  if (!wantsAnimationOutline(input)) {
+    return 'Animation planning: animation is not enabled. Set every outline item "animationDescription" to an empty string.';
+  }
+  const effect = String(input.animationEffect || 'auto');
+  return [
+    'Animation planning:',
+    '- The user/project needs an animated PPT. Every outline item must include "animationDescription".',
+    '- Describe the intended entrance sequence for this page in Chinese, including which elements appear first and how the page transition should feel.',
+    '- Keep it practical for PowerPoint export: title, key message, chart/image/card groups, and final emphasis. Do not request unsupported complex filters.',
+    effect === 'auto'
+      ? '- Animation effect is auto: choose suitable effects per page independently, without being constrained by templates or prompts.'
+      : `- Preferred animation effect: ${effect}. Use it when suitable, but keep page readability first.`,
+  ].join('\n');
+}
+
+function fallbackAnimationDescription(item: any, input: StrategistInput, pageNumber: number, layout: SpecSlide['layout']) {
+  const existing = String(item?.animationDescription || '').trim();
+  if (existing) return existing;
+  if (!wantsAnimationOutline(input)) return '';
+
+  const title = String(item?.title || `第 ${pageNumber} 页`).trim();
+  const effect = String(input.animationEffect || 'auto').trim();
+  const effectPrefix = effect && effect !== 'auto' ? `以「${effect}」作为主要动效语气，` : '';
+  const layoutGuide: Record<string, string> = {
+    cover: '主标题先入场，副标题和关键信息随后出现，背景或主视觉轻微推进，形成开场节奏。',
+    toc: '目录项按阅读顺序逐条出现，当前结构重点短暂停留，帮助观众建立全局路径。',
+    chapter: '章节标题先出现，辅助元素随后补位，最后用简洁转场进入下一部分。',
+    ending: '结论或行动号召先突出，辅助信息随后淡入，收束时保持画面稳定。',
+  };
+  return `${effectPrefix}${layoutGuide[String(layout)] || `标题先自然入场，核心要点、图表、图片或卡片按叙事顺序逐步出现，最后强调「${title}」的关键结论并平滑转场。`}`;
+}
+
 export function buildStrategistPrompt(input: StrategistInput, context: StrategistPromptContext = {}): { system: string; user: string } {
   const canvas = CANVAS_FORMATS.ppt169;
   const selectedTemplate = sanitizeTemplateAsset(input.templateAsset);
@@ -84,6 +143,12 @@ export function buildStrategistPrompt(input: StrategistInput, context: Strategis
   const slideCountGuide = getSlideCountGuide(input.slideCount);
   const templateGuide = buildTemplateGuide(safeInput);
   const colorGuide = buildColorGuide(selectedTemplate);
+  const autonomousDesign = shouldUseAutonomousDesign(input);
+  const autonomousDesignGuide = autonomousDesign
+    ? '设计策略：用户未选择提示词、未选择模板，且未明确指定 PPT 设计风格或配色。你必须根据主题、资料、受众和场景自主决定 visualTheme.style、完整 HEX 配色、字体气质、图标风格、页面节奏和构图，不要继承默认 business/tech/minimal 等固定模板，不要参考历史项目、默认提示词或模板广场内容。'
+    : '';
+  const animationGuide = buildAnimationGuide(input);
+  const selectedPromptContent = hasSelectedPrompt(input) ? String(input.promptContent || '').trim() : '';
 
   const skillExtensions: SkillExtension[] = input.skills.map((s) => ({
     skillId: s.id,
@@ -130,6 +195,7 @@ ${colorGuide}
       "bullets": ["要点 1", "要点 2"],
       "speakerNotes": "演讲备注",
       "visualPrompt": "兼容字段：可填写该页最重要的一条图片需求；没有图片则为空",
+      "animationDescription": "如果启用动画，用中文描述本页元素入场顺序、主要动效和页面转场感觉；未启用动画则为空字符串",
       "imagePlan": [
         {
           "id": "img-1",
@@ -161,7 +227,8 @@ ${colorGuide}
 13. 默认视觉模式为 ${mode}。
 14. imagePlan 只描述图片素材需求，不描述固定坐标、固定槽位或固定排版。每页最多 4 张图片素材；如果用户明确要求多图、案例对比、产品矩阵、过程图，可以使用 2-4 张；普通内容页通常 0-1 张。
 15. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、imagePlan 都要和用户内容强相关。封面构图要多样化，避免所有项目都使用居中大图。
-16. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。`;
+16. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。
+${autonomousDesignGuide}`;
 
   const user = `主题：${input.topic || '未提供，请从内容资料中自动提炼'}
 内容资料：${input.content || '用户未提供详细资料，请基于主题生成结构完整、信息可信但不过度编造的演示文稿。'}
@@ -172,18 +239,22 @@ ${colorGuide}
 主题生成要求：如果主题未提供，请优先从内容资料中显式的“主题：xxx / 标题：xxx”提取；否则根据资料核心内容生成 projectInfo.title 和 projectInfo.topic。
 
 ${templateGuide}
-${input.promptContent ? `\n额外提示词：\n${input.promptContent}` : ''}
+${selectedPromptContent ? `\n额外提示词：\n${selectedPromptContent}` : ''}
+${autonomousDesignGuide ? `\n${autonomousDesignGuide}` : ''}
 ${skillExtensions.length > 0 ? `\n启用的 Skill 扩展：\n${skillExtensions.map((s) => `- ${s.skillName}: ${s.strategistPrompt || '无额外说明'}`).join('\n')}` : ''}
 
 请输出完整 JSON。`;
 
+  const systemWithAnimationGuide = `${system}
+
+${animationGuide}`;
   const systemWithNexiousCharts = context.chartCatalog
-    ? `${system}
+    ? `${systemWithAnimationGuide}
 
 Nexious PPT 图表模板库：
 当页面需要图表、流程、矩阵、时间线、信息图或框架表达时，优先从下列 key 中选择最贴合的 chartHint；没有合适模板时可以留空，但 layout 仍要准确。
 ${context.chartCatalog}`
-    : system;
+    : systemWithAnimationGuide;
 
   return { system: systemWithNexiousCharts, user };
 }
@@ -430,6 +501,7 @@ function normalizeOutline(rawOutline: any[], input: StrategistInput): SpecSlide[
       bullets: Array.isArray(item.bullets) ? item.bullets.map(String).filter(Boolean).slice(0, 8) : [],
       speakerNotes: String(item.speakerNotes || ''),
       visualPrompt: String(item.visualPrompt || ''),
+      animationDescription: fallbackAnimationDescription(item, input, pageNumber, layout),
       imagePlan: normalizeImagePlan(item.imagePlan, item.visualPrompt),
       layout,
       rhythm: normalizeRhythm(item.rhythm, layout),
@@ -492,6 +564,7 @@ function fitOutlineToTargetCount(source: any[], targetCount: number, input: Stra
 }
 
 function resolveFallbackTemplate(input: StrategistInput): string {
+  if (shouldUseAutonomousDesign(input)) return 'auto';
   const text = `${input.topic} ${input.content}`.toLowerCase();
   if (/(金融|财务|投资|基金|银行|证券|保险|finance|financial|bank|invest)/i.test(text)) return 'finance';
   if (/(科技|技术|ai|人工智能|大模型|算法|芯片|软件|平台|数据|tech|software|model|cloud)/i.test(text)) return 'tech';

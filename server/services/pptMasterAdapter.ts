@@ -139,6 +139,7 @@ export async function writeAnimationConfig(
   for (const page of pages) {
     const slide = spec.outline.find((item) => item.pageNumber === page.pageNumber) || spec.outline[page.pageNumber - 1];
     const stem = `${String(page.pageNumber).padStart(2, '0')}_${sanitizeName(slide?.title || `slide_${page.pageNumber}`)}`;
+    const pageTransitionEffect = chooseSlideTransitionEffect(slide, transitionEffect, page.pageNumber);
     const groups = extractTopLevelGroups(page.svg)
       .filter((id) => !isStaticGroup(id))
       .slice(0, 12)
@@ -152,7 +153,7 @@ export async function writeAnimationConfig(
         return acc;
       }, {});
     slides[stem] = {
-      transition: { effect: transitionEffect, duration: transitionDuration },
+      transition: { effect: pageTransitionEffect, duration: transitionDuration },
       animation: { effect, duration, stagger, trigger },
       groups,
     };
@@ -312,6 +313,19 @@ function chooseGroupEffect(groupId: string, fallback: string, index: number) {
   return fallback;
 }
 
+function chooseSlideTransitionEffect(slide: DesignSpec['outline'][number] | undefined, fallback: string, pageNumber: number) {
+  if (fallback === 'random') return 'random';
+  if (fallback !== 'auto') return fallback;
+  const layout = String(slide?.layout || '').toLowerCase();
+  const rhythm = String(slide?.rhythm || '').toLowerCase();
+  if (layout === 'cover' || layout === 'chapter') return 'fade';
+  if (layout === 'content-chart' || /chart|table|matrix|timeline|process|flow/i.test(String(slide?.chartHint || ''))) return 'wipe';
+  if (layout === 'visual-focus' || layout === 'media-grid' || layout === 'mixed-media') return 'push';
+  if (layout === 'ending') return 'fade';
+  if (rhythm === 'dense') return pageNumber % 2 === 0 ? 'wipe' : 'split';
+  return pageNumber % 3 === 0 ? 'cover' : 'fade';
+}
+
 function normalizeAnimationEffect(value: unknown, spec: DesignSpec) {
   const effect = String(value || '').trim();
   const allowed = new Set(['appear', 'fade', 'fly', 'cut', 'zoom', 'wipe', 'split', 'blinds', 'checkerboard', 'dissolve', 'random_bars', 'peek', 'wheel', 'box', 'circle', 'diamond', 'plus', 'strips', 'wedge', 'stretch', 'expand', 'swivel', 'auto', 'mixed', 'random']);
@@ -322,7 +336,7 @@ function normalizeAnimationEffect(value: unknown, spec: DesignSpec) {
 
 function normalizeTransitionEffect(value: unknown) {
   const effect = String(value || '').trim();
-  return ['fade', 'push', 'wipe', 'split', 'strips', 'cover', 'random'].includes(effect) ? effect : 'fade';
+  return ['fade', 'push', 'wipe', 'split', 'strips', 'cover', 'auto', 'random'].includes(effect) ? effect : 'auto';
 }
 
 function extractFormulaCandidates(text: string) {

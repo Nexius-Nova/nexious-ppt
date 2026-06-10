@@ -15,9 +15,26 @@ interface SlideVisualInput {
   layout?: string;
 }
 
+export function normalizeSlideImagePlans(slide: SlideVisualInput) {
+  const rawPlans = Array.isArray(slide.imagePlan) ? slide.imagePlan : [];
+  const plans = rawPlans
+    .slice(0, 4)
+    .map((plan, index) => ({
+      id: String(plan?.id || `img-${index + 1}`).replace(/[^\w-]/g, '-').slice(0, 40) || `img-${index + 1}`,
+      prompt: String(plan?.prompt || '').trim(),
+    }))
+    .filter((plan) => plan.prompt);
+
+  if (plans.length) return plans;
+
+  const legacyPrompt = String(slide.visualPrompt || '').trim();
+  if (!legacyPrompt || Array.isArray(slide.imagePlan)) return [];
+  return [{ id: 'img-1', prompt: legacyPrompt }];
+}
+
 export function slideNeedsImage(slide: SlideVisualInput): boolean {
   if (Array.isArray(slide.imagePlan)) {
-    return slide.imagePlan.some((plan) => String(plan?.prompt || '').trim());
+    return normalizeSlideImagePlans(slide).length > 0;
   }
 
   const layout = String(slide.layout || '').toLowerCase();

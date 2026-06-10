@@ -40,7 +40,7 @@ def main() -> int:
         "wheel", "box", "circle", "diamond", "plus", "strips", "wedge",
         "stretch", "expand", "swivel", "auto", "mixed", "random",
     ]
-    transition_choices = ["none", "fade", "push", "wipe", "split", "strips", "cover", "random"]
+    transition_choices = ["none", "fade", "push", "wipe", "split", "strips", "cover", "auto", "random"]
 
     parser = argparse.ArgumentParser(description="Nexious native SVG to editable PPTX exporter")
     parser.add_argument("--project", required=True)
@@ -88,7 +88,7 @@ def main() -> int:
                 output_path=output_path,
                 canvas_format=_canvas_format(args.format, args.width, args.height),
                 verbose=False,
-                transition=None if args.transition_effect == "none" else args.transition_effect,
+                transition=None if args.transition_effect in {"none", "auto"} else args.transition_effect,
                 transition_duration=max(0.1, args.transition_duration),
                 auto_advance=None,
                 use_compat_mode=False,
@@ -101,7 +101,7 @@ def main() -> int:
                 animation_trigger=args.animation_trigger,
                 animation_config=animation_config,
                 animation_cli_overrides={
-                    "transition": True,
+                    "transition": args.transition_effect != "auto",
                     "transition_duration": True,
                     "auto_advance": True,
                     "animation": True,

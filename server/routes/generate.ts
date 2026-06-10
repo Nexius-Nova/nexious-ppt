@@ -15,7 +15,8 @@ import {
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { StrategistInput, DesignSpec, SpecLock, SpecSlide } from '../engine/index.js';
 import { inlineRemoteImages, sanitizeSvgForResvg } from '../engine/svg-to-pptx.js';
-import { exportWithNexiousPpt } from '../engine/ppt-exporter.js';
+import { exportWithNexiousPpt, type PptExportOptions } from '../engine/ppt-exporter.js';
+import type { NativeSvgPptxAnimationEffect, NativeSvgPptxTransitionEffect } from '../engine/native-svg-pptx.js';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { streamText, type Message } from '../services/textModel.js';
 import {
@@ -79,7 +80,7 @@ function buildAttachmentDisposition(fileName: string): string {
   return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
 }
 
-function normalizeExportOptions(value: any) {
+function normalizeExportOptions(value: any): PptExportOptions {
   const animation = value?.animation;
   const animationEnabled = animation?.enabled === true;
   const animationEffect = normalizeAnimationEffect(animation?.effect);
@@ -99,9 +100,9 @@ function normalizeExportOptions(value: any) {
   };
 }
 
-function normalizeAnimationEffect(value: unknown) {
+function normalizeAnimationEffect(value: unknown): NativeSvgPptxAnimationEffect {
   const effect = String(value || 'auto');
-  return [
+  const allowed: NativeSvgPptxAnimationEffect[] = [
     'appear',
     'fade',
     'fly',
@@ -127,12 +128,14 @@ function normalizeAnimationEffect(value: unknown) {
     'auto',
     'mixed',
     'random',
-  ].includes(effect) ? effect : 'auto';
+  ];
+  return allowed.includes(effect as NativeSvgPptxAnimationEffect) ? effect as NativeSvgPptxAnimationEffect : 'auto';
 }
 
-function normalizeTransitionEffect(value: unknown) {
-  const effect = String(value || 'push');
-  return ['fade', 'push', 'wipe', 'split', 'strips', 'cover', 'random'].includes(effect) ? effect : 'push';
+function normalizeTransitionEffect(value: unknown): NativeSvgPptxTransitionEffect {
+  const effect = String(value || 'auto');
+  const allowed: NativeSvgPptxTransitionEffect[] = ['fade', 'push', 'wipe', 'split', 'strips', 'cover', 'auto', 'random'];
+  return allowed.includes(effect as NativeSvgPptxTransitionEffect) ? effect as NativeSvgPptxTransitionEffect : 'auto';
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
@@ -230,6 +233,7 @@ function normalizeStreamingSpecSlide(item: any, index: number): SpecSlide {
       : [],
     speakerNotes: String(item?.speakerNotes || ''),
     visualPrompt: String(item?.visualPrompt || ''),
+    animationDescription: String(item?.animationDescription || ''),
     imagePlan: Array.isArray(item?.imagePlan)
       ? item.imagePlan
           .map((plan: any, planIndex: number) => ({
@@ -343,6 +347,13 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
 
     const estimatedTokens = Math.ceil((systemPrompt.length + userPrompt.length) / 3);
     console.log(`[Executor] Page ${slide.pageNumber}: systemPrompt=${systemPrompt.length}chars, userPrompt=${userPrompt.length}chars, ~${estimatedTokens}tokens`);
+    const layoutSafetyText = [
+      'Layout safety rules:',
+      '- Keep every text element inside the canvas and inside its visual container with at least 24px horizontal and 16px vertical padding.',
+      '- Text in cards, labels, tables, timelines, axes and chart annotations must not touch edges, overflow, or collide with nearby components.',
+      '- Images, icons, chart bars, connectors, decorative shapes and labels must not cover titles, body text, numbers, chart labels or formulas.',
+      '- If content is dense, shorten wording, wrap with <tspan>, reduce font size, enlarge the container, or move elements. Never stack text on top of other text or components.',
+    ].join('\n');
 
     if (estimatedTokens > 500000) {
       console.warn(`[Executor] Page ${slide.pageNumber}: prompt too large (~${estimatedTokens}tokens), using simplified prompt`);
@@ -352,7 +363,7 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
         : '不要写 <image>。';
       const simplifiedUser = `生成第 ${slide.pageNumber} 页 SVG。标题：${slide.title}。要点：${slide.bullets.slice(0, 5).join(' | ')}。布局：${slide.layout}。${simplifiedImageText} 输出纯 SVG。`;
       messages = [
-        { role: 'system', content: simplifiedSystem },
+        { role: 'system', content: `${simplifiedSystem}\n${layoutSafetyText}` },
         { role: 'user', content: simplifiedUser },
       ];
     } else {

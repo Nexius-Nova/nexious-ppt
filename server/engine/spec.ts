@@ -48,6 +48,7 @@ export interface SpecSlide {
   bullets: string[];
   speakerNotes: string;
   visualPrompt: string;
+  animationDescription?: string;
   imagePlan?: SpecSlideImagePlan[];
   layout:
     | 'cover'

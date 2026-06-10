@@ -59,6 +59,7 @@ export type NativeSvgPptxTransitionEffect =
   | 'split'
   | 'strips'
   | 'cover'
+  | 'auto'
   | 'random';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -207,7 +208,7 @@ function isAnimationEffect(value: unknown): value is NativeSvgPptxAnimationEffec
 }
 
 function isTransitionEffect(value: unknown): value is NativeSvgPptxTransitionEffect {
-  return ['none', 'fade', 'push', 'wipe', 'split', 'strips', 'cover', 'random'].includes(String(value));
+  return ['none', 'fade', 'push', 'wipe', 'split', 'strips', 'cover', 'auto', 'random'].includes(String(value));
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {

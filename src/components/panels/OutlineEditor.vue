@@ -374,6 +374,11 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
             <span>{{ slide.chartHint }}</span>
           </div>
 
+          <div v-if="slide.animationDescription" class="outline-slide__animation-plan">
+            <UiBadge tone="info" size="sm">动画</UiBadge>
+            <span>{{ slide.animationDescription }}</span>
+          </div>
+
           <!-- AI Copilot -->
           <div class="copilot-section">
             <div class="copilot-triggers">
@@ -888,6 +893,24 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   color: var(--color-muted);
   line-height: 1.5;
   background: var(--color-warning-soft);
+}
+
+.outline-slide__animation-plan {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-info-soft);
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.outline-slide__animation-plan span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ---- Animations ---- */

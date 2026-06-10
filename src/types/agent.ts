@@ -91,6 +91,7 @@ export interface SlideOutline {
   bullets: string[];
   speakerNotes: string;
   visualPrompt: string;
+  animationDescription?: string;
   imagePlan?: SlideImagePlan[];
   chartHint?: string;
   layout?: SlideLayout;
@@ -109,6 +110,16 @@ export interface GeneratedImage {
   selected: boolean;
   error?: boolean;
   errorMessage?: string;
+  metadata?: {
+    width?: number;
+    height?: number;
+    contentType?: string;
+    bytes?: number;
+    checkedAt?: number;
+    ok?: boolean;
+    error?: string;
+    proxyUrl?: string;
+  };
 }
 
 export interface SkillDefinition {
@@ -202,7 +213,22 @@ export interface PptProjectState {
   steps: WorkflowStep[];
   designSpec: DesignSpec | null;
   specLock: SpecLock | null;
-  svgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string; visualSummary?: string }>;
+  svgPages: Array<{
+    pageNumber: number;
+    svg: string;
+    speakerNotes: string;
+    visualSummary?: string;
+    signature?: string;
+    sourceHash?: string;
+    generatedAt?: number;
+    quality?: {
+      repaired?: boolean;
+      issues?: number;
+      blockingIssues?: number;
+      attempts?: number;
+      reused?: boolean;
+    };
+  }>;
   configOptions?: ConfigOptionGroups;
   paused?: boolean;
   resumeStage?: WorkflowStepId | null;
@@ -589,6 +615,7 @@ export interface SpecSlide {
   bullets: string[];
   speakerNotes: string;
   visualPrompt: string;
+  animationDescription?: string;
   imagePlan?: SlideImagePlan[];
   layout: string;
   rhythm: 'anchor' | 'dense' | 'breathing';

@@ -36,12 +36,21 @@ export interface SvgQualityImageAsset {
   prompt?: string;
   purpose?: string;
   style?: string;
+  metadata?: {
+    width?: number;
+    height?: number;
+    contentType?: string;
+    bytes?: number;
+    ok?: boolean;
+  };
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
 const TEXT_MARGIN = 28;
 const FLOAT_TOLERANCE = 3;
+const CONTAINER_TEXT_PADDING_X = 24;
+const CONTAINER_TEXT_PADDING_Y = 16;
 
 function parseAttributes(source: string): Record<string, string> {
   const attrs: Record<string, string> = {};
@@ -137,6 +146,46 @@ function outsideCanvas(box: Box, canvas: DesignSpec['canvas']) {
     box.y + box.height > canvas.height + FLOAT_TOLERANCE;
 }
 
+function estimateTextWidth(text: string, fontSize: number) {
+  let units = 0;
+  for (const char of String(text || '')) {
+    if (/\s/.test(char)) units += 0.34;
+    else if (/[\u3000-\u9fff\uff00-\uffef]/.test(char)) units += 0.98;
+    else if (/[A-Z0-9]/.test(char)) units += 0.62;
+    else if (/[.,;:!?'"`|/\\()[\]{}·•\-–—_+*=]/.test(char)) units += 0.42;
+    else units += 0.54;
+  }
+  return Math.max(fontSize, units * fontSize);
+}
+
+function textLineBox(input: {
+  attrs: Record<string, string>;
+  parentAttrs: Record<string, string>;
+  text: string;
+  index: number;
+  fallbackX: number;
+  fallbackY: number;
+  fallbackFontSize: number;
+}) {
+  const mergedAttrs = { ...input.parentAttrs, ...input.attrs };
+  const fontSize = numberAttr(mergedAttrs, 'font-size', Number.parseFloat(styleValue(mergedAttrs, 'font-size') || '') || input.fallbackFontSize);
+  const lineHeight = fontSize * 1.24;
+  let x = numberAttr(input.attrs, 'x', input.fallbackX);
+  let y = numberAttr(input.attrs, 'y', input.fallbackY + input.index * lineHeight);
+  x += numberAttr(input.attrs, 'dx', 0);
+  y += numberAttr(input.attrs, 'dy', 0);
+  const width = estimateTextWidth(input.text, fontSize);
+  const anchor = String(mergedAttrs['text-anchor'] || styleValue(mergedAttrs, 'text-anchor') || 'start').toLowerCase();
+  if (anchor === 'middle') x -= width / 2;
+  if (anchor === 'end') x -= width;
+  return {
+    x,
+    y: y - fontSize,
+    width,
+    height: Math.max(fontSize * 1.16, lineHeight),
+  };
+}
+
 function extractElementBoxes(svg: string, tag: 'image' | 'rect' | 'text' | 'line' | 'path'): SvgElementBox[] {
   const boxes: SvgElementBox[] = [];
   const regex = tag === 'text'
@@ -185,18 +234,39 @@ function extractElementBoxes(svg: string, tag: 'image' | 'rect' | 'text' | 'line
     }
 
     const fontSize = numberAttr(attrs, 'font-size', Number.parseFloat(styleValue(attrs, 'font-size') || '') || 20);
-    const tspans = Array.from(source.matchAll(/<tspan\b[^>]*>([\s\S]*?)<\/tspan>/gi));
-    const lines = tspans.length ? tspans.map((item) => stripTags(item[1])) : stripTags(source).split(/\n+/);
+    const tspans = Array.from(source.matchAll(/<tspan\b([^>]*)>([\s\S]*?)<\/tspan>/gi));
+    const lines = tspans.length ? tspans.map((item) => stripTags(item[2])) : stripTags(source).split(/\n+/);
     const text = lines.join(' ').trim();
-    const maxChars = Math.max(1, ...lines.map((line) => line.trim().length));
-    const width = Math.max(fontSize, maxChars * fontSize * 0.56);
-    const height = Math.max(fontSize * 1.2, lines.length * fontSize * 1.24);
-    let x = numberAttr(attrs, 'x', TEXT_MARGIN);
-    const y = numberAttr(attrs, 'y', fontSize + TEXT_MARGIN);
-    const anchor = String(attrs['text-anchor'] || styleValue(attrs, 'text-anchor') || 'start').toLowerCase();
-    if (anchor === 'middle') x -= width / 2;
-    if (anchor === 'end') x -= width;
-    boxes.push({ tag, attrs, source, index, x, y: y - fontSize, width, height, text });
+    const fallbackX = numberAttr(attrs, 'x', TEXT_MARGIN);
+    const fallbackY = numberAttr(attrs, 'y', fontSize + TEXT_MARGIN);
+    const lineBoxes = tspans.length
+      ? tspans.map((item, lineIndex) => textLineBox({
+          attrs: parseAttributes(item[1] || ''),
+          parentAttrs: attrs,
+          text: stripTags(item[2]),
+          index: lineIndex,
+          fallbackX,
+          fallbackY,
+          fallbackFontSize: fontSize,
+        }))
+      : lines.map((line, lineIndex) => textLineBox({
+          attrs: {},
+          parentAttrs: attrs,
+          text: line,
+          index: lineIndex,
+          fallbackX,
+          fallbackY,
+          fallbackFontSize: fontSize,
+        }));
+    const minX = Math.min(...lineBoxes.map((box) => box.x));
+    const minY = Math.min(...lineBoxes.map((box) => box.y));
+    const maxX = Math.max(...lineBoxes.map((box) => box.x + box.width));
+    const maxY = Math.max(...lineBoxes.map((box) => box.y + box.height));
+    const x = Number.isFinite(minX) ? minX : fallbackX;
+    const y = Number.isFinite(minY) ? minY : fallbackY - fontSize;
+    const width = Number.isFinite(maxX) ? Math.max(fontSize, maxX - x) : estimateTextWidth(text, fontSize);
+    const height = Number.isFinite(maxY) ? Math.max(fontSize * 1.2, maxY - y) : Math.max(fontSize * 1.2, lines.length * fontSize * 1.24);
+    boxes.push({ tag, attrs, source, index, x, y, width, height, text });
   }
 
   return boxes;
@@ -229,11 +299,99 @@ function addOrReplaceSvgAttributes(svg: string, spec: DesignSpec) {
   return svg.replace(open, patched);
 }
 
+function removeStyleAndClassAttributes(svg: string) {
+  return svg
+    .replace(/<style\b[\s\S]*?<\/style>/gi, '')
+    .replace(/\sclass\s*=\s*(?:"[^"]*"|'[^']*')/gi, '');
+}
+
+function removeUnsupportedClipPathTargets(svg: string) {
+  return svg.replace(/<([a-z][\w:-]*)\b([^<>]*?)>/gi, (tag, tagName: string, attrs: string) => {
+    const normalized = tagName.toLowerCase();
+    if (normalized === 'image' || normalized === 'clippath' || /\sdata-pptx-crop\s*=/i.test(attrs)) return tag;
+    if (!/\sclip-path\s*=/i.test(attrs)) return tag;
+    return `<${tagName}${attrs.replace(/\sclip-path\s*=\s*(?:"[^"]*"|'[^']*')/gi, '')}>`;
+  });
+}
+
+function removeDuplicateAttributes(svg: string) {
+  return svg.replace(/<([a-z][\w:-]*)(\s[^<>]*?)?(\/?)>/gi, (tag, tagName: string, attrSource = '', selfClosing = '') => {
+    const attrs = Array.from(attrSource.matchAll(/([:\w-]+)\s*=\s*(["'])(.*?)\2/g));
+    if (attrs.length < 2) return tag;
+    const seen = new Map<string, { name: string; quote: string; value: string }>();
+    for (const attr of attrs) {
+      seen.set(String(attr[1]).toLowerCase(), { name: attr[1], quote: attr[2], value: attr[3] });
+    }
+    if (seen.size === attrs.length) return tag;
+    const serialized = Array.from(seen.values())
+      .map((attr) => ` ${attr.name}=${attr.quote}${attr.value}${attr.quote}`)
+      .join('');
+    return `<${tagName}${serialized}${selfClosing || ''}>`;
+  });
+}
+
 function isFullCanvasBox(box: Box, spec: DesignSpec) {
   return box.x <= FLOAT_TOLERANCE &&
     box.y <= FLOAT_TOLERANCE &&
     box.width >= spec.canvas.width - FLOAT_TOLERANCE &&
     box.height >= spec.canvas.height - FLOAT_TOLERANCE;
+}
+
+function isDecorativeBackgroundBox(box: SvgElementBox, spec: DesignSpec) {
+  if (isFullCanvasBox(box, spec)) return true;
+  const area = box.width * box.height;
+  const canvasArea = spec.canvas.width * spec.canvas.height;
+  if (area >= canvasArea * 0.68) return true;
+  const id = String(box.attrs.id || '').toLowerCase();
+  if (/(background|bg|chrome|backdrop|canvas|page-bg)/.test(id) && area >= canvasArea * 0.25) return true;
+  return false;
+}
+
+function findTextContainer(text: SvgElementBox, rects: SvgElementBox[], spec: DesignSpec) {
+  return rects
+    .filter((rect) => rect.index < text.index)
+    .filter((rect) => rect.width > 40 && rect.height > 20)
+    .filter((rect) => !isDecorativeBackgroundBox(rect, spec))
+    .filter((rect) => rectsOverlap(rect, text))
+    .sort((a, b) => {
+      const areaA = a.width * a.height;
+      const areaB = b.width * b.height;
+      return areaA - areaB;
+    })[0];
+}
+
+function textViolatesContainerPadding(text: SvgElementBox, container: SvgElementBox) {
+  const safeLeft = container.x + CONTAINER_TEXT_PADDING_X;
+  const safeRight = container.x + container.width - CONTAINER_TEXT_PADDING_X;
+  const safeTop = container.y + CONTAINER_TEXT_PADDING_Y;
+  const safeBottom = container.y + container.height - CONTAINER_TEXT_PADDING_Y;
+  return text.x < safeLeft - FLOAT_TOLERANCE ||
+    text.y < safeTop - FLOAT_TOLERANCE ||
+    text.x + text.width > safeRight + FLOAT_TOLERANCE ||
+    text.y + text.height > safeBottom + FLOAT_TOLERANCE;
+}
+
+function isBlockingTextOverlap(a: SvgElementBox, b: SvgElementBox, overlap: number) {
+  const minArea = Math.min(a.width * a.height, b.width * b.height);
+  if (minArea <= 0) return false;
+  const ratio = overlap / minArea;
+  return ratio > 0.26 || overlap > 420;
+}
+
+function isLikelyTextCoveringElement(element: SvgElementBox, text: SvgElementBox, spec: DesignSpec) {
+  if (element.index <= text.index) return false;
+  if (element.width <= 1.5 && element.height <= 1.5) return false;
+  if (isDecorativeBackgroundBox(element, spec)) return false;
+  const fill = String(attrOrStyle(element.attrs, 'fill', '')).trim().toLowerCase();
+  const stroke = String(attrOrStyle(element.attrs, 'stroke', '')).trim().toLowerCase();
+  const hasVisiblePaint = fill && fill !== 'none' && fill !== 'transparent' || stroke && stroke !== 'none' && stroke !== 'transparent';
+  if (!hasVisiblePaint && element.tag !== 'line') return false;
+  const overlap = intersectionArea(element, text);
+  if (overlap <= 0) return false;
+  const textArea = Math.max(1, text.width * text.height);
+  if (element.tag === 'line') return overlap > Math.min(160, textArea * 0.08);
+  if (element.width * element.height > spec.canvas.width * spec.canvas.height * 0.45) return false;
+  return overlap / textArea > 0.12 || overlap > 360;
 }
 
 function repairTextCanvasOverflow(svg: string, spec: DesignSpec) {
@@ -270,7 +428,10 @@ function repairTextCanvasOverflow(svg: string, spec: DesignSpec) {
 }
 
 function deterministicRepair(svg: string, spec: DesignSpec) {
-  let result = addOrReplaceSvgAttributes(svg, spec);
+  let result = removeStyleAndClassAttributes(svg);
+  result = removeDuplicateAttributes(result);
+  result = removeUnsupportedClipPathTargets(result);
+  result = addOrReplaceSvgAttributes(result, spec);
   result = repairTextCanvasOverflow(result, spec);
   return result;
 }
@@ -325,20 +486,12 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageInput?
     if (outsideCanvas(text, canvas)) {
       issues.push(issue('text-overflow', 'error', `Text may overflow canvas: ${(text.text || '').slice(0, 36)}`, 'text', text));
     }
-    const container = rects
-      .filter((rect) => rect.index < text.index)
-      .filter((rect) => rect.width > 40 && rect.height > 20)
-      .filter((rect) => rectsOverlap(rect, text))
-      .sort((a, b) => {
-        const areaA = a.width * a.height;
-        const areaB = b.width * b.height;
-        return areaA - areaB;
-      })[0];
+    const container = findTextContainer(text, rects, spec);
     if (container && !isFullCanvasBox(container, spec)) {
-      const allowedWidth = Math.max(0, container.width - 18);
-      const allowedHeight = Math.max(0, container.height - 12);
-      if (text.width > allowedWidth || text.height > allowedHeight) {
-        issues.push(issue('text-overflow', 'error', `Text may overflow its container: ${(text.text || '').slice(0, 36)}`, 'text/container', text));
+      const allowedWidth = Math.max(0, container.width - CONTAINER_TEXT_PADDING_X * 2);
+      const allowedHeight = Math.max(0, container.height - CONTAINER_TEXT_PADDING_Y * 2);
+      if (text.width > allowedWidth || text.height > allowedHeight || textViolatesContainerPadding(text, container)) {
+        issues.push(issue('text-overflow', 'error', `Text may overflow or touch its container edge: ${(text.text || '').slice(0, 36)}`, text.source, text));
       }
     }
   }
@@ -386,9 +539,19 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageInput?
       const b = significantTexts[j];
       const overlap = intersectionArea(a, b);
       const minArea = Math.min(a.width * a.height, b.width * b.height);
-      if (minArea > 0 && overlap / minArea > 0.42) {
-        issues.push(issue('element-overlap', 'warning', `Text elements may overlap: ${(a.text || '').slice(0, 18)} / ${(b.text || '').slice(0, 18)}`, 'text/text', a));
+      if (isBlockingTextOverlap(a, b, overlap)) {
+        issues.push(issue('element-overlap', 'error', `Text elements overlap: ${(a.text || '').slice(0, 18)} / ${(b.text || '').slice(0, 18)}`, a.source, a));
+      } else if (minArea > 0 && overlap / minArea > 0.16) {
+        issues.push(issue('element-overlap', 'warning', `Text elements may be too close: ${(a.text || '').slice(0, 18)} / ${(b.text || '').slice(0, 18)}`, a.source, a));
       }
+    }
+  }
+
+  const coveringElements = [...rects, ...lines, ...paths];
+  for (const text of significantTexts) {
+    const cover = coveringElements.find((element) => isLikelyTextCoveringElement(element, text, spec));
+    if (cover) {
+      issues.push(issue('element-overlap', 'error', `A later ${cover.tag} element may cover text: ${(text.text || '').slice(0, 24)}`, cover.source, text));
     }
   }
 
@@ -449,13 +612,90 @@ Quality issues:
 ${issueSummary}
 
 Rules:
-1. Text must not overflow the canvas or overlap images, charts, or other important text.
-2. Images must not leave the canvas, cover titles/body/chart elements, or leave their required containers.
-3. ${imageInstruction}
-4. Text must have readable contrast against its background.
-5. Do not use <style>, class, foreignObject, mask, script, animate, textPath, rgba(), or gradients.
-6. The root must be <svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}" width="${spec.canvas.width}" height="${spec.canvas.height}">.
+1. Text must not overflow the canvas, touch container edges, overlap other text, or be covered by images, charts, labels, icons, lines or decorative shapes.
+2. Keep text inside cards/tables/timelines/chart labels with at least 24px horizontal and 16px vertical padding.
+3. To fix dense content, first shorten wording, split text with <tspan>, reduce font size, increase row/card size, or move nearby components. Do not simply stack elements closer together.
+4. Images must not leave the canvas, cover titles/body/chart elements, or leave their required containers.
+5. ${imageInstruction}
+6. Text must have readable contrast against its background.
+7. Do not use <style>, class, foreignObject, mask, script, animate, textPath, rgba(), or gradients.
+8. The root must be <svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}" width="${spec.canvas.width}" height="${spec.canvas.height}">.
 
 SVG to repair:
 ${svg}`;
+}
+
+function extractIssueSnippets(svg: string, issues: SvgQualityIssue[], maxChars = 5200) {
+  const directSnippets = issues
+    .map((item) => item.element)
+    .filter(Boolean)
+    .map((element) => String(element))
+    .filter((element) => element.startsWith('<'));
+  const elementSnippets = Array.from(svg.matchAll(/<(?:text|image|rect|path|line|g)\b[\s\S]*?(?:\/>|<\/(?:text|image|rect|path|line|g)>)/gi))
+    .map((match) => match[0])
+    .filter((source) => {
+      const lower = source.toLowerCase();
+      return issues.some((item) => {
+        const text = String(item.message || '').toLowerCase();
+        return text.includes('image') && lower.includes('<image') ||
+          text.includes('text') && lower.includes('<text') ||
+          text.includes('contrast') && lower.includes('<text') ||
+          text.includes('overlap') && /<(text|image|rect|path|line)\b/i.test(source);
+      });
+    });
+  const snippets = [...directSnippets, ...elementSnippets]
+    .map((source) => source.trim())
+    .filter(Boolean);
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const snippet of snippets) {
+    const key = snippet.slice(0, 180);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(snippet);
+    if (unique.join('\n').length >= maxChars) break;
+  }
+  return unique.join('\n').slice(0, maxChars) || svg.slice(0, maxChars);
+}
+
+export function buildSvgQualityPatchPrompt(
+  svg: string,
+  spec: DesignSpec,
+  slide: SpecSlide,
+  _imageSlot: unknown,
+  issues: SvgQualityIssue[],
+  imageInput?: string | SvgQualityImageAsset[]
+) {
+  const issueSummary = summarizeSvgQualityIssues(issues, 10) || 'Quality check failed.';
+  const snippets = extractIssueSnippets(svg, issues);
+  const imageAssets = normalizeQualityImageAssets(imageInput);
+  const imageInstruction = imageAssets.length
+    ? imageAssets.map((asset, index) => `- ${asset.id || `img-${index + 1}`}: ${asset.url}${asset.purpose ? `, purpose: ${asset.purpose}` : ''}`).join('\n')
+    : 'No generated image asset is required for this page.';
+
+  return `Repair only the broken parts of this SVG slide. Output a complete SVG only. Do not explain.
+
+Page:
+- pageNumber: ${slide.pageNumber}
+- title: ${slide.title}
+- layout: ${slide.layout}
+- canvas: ${spec.canvas.width}x${spec.canvas.height}
+
+Quality issues:
+${issueSummary}
+
+Relevant SVG snippets:
+${snippets}
+
+Image assets:
+${imageInstruction}
+
+Rules:
+1. Keep all unrelated layout, wording, colors and visual hierarchy unchanged.
+2. Only move, resize, recolor, wrap, shorten, crop or reorder elements needed to fix the listed issues.
+3. Preserve at least 24px horizontal and 16px vertical padding for text inside visible containers.
+4. Fix overlaps by separating text, images, chart shapes, labels and connectors; do not hide the issue by drawing another shape above it.
+5. The final answer must still be a complete valid SVG.
+6. Do not use <style>, class, foreignObject, mask, script, animate, textPath, rgba(), or gradients.
+7. The root must be <svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}" width="${spec.canvas.width}" height="${spec.canvas.height}">.`;
 }

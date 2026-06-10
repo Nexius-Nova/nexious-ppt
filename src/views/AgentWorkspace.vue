@@ -49,7 +49,7 @@ import PrivateSvg from "@/components/common/PrivateSvg.vue";
 import { useAgentStore } from "@/stores/agentStore";
 import { useApiKeyStore } from "@/stores/apiKeyStore";
 import { useShortcuts } from "@/composables/useShortcuts";
-import { slideNeedsImage } from "@/utils/slideVisuals";
+import { normalizeSlideImagePlans, slideNeedsImage } from "@/utils/slideVisuals";
 import type {
   GeneratedImage,
   WorkflowStep,
@@ -336,10 +336,29 @@ const presentationPage = computed(() => {
   );
   return presentationPages.value[index] || null;
 });
+const presentationSlideRatio = computed(() => {
+  const svg = String(presentationPage.value?.svg || "");
+  const viewBox = svg.match(/viewBox\s*=\s*["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)\s*["']/i);
+  const width = Number.parseFloat(viewBox?.[1] || "");
+  const height = Number.parseFloat(viewBox?.[2] || "");
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return width / height;
+  }
+  return 16 / 9;
+});
+const presentationSlideStyle = computed(() => ({
+  "--presentation-slide-ratio": String(presentationSlideRatio.value)
+}));
 const slidesNeedingImages = computed(() => {
   const slides = designSpec.value?.outline || outline.value;
   return slides.filter((slide: any) => slideNeedsImage(slide));
 });
+const requiredImageCount = computed(() =>
+  slidesNeedingImages.value.reduce(
+    (sum, slide: any) => sum + normalizeSlideImagePlansForView(slide).length,
+    0
+  )
+);
 const imageStepSkipped = computed(() => {
   const step = steps.value.find((s) => s.id === "images");
   return Boolean(
@@ -349,25 +368,23 @@ const imageStepSkipped = computed(() => {
   );
 });
 const completedImageCount = computed(
-  () =>
-    images.value.filter(
-      (image) => image.selected && !image.error && Boolean(image.url)
-    ).length
+  () => {
+    const requiredKeys = new Set(
+      slidesNeedingImages.value.flatMap((slide: any) =>
+        normalizeSlideImagePlansForView(slide).map((plan: any) => `${slide.id}::${plan.id}`)
+      )
+    );
+    return images.value.filter((image) => {
+      if (!image.selected || image.error || !image.url) return false;
+      return requiredKeys.has(`${image.slideId}::${image.assetId || 'img-1'}`);
+    }).length;
+  }
 );
 function normalizeSlideImagePlansForView(slide: any) {
-  const rawPlans = Array.isArray(slide?.imagePlan) ? slide.imagePlan : [];
-  const plans = rawPlans
-    .slice(0, 4)
-    .map((plan: any, index: number) => ({
-      id: String(plan?.id || `img-${index + 1}`),
-      prompt: String(plan?.prompt || '').trim(),
-      purpose: plan?.purpose ? String(plan.purpose) : undefined,
-    }))
-    .filter((plan: any) => plan.prompt);
-  if (plans.length) return plans;
-  const legacyPrompt = String(slide?.visualPrompt || '').trim();
-  if (!legacyPrompt || Array.isArray(slide?.imagePlan)) return [];
-  return [{ id: 'img-1', prompt: legacyPrompt, purpose: 'supporting' }];
+  return normalizeSlideImagePlans(slide).map((plan) => ({
+    ...plan,
+    purpose: slide?.imagePlan?.find?.((item: any) => String(item?.id || '') === plan.id)?.purpose,
+  }));
 }
 
 function firstImageForSlide(slideId: string) {
@@ -463,8 +480,35 @@ const canRunCurrentStage = computed(() => {
   if (activeStep.value === "input") return true;
   return canOpenWorkflowStep(activeStep.value);
 });
+
+function stepBeforePausedStage(stepId: WorkflowStepId) {
+  if (!isPaused.value || !pausedStageId.value) return false;
+  const pausedIndex = workflowTabs.indexOf(
+    pausedStageId.value as (typeof workflowTabs)[number]
+  );
+  const stepIndex = workflowTabs.indexOf(stepId as (typeof workflowTabs)[number]);
+  return pausedIndex > 0 && stepIndex >= 0 && stepIndex < pausedIndex;
+}
+
+function completedStepBeforePause(step: WorkflowStep): WorkflowStep | null {
+  if (!stepBeforePausedStage(step.id)) return null;
+  if (step.id === "input" && hasInputContent()) {
+    return { ...step, status: "done", progress: 100 };
+  }
+  if (step.id === "outline" && hasOutlineContent()) {
+    return { ...step, status: "done", progress: 100 };
+  }
+  if (step.id === "images" && pausedStageId.value !== "outline") {
+    return { ...step, status: "done", progress: 100 };
+  }
+  return null;
+}
+
 const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
   steps.value.map((step) => {
+    const completedBeforePause = completedStepBeforePause(step);
+    if (completedBeforePause) return completedBeforePause;
+
     if (isPaused.value && step.status === "running") {
       return {
         ...step,
@@ -503,7 +547,7 @@ const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
         status: "idle",
         progress: Math.round(
           (completedImageCount.value /
-            Math.max(1, slidesNeedingImages.value.length)) *
+            Math.max(1, requiredImageCount.value)) *
             100
         )
       };
@@ -530,6 +574,10 @@ const pipelineStages = computed(() => {
   const stageImages = byId.get("images");
   const stageLayout = byId.get("layout");
   const stagePreview = byId.get("preview");
+  const imagesPassedBeforePause =
+    isPaused.value &&
+    (pausedStageId.value === "layout" || pausedStageId.value === "preview") &&
+    stageImages?.status === "done";
 
   const stages = [
     {
@@ -561,16 +609,20 @@ const pipelineStages = computed(() => {
       id: "images" as WorkflowStepId,
       icon: Image,
       title: "生成图片",
-      description: imageStepSkipped.value
+      description: imagesPassedBeforePause
+        ? (requiredImageCount.value > 0 ? "图片阶段已通过" : "无需图片")
+        : imageStepSkipped.value
         ? "无需图片"
         : slidesNeedingImages.value.length > 0
           ? `${slidesNeedingImages.value.length} 页需要图片`
           : "等待判断",
       status: stageImages?.status || "idle",
       progress: imageStepSkipped.value ? 100 : stageImages?.progress || 0,
-      metric: imageStepSkipped.value
+      metric: imagesPassedBeforePause
+        ? (requiredImageCount.value > 0 ? "已通过" : "无需图片")
+        : imageStepSkipped.value
         ? "无需图片"
-        : `${completedImageCount.value}/${Math.max(1, slidesNeedingImages.value.length)} 张`,
+        : `${completedImageCount.value}/${Math.max(1, requiredImageCount.value)} 张`,
       action: "查看状态",
       skipped: imageStepSkipped.value
     },
@@ -1031,7 +1083,7 @@ function buildExportOptions(format: "pptx" | "pdf"): PptxExportOptions {
       duration: 0.62,
       stagger: 0.2,
       trigger: "after-previous",
-      transitionEffect: enabled ? "push" : "none",
+      transitionEffect: enabled ? "auto" : "none",
       transitionDuration: 0.55
     }
   };
@@ -1088,7 +1140,7 @@ function stageLabel(
   paused?: boolean
 ) {
   if (paused) return "已暂停";
-  if (skipped) return "已完成";
+  if (skipped) return "无需图片";
   if (status === "done") return "已完成";
   if (status === "running") return "运行中";
   return "等待中";
@@ -1253,7 +1305,7 @@ async function retryImage(slideId: string) {
                     'pipeline-stage--running':
                       stage.status === 'running' && !stage.paused,
                     'pipeline-stage--paused': stage.paused,
-                    'pipeline-stage--done': stage.status === 'done',
+                    'pipeline-stage--done': stage.status === 'done' && !stage.skipped,
                     'pipeline-stage--skipped': stage.skipped,
                     'pipeline-stage--disabled': stage.disabled
                   }"
@@ -1428,13 +1480,13 @@ async function retryImage(slideId: string) {
                         <h3>图片</h3>
                         <p v-if="imageStepSkipped">本次不需要图片。</p>
                         <p v-else-if="slidesNeedingImages.length">
-                          这些页面需要图片。
+                          {{ slidesNeedingImages.length }} 页共 {{ requiredImageCount }} 张图片待处理。
                         </p>
                         <p v-else>生成大纲后自动判断。</p>
                       </div>
                     </div>
                     <div class="image-gate__stats">
-                      <span>{{ slidesNeedingImages.length }} 页需要图片</span>
+                      <span>{{ slidesNeedingImages.length }} 页 / {{ requiredImageCount }} 张</span>
                       <strong>{{ completedImageCount }} 张已完成</strong>
                     </div>
                   </div>
@@ -1837,9 +1889,14 @@ async function retryImage(slideId: string) {
               v-if="presentationPage.svg"
               :key="presentationPage.pageNumber"
               class="presentation-slide"
+              :style="presentationSlideStyle"
               :svg="presentationPage.svg"
             />
-            <div v-else class="presentation-slide presentation-slide--empty">
+            <div
+              v-else
+              class="presentation-slide presentation-slide--empty"
+              :style="presentationSlideStyle"
+            >
               <Paintbrush :size="30" />
               <span>第 {{ presentationPage.pageNumber }} 页尚未生成</span>
             </div>
@@ -1874,7 +1931,7 @@ async function retryImage(slideId: string) {
       </div>
     </Teleport>
     <AiChatPanel
-      v-if="assistantProject"
+      v-if="assistantProject && !showPresentation"
       :key="assistantProject.id"
       :project-id="assistantProject.id"
       :project-title="assistantProject.title"
@@ -2176,6 +2233,12 @@ async function retryImage(slideId: string) {
 
 .pipeline-stage--skipped {
   border-style: dashed;
+}
+
+.pipeline-stage--skipped .pipeline-stage__icon {
+  color: var(--color-muted);
+  border-color: var(--color-border);
+  background: var(--color-surface);
 }
 
 .pipeline-stage__icon {
@@ -2581,14 +2644,15 @@ async function retryImage(slideId: string) {
   min-height: 340px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: var(--color-panel);
+  background: var(--color-card);
   overflow: hidden;
 }
 
 .executor-preview__canvas {
-  width: min(100%, 760px);
+  width: 100%;
+  max-width: none;
   aspect-ratio: 16 / 9;
-  border: 1px solid var(--color-border);
+  border: 0;
   background: var(--color-surface);
 }
 
@@ -2748,8 +2812,8 @@ async function retryImage(slideId: string) {
   z-index: 1000;
   display: grid;
   grid-template-columns: 184px minmax(0, 1fr);
-  background: #090806;
-  color: #f8f3e7;
+  background: var(--color-bg);
+  color: var(--color-text);
 }
 
 .presentation-sidebar {
@@ -2760,8 +2824,8 @@ async function retryImage(slideId: string) {
   min-height: 0;
   padding: 14px 12px;
   overflow-y: auto;
-  background: #11100e;
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
 }
 
 .presentation-sidebar__title {
@@ -2769,12 +2833,12 @@ async function retryImage(slideId: string) {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  color: rgba(248, 243, 231, 0.72);
+  color: var(--color-muted);
   font-size: 12px;
 }
 
 .presentation-sidebar__title strong {
-  color: #f8f3e7;
+  color: var(--color-text);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2785,18 +2849,18 @@ async function retryImage(slideId: string) {
   gap: 8px;
   width: 100%;
   padding: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #f8f3e7;
+  background: var(--color-panel);
+  color: var(--color-text);
   cursor: pointer;
   text-align: left;
 }
 
 .presentation-page-tab:hover,
 .presentation-page-tab--active {
-  border-color: rgba(210, 162, 70, 0.72);
-  background: rgba(210, 162, 70, 0.14);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
 }
 
 .presentation-page-tab > span {
@@ -2805,9 +2869,15 @@ async function retryImage(slideId: string) {
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--color-surface);
+  color: var(--color-text);
   font-size: 11px;
   font-weight: 800;
+}
+
+.presentation-page-tab--active > span {
+  background: var(--color-accent);
+  color: var(--color-inverse);
 }
 
 .presentation-page-tab__thumb {
@@ -2815,7 +2885,8 @@ async function retryImage(slideId: string) {
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 5px;
-  background: #171512;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
 }
 
 .presentation-page-tab__thumb :deep(svg) {
@@ -2829,9 +2900,9 @@ async function retryImage(slideId: string) {
   place-items: center;
   width: 100%;
   aspect-ratio: 16 / 9;
-  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border: 1px dashed var(--color-border-strong);
   border-radius: 5px;
-  color: rgba(248, 243, 231, 0.58);
+  color: var(--color-muted);
   font-size: 12px;
 }
 
@@ -2849,8 +2920,8 @@ async function retryImage(slideId: string) {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 18px;
-  background: rgba(9, 8, 6, 0.92);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .presentation-toolbar div {
@@ -2860,12 +2931,12 @@ async function retryImage(slideId: string) {
 }
 
 .presentation-toolbar span {
-  color: rgba(248, 243, 231, 0.62);
+  color: var(--color-muted);
   font-size: 12px;
 }
 
 .presentation-toolbar strong {
-  color: #f8f3e7;
+  color: var(--color-text);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
@@ -2873,9 +2944,9 @@ async function retryImage(slideId: string) {
 .presentation-close,
 .presentation-nav,
 .presentation-dots button {
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.08);
-  color: #f8f3e7;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
   cursor: pointer;
   transition:
     border-color var(--transition-fast),
@@ -2894,8 +2965,9 @@ async function retryImage(slideId: string) {
 .presentation-close:hover,
 .presentation-nav:hover:not(:disabled),
 .presentation-dots button:hover {
-  border-color: rgba(255, 255, 255, 0.34);
-  background: rgba(255, 255, 255, 0.14);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
 }
 
 .presentation-stage {
@@ -2904,16 +2976,27 @@ async function retryImage(slideId: string) {
   min-width: 0;
   min-height: 0;
   padding: 32px 72px;
+  background: var(--color-panel);
 }
 
 .presentation-slide {
-  width: min(100%, calc((100vh - 160px) * 16 / 9));
-  aspect-ratio: 16 / 9;
+  width: min(100%, calc((100vh - 160px) * var(--presentation-slide-ratio, 1.7778)));
+  aspect-ratio: var(--presentation-slide-ratio, 1.7778);
   max-height: calc(100vh - 160px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--color-border-strong);
   border-radius: 8px;
-  background: #111;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.presentation-slide :deep(.private-svg__content),
+.presentation-slide :deep(svg) {
+  width: 100%;
+  height: 100%;
+}
+
+.presentation-slide :deep(svg) {
+  background: var(--color-surface);
 }
 
 .presentation-slide--empty {
@@ -2921,7 +3004,7 @@ async function retryImage(slideId: string) {
   place-items: center;
   align-content: center;
   gap: 12px;
-  color: rgba(248, 243, 231, 0.68);
+  color: var(--color-muted);
   font-size: 14px;
 }
 
@@ -2955,15 +3038,15 @@ async function retryImage(slideId: string) {
   gap: 10px;
   justify-items: center;
   padding: 12px 18px 18px;
-  background: rgba(9, 8, 6, 0.92);
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
 }
 
 .presentation-notes {
   max-width: 920px;
   max-height: 56px;
   overflow: hidden;
-  color: rgba(248, 243, 231, 0.72);
+  color: var(--color-muted);
   font-size: 12px;
   line-height: 1.55;
   text-align: center;
@@ -2986,8 +3069,8 @@ async function retryImage(slideId: string) {
 }
 
 .presentation-dots .presentation-dot--active {
-  border-color: #d2a246;
-  background: #d2a246;
+  border-color: var(--color-accent);
+  background: var(--color-accent);
 }
 
 .image-preview-modal {

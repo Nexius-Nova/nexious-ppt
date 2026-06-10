@@ -449,6 +449,7 @@ function normalizeStreamingOutlineSlide(item: any, index: number): SlideOutline 
     bullets,
     speakerNotes: String(item?.speakerNotes || ''),
     visualPrompt: String(item?.visualPrompt || ''),
+    animationDescription: String(item?.animationDescription || ''),
     chartHint: item?.chartHint ? String(item.chartHint) : undefined,
     layout: item?.layout as SlideLayout | undefined,
   };
@@ -461,6 +462,7 @@ function specSlideToOutlineSlide(slide: SpecSlide, fallbackIndex: number): Slide
     bullets: Array.isArray(slide.bullets) ? slide.bullets.map(item => String(item || '').trim()).filter(Boolean) : [],
     speakerNotes: String(slide.speakerNotes || ''),
     visualPrompt: String(slide.visualPrompt || ''),
+    animationDescription: String(slide.animationDescription || ''),
     imagePlan: Array.isArray(slide.imagePlan) ? slide.imagePlan.map((plan, index) => ({
       id: String(plan?.id || `img-${index + 1}`),
       prompt: String(plan?.prompt || '').trim(),
@@ -547,6 +549,7 @@ export const useAgentStore = defineStore('agent', () => {
     configOptions.value = cloneConfigOptions();
   }
   const subscribedQueueJobIds = new Set<string>();
+  const lastQueueLogKey = ref('');
 
   type RunContext = { token: number; projectId: string | null };
 
@@ -597,6 +600,26 @@ export const useAgentStore = defineStore('agent', () => {
     return status === 'completed' || status === 'failed' || status === 'cancelled';
   }
 
+  function isWorkflowStepId(value: unknown): value is WorkflowStepId {
+    return value === 'input' || value === 'outline' || value === 'images' || value === 'layout' || value === 'preview';
+  }
+
+  function workflowStepFromQueuePhase(phase?: string, fallback: WorkflowStepId = activeStep.value): WorkflowStepId {
+    if (phase === 'outline' || phase === 'images' || phase === 'layout') return phase;
+    if (phase === 'starting' || phase === 'queued') return fallback === 'images' || fallback === 'layout' ? fallback : 'outline';
+    return fallback === 'input' || fallback === 'preview' ? 'outline' : fallback;
+  }
+
+  function displayStepForQueueJob(job: QueueJobSnapshot, fallback: WorkflowStepId = activeStep.value): WorkflowStepId {
+    if (job.phase === 'outline' || job.phase === 'images' || job.phase === 'layout') return job.phase;
+    const runningJob = getProjectRunningJob(job.projectId);
+    const targetStage = runningJob?.resumeStage;
+    if ((job.phase === 'queued' || job.phase === 'starting') && isWorkflowStepId(targetStage)) {
+      return targetStage === 'input' || targetStage === 'preview' ? 'outline' : targetStage;
+    }
+    return workflowStepFromQueuePhase(job.phase, fallback);
+  }
+
   function normalizeActiveQueueJob(value: any): PptProjectState['activeQueueJob'] {
     if (!value || typeof value !== 'object') return null;
     const status = String(value.status || '');
@@ -645,8 +668,15 @@ export const useAgentStore = defineStore('agent', () => {
     activeGenerationJobId.value = job?.dbJobId || null;
   }
 
-  function upsertProjectRunningJob(projectId: string, job: QueueJobSnapshot) {
+  function upsertProjectRunningJob(projectId: string, job: QueueJobSnapshot, resumeStageHint?: WorkflowStepId | null) {
     const next = { ...runningProjectJobs.value };
+    const project = pptProjects.value.find(item => item.id === projectId);
+    const normalizedState = project ? normalizeProjectState(project.state) : null;
+    const preservedResumeStage = next[projectId]?.resumeStage
+      || resumeStageHint
+      || normalizedState?.resumeStage
+      || normalizedState?.lastActiveStep
+      || null;
     if (isTerminalQueueStatus(job.status)) {
       delete next[projectId];
     } else {
@@ -657,13 +687,13 @@ export const useAgentStore = defineStore('agent', () => {
         status: job.status,
         phase: job.phase,
         progress: job.progress,
+        resumeStage: preservedResumeStage,
         updatedAt: Date.now(),
       };
     }
     runningProjectJobs.value = next;
-    const project = pptProjects.value.find(item => item.id === projectId);
     if (project) {
-      const normalizedState = normalizeProjectState(project.state);
+      const currentState = normalizeProjectState(project.state);
       if (job.projectState) {
         const serverState = normalizeProjectState(job.projectState as Partial<PptProjectState>);
         project.state = {
@@ -681,11 +711,11 @@ export const useAgentStore = defineStore('agent', () => {
         return;
       }
       project.state = {
-        ...normalizedState,
+        ...currentState,
         activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateForProject(projectId),
         workflowActive: !isTerminalQueueStatus(job.status),
         paused: false,
-        workflowContext: workflowContextFromQueueSnapshot(normalizedState, projectId, job),
+        workflowContext: workflowContextFromQueueSnapshot(currentState, projectId, job),
       };
       project.updatedAt = Date.now();
     }
@@ -888,34 +918,36 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function applyQueueJobToActiveProject(job: QueueJobSnapshot) {
-    pushLog(job.message || `任务进度：${job.phase}`);
+    pushQueueJobLog(job);
     if (job.projectState) {
       restoreProjectState(normalizeProjectState(job.projectState as Partial<PptProjectState>));
       return;
     }
     if (job.status === 'cancelled') return;
-    if (job.phase === 'outline' || job.phase === 'starting' || job.phase === 'queued') {
+    const displayStep = displayStepForQueueJob(job);
+    if (displayStep === 'outline') {
       activeStep.value = 'outline';
       setStepStatus('outline', 'running', Math.min(99, job.progress));
       if (job.phase === 'outline' && job.result) {
         applyQueuedOutlineProgress(job.result, job.progress);
       }
-    } else if (job.phase === 'images') {
+    } else if (displayStep === 'images') {
       activeStep.value = 'images';
       setStepStatus('outline', 'done', 100);
       setStepStatus('images', 'running', Math.min(99, job.progress));
-      if (job.result) {
+      if (job.phase === 'images' && job.result) {
         try {
           applyQueuedGenerationResult(job.result, { phase: 'images', progress: job.progress });
         } catch {
           // 图片阶段可能只有消息，没有完整结果。
         }
       }
-    } else if (job.phase === 'layout') {
+    } else if (displayStep === 'layout') {
       activeStep.value = 'layout';
       setStepStatus('outline', 'done', 100);
+      setStepStatus('images', 'done', 100);
       setStepStatus('layout', 'running', Math.min(99, job.progress));
-      if (job.result) {
+      if (job.phase === 'layout' && job.result) {
         try {
           applyQueuedGenerationResult(job.result, { phase: 'layout', progress: job.progress });
           setStepStatus('layout', 'running', Math.min(99, job.progress));
@@ -924,6 +956,20 @@ export const useAgentStore = defineStore('agent', () => {
         }
       }
     }
+  }
+
+  function pushQueueJobLog(job: QueueJobSnapshot) {
+    const message = job.message || `任务进度：${job.phase}`;
+    const key = [
+      job.id || '',
+      job.phase || '',
+      job.status || '',
+      job.progress ?? '',
+      message,
+    ].join('|');
+    if (lastQueueLogKey.value === key) return;
+    lastQueueLogKey.value = key;
+    pushLog(message);
   }
 
   function subscribeProjectQueueJob(projectId: string, queueJobId: string) {
@@ -939,6 +985,14 @@ export const useAgentStore = defineStore('agent', () => {
       applyQueueJobToProjectState(projectId, finalJob);
       clearProjectRunningJob(projectId);
       if (activePptId.value === projectId) {
+        if (finalJob.status === 'cancelled') {
+          const reason = finalJob.errorMessage || finalJob.message || '服务端任务已暂停';
+          await pauseWorkflowAfterInterruption(workflowStepFromQueuePhase(finalJob.phase), reason, {
+            projectId,
+            waitingForImageRetry: isBlockingImageGenerationError(reason),
+          });
+          return;
+        }
         applyQueuedGenerationResult(finalJob.result, { final: true });
         activeStep.value = 'preview';
         clearPauseState();
@@ -1277,6 +1331,29 @@ export const useAgentStore = defineStore('agent', () => {
     generatedSlides.value = new Set(getReadyImageSlideIds());
   }
 
+  function syncOutlineImagePlansFromSpec() {
+    if (!designSpec.value?.outline?.length || !outline.value.length) return;
+    const specById = new Map(designSpec.value.outline.map((slide, index) => [String(slide.id || `slide-${index + 1}`), slide]));
+    outline.value = outline.value.map((slide, index) => {
+      const specSlide = specById.get(String(slide.id)) || designSpec.value?.outline[index];
+      if (!specSlide) return slide;
+      return {
+        ...slide,
+        visualPrompt: String(specSlide.visualPrompt || slide.visualPrompt || ''),
+        imagePlan: Array.isArray(specSlide.imagePlan)
+          ? specSlide.imagePlan
+              .map((plan, planIndex) => ({
+                id: String(plan?.id || `img-${planIndex + 1}`),
+                prompt: String(plan?.prompt || '').trim(),
+                purpose: plan?.purpose ? String(plan.purpose) : undefined,
+                style: plan?.style ? String(plan.style) : undefined,
+              }))
+              .filter((plan) => plan.prompt)
+          : slide.imagePlan,
+      };
+    });
+  }
+
   function slidesRequiringGeneratedImages() {
     const slides = designSpec.value
       ? designSpec.value.outline
@@ -1489,6 +1566,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     designSpec.value = normalizedState.designSpec || null;
     specLock.value = normalizedState.specLock || null;
+    syncOutlineImagePlansFromSpec();
     svgPages.value = normalizedState.svgPages || [];
     normalizeParametersAgainstConfig();
     retryingPageNumbers.value = new Set();
@@ -1836,15 +1914,10 @@ export const useAgentStore = defineStore('agent', () => {
     designSpec.value = result.spec;
     specLock.value = result.lock;
     applyGeneratedProjectInfo(designSpec.value);
-    outline.value = (result.outline || result.spec.outline || []).map((s: any) => ({
-      id: s.id,
-      title: s.title,
-      bullets: s.bullets || [],
-      speakerNotes: s.speakerNotes || '',
-      visualPrompt: s.visualPrompt || '',
-      chartHint: s.chartHint,
-      layout: s.layout as SlideLayout,
-    }));
+    outline.value = (result.outline || result.spec.outline || []).map((s: any, index: number) =>
+      specSlideToOutlineSlide(s as SpecSlide, index)
+    );
+    syncOutlineImagePlansFromSpec();
     images.value = Array.isArray(result.images) ? result.images : [];
     svgPages.value = Array.isArray(result.svgPages)
       ? result.svgPages.map((page: any, index: number) => ({
@@ -2124,6 +2197,41 @@ export const useAgentStore = defineStore('agent', () => {
     syncToProject();
   }
 
+  async function pauseWorkflowAfterInterruption(
+    stage: WorkflowStepId,
+    reason: string,
+    options: { projectId?: string | null; waitingForImageRetry?: boolean; toastTitle?: string } = {}
+  ) {
+    const actualStage = stage === 'preview' ? 'layout' : stage;
+    const pausedProjectId = options.projectId ?? activePptId.value;
+    workflowRunToken.value += 1;
+    activeStep.value = actualStage;
+    freezeWorkflowStepsForPause(actualStage);
+    if (options.waitingForImageRetry) {
+      waitingForImageRetry.value = true;
+      updateImageStepFromGate('idle');
+    }
+    isPaused.value = true;
+    recoveredActiveWorkflow.value = false;
+    pauseRequested.value = false;
+    resumeStage.value = actualStage;
+    isRunning.value = false;
+    runningProjectId.value = null;
+    currentGeneratingSlide.value = null;
+    activeQueueJobId.value = null;
+    if (activeGenerationJobId.value) {
+      const progress = steps.value.find((step) => step.id === actualStage)?.progress || 0;
+      await reportGenerationJob(actualStage, progress, 'cancelled', reason);
+    }
+    activeGenerationJobId.value = null;
+    clearProjectRunningJob(pausedProjectId);
+    const message = `${reason || '工作流异常中断'}，已自动暂停。点击继续会从当前阶段恢复。`;
+    pushLog(message);
+    await syncToProjectNow();
+    const toastStore = useToastStore();
+    toastStore.warning(options.toastTitle || '工作流已暂停', reason || '生成过程中发生异常，请处理后继续。');
+  }
+
   function clearPauseState() {
     isPaused.value = false;
     pauseRequested.value = false;
@@ -2132,19 +2240,39 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function inferWorkflowResumeStage(fallback: WorkflowStepId = activeStep.value): WorkflowStepId {
+    const validStages: WorkflowStepId[] = ['input', 'outline', 'images', 'layout', 'preview'];
     const savedStage = resumeStage.value;
-    if (savedStage === 'images' || savedStage === 'layout' || savedStage === 'outline' || savedStage === 'input' || savedStage === 'preview') {
+    const imageGate = imageGenerationGate();
+    const hasMissingImages = waitingForImageRetry.value || (imageGate.total > 0 && !imageGate.complete);
+
+    if (savedStage && validStages.includes(savedStage)) {
+      if ((savedStage === 'layout' || savedStage === 'preview') && hasMissingImages) return 'images';
       return savedStage;
     }
 
-    if (waitingForImageRetry.value) return 'images';
-    const imageGate = imageGenerationGate();
-    if (imageGate.total > 0 && !imageGate.complete) return 'images';
+    if (hasMissingImages) return 'images';
     if (hasPendingLayoutPages()) return 'layout';
-    if (fallback === 'images' || fallback === 'layout' || fallback === 'outline' || fallback === 'input' || fallback === 'preview') {
-      return fallback;
-    }
+    if (fallback && validStages.includes(fallback)) return fallback;
     return 'outline';
+  }
+
+  function activateResumeStage(stage: WorkflowStepId) {
+    if (stage === 'outline') {
+      activeStep.value = 'outline';
+      return;
+    }
+    if (stage === 'images') {
+      activeStep.value = 'images';
+      setStepStatus('outline', 'done', 100);
+      return;
+    }
+    if (stage === 'layout') {
+      const imageGate = imageGenerationGate();
+      activeStep.value = 'layout';
+      setStepStatus('outline', 'done', 100);
+      setStepStatus('images', imageGate.complete ? 'done' : 'idle', imageGate.complete ? 100 : steps.value.find(step => step.id === 'images')?.progress || 0);
+      return;
+    }
   }
 
   async function resumeWorkflowFromStage(stage: WorkflowStepId = inferWorkflowResumeStage()) {
@@ -2158,6 +2286,7 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     const resumeFrom = inferWorkflowResumeStage(stage);
+    activateResumeStage(resumeFrom);
     clearPauseState();
 
     if (resumeFrom === 'input') {
@@ -2166,7 +2295,7 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     if (resumeFrom === 'outline') {
-      await runFullWorkflow({ resume: true });
+      await runFullWorkflow({ resume: true, resumeStage: 'outline' });
       return;
     }
 
@@ -4124,6 +4253,8 @@ export const useAgentStore = defineStore('agent', () => {
       slideCount: parameters.value.slideCount,
       imageStyle: parameters.value.imageStyle,
       template: selectedTemplate.value ? selectedTemplate.value.name : 'auto',
+      animationEnabled: parameters.value.animationEnabled,
+      animationEffect: parameters.value.animationEffect,
       textModelId: selectedTextModelId.value,
       imageModelId: selectedImageModelId.value,
       templateAsset: selectedTemplate.value ? snapshotTemplateAsset(selectedTemplate.value) : null,
@@ -4185,6 +4316,7 @@ export const useAgentStore = defineStore('agent', () => {
     let streamedOutlineText = '';
     let outlineFlushTimer: ReturnType<typeof setTimeout> | null = null;
     let lastOutlineFlushAt = 0;
+    let lastLoggedOutlineCount = 0;
 
     const clearOutlineFlushTimer = () => {
       if (!outlineFlushTimer) return;
@@ -4247,6 +4379,10 @@ export const useAgentStore = defineStore('agent', () => {
             const targetCount = parameters.value.slideCount > 0 ? parameters.value.slideCount : Math.max(outline.value.length + 1, 6);
             const progress = Math.min(90, 20 + Math.round((outline.value.length / Math.max(1, targetCount)) * 65));
             setStepStatus('outline', 'running', progress);
+            if (outline.value.length > 0 && outline.value.length !== lastLoggedOutlineCount) {
+              lastLoggedOutlineCount = outline.value.length;
+              pushLog(`正在生成大纲：已输出 ${outline.value.length} 页`);
+            }
           },
           onComplete: (data) => {
             if (!isRunContextActive(ctx)) return;
@@ -4268,7 +4404,6 @@ export const useAgentStore = defineStore('agent', () => {
           onError: (message) => {
             if (!isRunContextActive(ctx)) return;
             pushLog(`大纲生成失败：${message}`);
-            setStepStatus('outline', 'idle', 0);
             const toastStore = useToastStore();
             toastStore.error('大纲生成失败', message);
           },
@@ -4278,10 +4413,9 @@ export const useAgentStore = defineStore('agent', () => {
       await syncToProjectNow();
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
-      setStepStatus('outline', 'idle', 0);
-      pushLog('大纲生成失败，请检查 API Key 配置。');
-      await syncToProjectNow();
-      throw error;
+      const errMsg = error instanceof Error ? error.message : '大纲生成失败，请检查 API Key 配置。';
+      await pauseWorkflowAfterInterruption('outline', `大纲生成异常：${errMsg}`);
+      return;
     } finally {
       clearOutlineFlushTimer();
     }
@@ -4415,11 +4549,12 @@ export const useAgentStore = defineStore('agent', () => {
 
       if (!gate.complete) {
         const failedTitles = gate.missingTasks.map((task) => `${task.slide.title}/${task.plan.purpose || task.plan.id}`).join('、');
-        pushLog(`图片自动重试后仍未完成：${failedTitles}。请手动重试成功后再继续。`);
         activeStep.value = 'images';
         currentGeneratingSlide.value = null;
-        waitingForImageRetry.value = true;
-        await syncToProjectNow();
+        await pauseWorkflowAfterInterruption('images', `图片自动重试后仍未完成：${failedTitles}。请手动重试成功后再继续`, {
+          waitingForImageRetry: true,
+          toastTitle: '等待图片生成',
+        });
         return false;
       }
 
@@ -4435,11 +4570,12 @@ export const useAgentStore = defineStore('agent', () => {
       return true;
     } catch (error) {
       if (!isRunContextActive(ctx)) return false;
-      setStepStatus('images', 'idle', 0);
       const errMsg = error instanceof Error ? error.message : '未知错误';
-      pushLog(`图片生成失败：${errMsg}`);
-      await syncToProjectNow();
-      throw error;
+      await pauseWorkflowAfterInterruption('images', `图片生成异常：${errMsg}`, {
+        waitingForImageRetry: true,
+        toastTitle: '图片生成已暂停',
+      });
+      return false;
     }
   }
 
@@ -4787,8 +4923,7 @@ export const useAgentStore = defineStore('agent', () => {
         executorCursor.value = completedLeadingLayoutPages(totalPages);
         setStepStatus('layout', 'idle', Math.round((completedValidPages / totalPages) * 100));
         setStepStatus('preview', 'idle', 0);
-        pushLog(`页面生成未完成，缺少第 ${missingPages.join('、')} 页。点击运行当前阶段可继续补生成。`);
-        await syncWorkflowProgress(true);
+        await pauseWorkflowAfterInterruption('layout', `页面生成未完成，缺少第 ${missingPages.join('、')} 页。点击继续会补生成缺失页面`);
         return;
       }
 
@@ -4799,23 +4934,16 @@ export const useAgentStore = defineStore('agent', () => {
     } catch (error) {
       if (!isRunContextActive(ctx)) return;
       if (isMissingSlideImageError(error)) {
-        activeStep.value = 'images';
-        waitingForImageRetry.value = true;
-        currentGeneratingSlide.value = null;
-        updateImageStepFromGate('idle');
-        pushLog('页面生成已暂停，请先完成缺失图片后再继续。');
-        const toastStore = useToastStore();
-        toastStore.warning('等待图片生成', error.message);
-        await syncToProjectNow();
+        await pauseWorkflowAfterInterruption('images', `页面生成已暂停，请先完成缺失图片后再继续：${error.message}`, {
+          waitingForImageRetry: true,
+          toastTitle: '等待图片生成',
+        });
         return;
       }
 
-      setStepStatus('layout', 'idle', 0);
       const errMsg = error instanceof Error ? error.message : '页面生成失败';
-      pushLog(`页面生成失败：${errMsg}`);
-      const toastStore = useToastStore();
-      toastStore.error('页面生成失败', errMsg);
-      throw error;
+      await pauseWorkflowAfterInterruption('layout', `页面生成异常：${errMsg}`);
+      return;
     } finally {
       if (isRunContextActive(ctx) && !options.embedded && !isPaused.value) {
         isRunning.value = false;
@@ -5116,7 +5244,7 @@ export const useAgentStore = defineStore('agent', () => {
 
       activeQueueJobId.value = response.data.id;
       activeGenerationJobId.value = response.data.dbJobId || null;
-      upsertProjectRunningJob(currentQueuedProjectId, response.data);
+      upsertProjectRunningJob(currentQueuedProjectId, response.data, queuedResumeStage);
       subscribedQueueJobId = response.data.id;
       subscribedQueueJobIds.add(subscribedQueueJobId);
       const finalJob = await aiApi.waitForQueueJob(response.data.id, (job) => {
@@ -5129,6 +5257,14 @@ export const useAgentStore = defineStore('agent', () => {
       applyQueueJobToProjectState(currentQueuedProjectId, finalJob);
       clearProjectRunningJob(currentQueuedProjectId);
       if (!isRunContextActive(ctx)) return;
+      if (finalJob.status === 'cancelled') {
+        const reason = finalJob.errorMessage || finalJob.message || '服务端生成任务已暂停';
+        await pauseWorkflowAfterInterruption(workflowStepFromQueuePhase(finalJob.phase), reason, {
+          projectId: currentQueuedProjectId,
+          waitingForImageRetry: isBlockingImageGenerationError(reason),
+        });
+        return;
+      }
       applyQueuedGenerationResult(finalJob.result, { final: true });
       const readiness = exportReadiness();
       activeStep.value = readiness.ready ? 'preview' : 'layout';
@@ -5148,9 +5284,6 @@ export const useAgentStore = defineStore('agent', () => {
         toastStore.warning('页面未全部生成', '请在生成页面阶段运行当前阶段补齐缺失页面');
       }
     } catch (error) {
-      if (queuedProjectId && !(pauseRequested.value || (error instanceof Error && error.message === '任务已取消'))) {
-        clearProjectRunningJob(queuedProjectId);
-      }
       if (!isRunContextActive(ctx)) return;
       const errMsg = error instanceof Error ? error.message : '未知错误';
       if (pauseRequested.value || errMsg === '任务已取消') {
@@ -5158,21 +5291,17 @@ export const useAgentStore = defineStore('agent', () => {
         return;
       }
       if (isBlockingImageGenerationError(error)) {
-        activeStep.value = 'images';
-        waitingForImageRetry.value = true;
-        currentGeneratingSlide.value = null;
-        updateImageStepFromGate('idle');
-        pushLog(`图片未全部生成：${errMsg}`);
-        await failGenerationJob(error);
-        await syncToProjectNow();
-        toastStore.warning('等待图片生成', errMsg);
+        await pauseWorkflowAfterInterruption('images', `图片未全部生成：${errMsg}`, {
+          projectId: queuedProjectId || ctx.projectId,
+          waitingForImageRetry: true,
+          toastTitle: '等待图片生成',
+        });
         return;
       }
 
-      pushLog(`PPT 生成失败：${errMsg}`);
-      await failGenerationJob(error);
-      syncToProject();
-      toastStore.error('PPT 生成失败', errMsg);
+      await pauseWorkflowAfterInterruption(inferPauseStage(activeStep.value), `PPT 生成异常：${errMsg}`, {
+        projectId: queuedProjectId || ctx.projectId,
+      });
     } finally {
       if (isRunContextActive(ctx) && !isPaused.value) {
         clearProjectRunningJob(ctx.projectId);
@@ -5236,6 +5365,9 @@ export const useAgentStore = defineStore('agent', () => {
           pushLog(job.message || `导出进度：${job.progress}%`);
           setStepStatus('preview', 'running', Math.max(40, Math.min(99, job.progress)));
         });
+        if (finalJob.status === 'cancelled') {
+          throw new Error(finalJob.errorMessage || finalJob.message || '导出任务已取消');
+        }
         const fileName = await aiApi.downloadExportJob(finalJob.id);
         artifact = {
           format,

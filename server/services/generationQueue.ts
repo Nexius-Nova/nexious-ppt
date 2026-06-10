@@ -1,6 +1,6 @@
-﻿import { randomUUID } from 'node:crypto';
+﻿import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import type { Response } from 'express';
 import { Queue, Worker, type Job as BullJob } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -13,6 +13,7 @@ import {
   buildExecutorSystemPrompt,
   buildSpecLock,
   buildStrategistPrompt,
+  buildSvgQualityPatchPrompt,
   buildSvgQualityRepairPrompt,
   cleanSvgOutput,
   ensureImageUsedInSvg,
@@ -26,7 +27,7 @@ import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { DesignSpec, SpecLock, SpecSlide, StrategistInput } from '../engine/index.js';
 import { buildSlideImagePrompt } from '../engine/imageComposition.js';
 import { exportWithNexiousPpt, type PptExportOptions, type PptExportPage } from '../engine/ppt-exporter.js';
-import { generatedExportsRoot } from '../utils/storage.js';
+import { generatedExportsRoot, generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
 import { deriveWorkflowTransition, workflowStepProgress, workflowStepStatus } from './workflowStateMachine.js';
 import {
   getChartCatalog,
@@ -136,12 +137,42 @@ interface ServerImage {
   attempt?: number;
   error?: boolean;
   errorMessage?: string;
+  metadata?: ImageMetadata;
+}
+
+interface ImageMetadata {
+  width?: number;
+  height?: number;
+  contentType?: string;
+  bytes?: number;
+  checkedAt: number;
+  ok: boolean;
+  error?: string;
+  proxyUrl?: string;
+}
+
+interface ServerSvgPage {
+  pageNumber: number;
+  svg: string;
+  speakerNotes: string;
+  visualSummary?: string;
+  signature?: string;
+  sourceHash?: string;
+  generatedAt?: number;
+  quality?: {
+    repaired?: boolean;
+    issues?: number;
+    blockingIssues?: number;
+    attempts?: number;
+    reused?: boolean;
+  };
 }
 
 const jobs = new Map<string, QueuedJob>();
 const queue: string[] = [];
 const subscribers = new Map<string, Set<Response>>();
 const exportArtifacts = new Map<string, { buffer?: Buffer; filePath?: string; fileName: string; contentType: string }>();
+const imageMetadataCache = new Map<string, Promise<ImageMetadata> | ImageMetadata>();
 let activeGenerationJobs = 0;
 let activeExportJobs = 0;
 
@@ -169,6 +200,252 @@ let redisQueuePrecheckWarningLogged = false;
 const redisConnectionWarningAt = new Map<string, number>();
 const activeRedisJobs = new Map<string, QueuedJob>();
 const projectStateQueueSyncAt = new Map<string, number>();
+
+function stableJson(value: unknown): string {
+  const seen = new WeakSet<object>();
+  const normalize = (input: unknown): unknown => {
+    if (input === null || input === undefined) return input ?? null;
+    if (typeof input !== 'object') return input;
+    if (seen.has(input as object)) return '[Circular]';
+    seen.add(input as object);
+    if (Array.isArray(input)) return input.map((item) => normalize(item));
+    const source = input as Record<string, unknown>;
+    const ignoredKeys = new Set(['apiKey', 'key', 'secret', 'createdAt', 'updatedAt', 'generatedAt', 'attempt', 'errorMessage']);
+    return Object.keys(source)
+      .filter((key) => !ignoredKeys.has(key))
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        const next = normalize(source[key]);
+        if (next !== undefined) acc[key] = next;
+        return acc;
+      }, {});
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function hashValue(value: unknown) {
+  return createHash('sha256').update(stableJson(value)).digest('hex').slice(0, 32);
+}
+
+function pageKeyForSlide(slide: SpecSlide) {
+  return `P${String(slide.pageNumber).padStart(2, '0')}`;
+}
+
+function modelSignature(provider: string, baseUrl: string, model: string) {
+  return {
+    provider: String(provider || ''),
+    baseUrl: String(baseUrl || '').replace(/\/+$/, ''),
+    model: String(model || ''),
+  };
+}
+
+function slideSignature(input: {
+  job: GenerateQueuedJob;
+  spec: DesignSpec;
+  lock: SpecLock;
+  slide: SpecSlide;
+  slideImages: any[];
+  provider: string;
+  baseUrl: string;
+  model: string;
+}) {
+  const { job, spec, lock, slide, slideImages, provider, baseUrl, model } = input;
+  const pageKey = pageKeyForSlide(slide);
+  return hashValue({
+    slide: {
+      id: slide.id,
+      pageNumber: slide.pageNumber,
+      title: slide.title,
+      bullets: slide.bullets,
+      speakerNotes: slide.speakerNotes,
+      visualPrompt: slide.visualPrompt,
+      imagePlan: slide.imagePlan,
+      chartHint: slide.chartHint,
+      layout: slide.layout,
+      layoutParams: (slide as any).layoutParams,
+    },
+    lock: {
+      colors: lock.colors,
+      typography: lock.typography,
+      iconStyle: lock.iconStyle,
+      imageStyle: lock.imageStyle,
+      canvas: lock.canvas,
+      pageRhythm: lock.pageRhythm?.[pageKey],
+      pageLayouts: lock.pageLayouts?.[pageKey],
+      pageCharts: lock.pageCharts?.[pageKey],
+      forbidden: (lock as any).forbidden,
+    },
+    project: {
+      canvas: spec.canvas,
+      visualTheme: spec.visualTheme,
+      typography: spec.typography,
+      iconStyle: spec.iconStyle,
+      imageUsage: spec.imageUsage,
+      projectInfo: spec.projectInfo,
+      skillExtensions: spec.skillExtensions,
+    },
+    images: slideImages
+      .filter((image) => image?.url && image.selected !== false && !image.error)
+      .map((image) => ({
+        id: image.id,
+        slideId: image.slideId,
+        assetId: image.assetId,
+        url: image.url,
+        prompt: image.prompt,
+        purpose: image.purpose,
+        style: image.style,
+        metadata: image.metadata ? {
+          width: image.metadata.width,
+          height: image.metadata.height,
+          contentType: image.metadata.contentType,
+          bytes: image.metadata.bytes,
+          ok: image.metadata.ok,
+          proxyUrl: image.metadata.proxyUrl,
+        } : null,
+      })),
+    context: {
+      templateAsset: job.payload.input.templateAsset,
+      template: job.payload.input.template,
+      prompt: (job.payload.input as any).prompt,
+      promptId: (job.payload.input as any).promptId,
+      skills: (job.payload.input as any).skills,
+      textModelId: job.payload.input.textModelId,
+      imageModelId: job.payload.input.imageModelId,
+      model: modelSignature(provider, baseUrl, model),
+    },
+  });
+}
+
+function parsePngSize(buffer: Buffer) {
+  if (buffer.length < 24) return null;
+  if (buffer.readUInt32BE(0) !== 0x89504e47 || buffer.readUInt32BE(4) !== 0x0d0a1a0a) return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20), contentType: 'image/png' };
+}
+
+function parseJpegSize(buffer: Buffer) {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    const length = buffer.readUInt16BE(offset + 2);
+    if (length < 2) return null;
+    if (marker >= 0xc0 && marker <= 0xc3) {
+      return { height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7), contentType: 'image/jpeg' };
+    }
+    offset += 2 + length;
+  }
+  return null;
+}
+
+function parseImageSize(buffer: Buffer) {
+  return parsePngSize(buffer) || parseJpegSize(buffer);
+}
+
+function localGeneratedImagePath(rawUrl: string) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return null;
+  const publicRoot = publicBaseUrl();
+  const pathname = (() => {
+    if (value.startsWith('/generated-images/')) return value;
+    try {
+      const url = new URL(value);
+      const publicUrl = new URL(publicRoot);
+      if (url.origin === publicUrl.origin && url.pathname.startsWith('/generated-images/')) return url.pathname;
+    } catch {
+      return null;
+    }
+    return null;
+  })();
+  if (!pathname) return null;
+  const relative = decodeURIComponent(pathname.replace(/^\/generated-images\/?/, ''));
+  const resolved = path.resolve(generatedImagesRoot, relative);
+  const root = path.resolve(generatedImagesRoot);
+  return resolved.startsWith(root) ? resolved : null;
+}
+
+async function readLocalImageMetadata(url: string): Promise<ImageMetadata | null> {
+  const filePath = localGeneratedImagePath(url);
+  if (!filePath) return null;
+  const [fileStat, buffer] = await Promise.all([
+    stat(filePath),
+    readFile(filePath).catch(() => Buffer.alloc(0)),
+  ]);
+  const size = buffer.length ? parseImageSize(buffer) : null;
+  return {
+    width: size?.width,
+    height: size?.height,
+    contentType: size?.contentType,
+    bytes: fileStat.size,
+    checkedAt: Date.now(),
+    ok: true,
+    proxyUrl: url,
+  };
+}
+
+async function readRemoteImageMetadata(url: string): Promise<ImageMetadata> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch(url, { method: 'HEAD', signal: controller.signal });
+    return {
+      contentType: response.headers.get('content-type') || undefined,
+      bytes: Number(response.headers.get('content-length')) || undefined,
+      checkedAt: Date.now(),
+      ok: response.ok,
+      error: response.ok ? undefined : `HTTP ${response.status}`,
+      proxyUrl: url,
+    };
+  } catch (error) {
+    return {
+      checkedAt: Date.now(),
+      ok: false,
+      error: error instanceof Error ? error.message : '图片探测失败',
+      proxyUrl: url,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getImageMetadata(url: string): Promise<ImageMetadata> {
+  const key = String(url || '').trim();
+  if (!key) return { checkedAt: Date.now(), ok: false, error: '图片 URL 为空' };
+  const cached = imageMetadataCache.get(key);
+  if (cached) return cached;
+  const promise = (async () => {
+    try {
+      return await readLocalImageMetadata(key) || await readRemoteImageMetadata(key);
+    } catch (error) {
+      return {
+        checkedAt: Date.now(),
+        ok: false,
+        error: error instanceof Error ? error.message : '图片元数据读取失败',
+        proxyUrl: key,
+      };
+    }
+  })();
+  imageMetadataCache.set(key, promise);
+  const metadata = await promise;
+  imageMetadataCache.set(key, metadata);
+  return metadata;
+}
+
+async function preloadImageMetadata(images: any[]) {
+  const targets = images.filter((image) => image?.url && !image.error);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < targets.length) {
+      const image = targets[cursor++];
+      image.metadata = image.metadata?.ok ? image.metadata : await getImageMetadata(image.url);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
+  return images;
+}
 
 function redisRetryStrategy(times: number) {
   return Math.min(Math.max(times, 1) * 500, 5000);
@@ -200,7 +477,9 @@ function attachRedisConnectionLogger(client: Redis, label: string) {
   return client;
 }
 
-function attachBullMqErrorLogger(target: Queue | Worker, label: string) {
+type ErrorEventTarget = { on(event: 'error', listener: (error: Error) => void): unknown };
+
+function attachBullMqErrorLogger(target: ErrorEventTarget, label: string) {
   target.on('error', (error) => {
     logRedisWarning(label, error);
   });
@@ -776,6 +1055,7 @@ function normalizeStreamingSpecSlide(item: any, index: number): SpecSlide {
       : [],
     speakerNotes: String(item?.speakerNotes || ''),
     visualPrompt: String(item?.visualPrompt || ''),
+    animationDescription: String(item?.animationDescription || ''),
     imagePlan: Array.isArray(item?.imagePlan)
       ? item.imagePlan
           .map((plan: any, planIndex: number) => ({
@@ -925,6 +1205,17 @@ async function runJob(job: QueuedJob) {
       });
       return;
     }
+    if (job.kind === 'generate') {
+      const errorMessage = error instanceof Error ? error.message : '任务执行失败';
+      await updateJob(job, {
+        status: 'cancelled',
+        phase: job.phase || 'outline',
+        progress: Math.max(1, Math.min(99, Number(job.progress) || 1)),
+        errorMessage,
+        message: `任务异常已暂停，可点击继续从当前阶段恢复：${errorMessage}`,
+      });
+      return;
+    }
     await updateJob(job, {
       status: 'failed',
       phase: job.phase || 'failed',
@@ -939,7 +1230,7 @@ function resolveResumeStage(value: unknown): 'outline' | 'images' | 'layout' {
   return value === 'images' || value === 'layout' ? value : 'outline';
 }
 
-function assertResumableGenerationState(state: any): { spec: DesignSpec; lock: SpecLock; images: any[]; svgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }> } {
+function assertResumableGenerationState(state: any): { spec: DesignSpec; lock: SpecLock; images: any[]; svgPages: ServerSvgPage[] } {
   const spec = state?.designSpec;
   const lock = state?.specLock;
   if (!spec?.outline?.length || !lock) {
@@ -957,6 +1248,11 @@ function assertResumableGenerationState(state: any): { spec: DesignSpec; lock: S
             pageNumber: Number(page.pageNumber || index + 1),
             svg: String(page.svg || ''),
             speakerNotes: String(page.speakerNotes || ''),
+            visualSummary: page.visualSummary ? String(page.visualSummary) : undefined,
+            signature: page.signature ? String(page.signature) : undefined,
+            sourceHash: page.sourceHash ? String(page.sourceHash) : undefined,
+            generatedAt: Number(page.generatedAt || 0) || undefined,
+            quality: page.quality && typeof page.quality === 'object' ? page.quality : undefined,
           }))
       : [],
   };
@@ -976,7 +1272,7 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   let spec: DesignSpec;
   let lock: SpecLock;
   let images: any[] = [];
-  let existingSvgPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }> = [];
+  let existingSvgPages: ServerSvgPage[] = [];
 
   if (resumeStage === 'outline') {
     await updateJob(job, { phase: 'outline', progress: 8, message: '正在生成大纲' });
@@ -1175,6 +1471,13 @@ function toExecutorImageAssets(images: any[]) {
       prompt: image.prompt,
       purpose: image.purpose,
       style: image.style,
+      metadata: image.metadata ? {
+        width: image.metadata.width,
+        height: image.metadata.height,
+        contentType: image.metadata.contentType,
+        bytes: image.metadata.bytes,
+        ok: image.metadata.ok,
+      } : undefined,
     }));
 }
 
@@ -1182,10 +1485,7 @@ function isFallbackSvgPage(svg?: string) {
   return Boolean(svg && svg.includes('本页待重试'));
 }
 
-function upsertServerSvgPage(
-  pages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>,
-  page: { pageNumber: number; svg: string; speakerNotes: string }
-) {
+function upsertServerSvgPage(pages: ServerSvgPage[], page: ServerSvgPage) {
   const existingIndex = pages.findIndex((item) => item.pageNumber === page.pageNumber);
   if (existingIndex >= 0) {
     pages[existingIndex] = page;
@@ -1194,7 +1494,7 @@ function upsertServerSvgPage(
   }
 }
 
-function sortServerSvgPages(pages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>) {
+function sortServerSvgPages(pages: ServerSvgPage[]) {
   return pages.slice().sort((a, b) => a.pageNumber - b.pageNumber);
 }
 
@@ -1225,6 +1525,7 @@ async function generateSlideImageForQueue(
   const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, style, config.baseUrl);
   await assertJobActive(job);
   const url = await persistDataImage(rawImageUrl, `${slide.id}-${plan.id}`);
+  const metadata = await getImageMetadata(url);
 
   return {
     id: `${slide.id}-${plan.id}`,
@@ -1237,6 +1538,7 @@ async function generateSlideImageForQueue(
     url,
     selected: true,
     attempt,
+    metadata,
   };
 }
 
@@ -1256,8 +1558,8 @@ async function generateSlideImageWithAutoRetry(
         phase: 'images',
         progress,
         message: attempt === 1
-          ? `正在生成图片素材：${slide.title} / ${plan.purpose || plan.id}`
-          : `正在自动重试图片素材：${slide.title} / ${plan.purpose || plan.id}`,
+          ? `正在为"${slide.title}"生成图片...`
+          : `正在为"${slide.title}"重试生成图片...`,
       });
       return await generateSlideImageForQueue(job, slide, plan, config, attempt);
     } catch (error) {
@@ -1266,7 +1568,7 @@ async function generateSlideImageWithAutoRetry(
         await updateJob(job, {
           phase: 'images',
           progress,
-          message: `图片素材生成失败，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
+          message: `图片生成失败，正在为"${slide.title}"自动重试...`,
         });
       }
     }
@@ -1292,7 +1594,7 @@ async function maybeGenerateImages(
   spec: DesignSpec,
   lock: SpecLock,
   existingImages: any[] = [],
-  existingPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }> = []
+  existingPages: ServerSvgPage[] = []
 ) {
   const results: any[] = sortImagesByOutline(existingImages, spec);
   if (job.payload.includeImages === false) return results;
@@ -1317,8 +1619,8 @@ async function maybeGenerateImages(
         phase: 'images',
         progress: Math.min(44, nextProgress),
         message: image.error
-          ? `图片素材未生成：${slide.title} / ${plan.purpose || plan.id}`
-          : `图片素材完成：${slide.title} / ${plan.purpose || plan.id}，${completed}/${tasks.length}`,
+          ? `图片生成失败："${slide.title}"（${completed}/${tasks.length}）`
+          : `图片生成完成："${slide.title}"（${completed}/${tasks.length}）`,
         result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(results, spec), svgPages: sortServerSvgPages(existingPages) },
       });
     }
@@ -1336,10 +1638,11 @@ async function maybeGenerateImages(
     });
     throw new Error(`图片自动重试后仍未完成：${missingText}。请手动重试图片后再继续。`);
   }
+  await preloadImageMetadata(results);
   return sortImagesByOutline(results, spec);
 }
 
-async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: DesignSpec, lock: SpecLock, images: any[]) {
+async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: DesignSpec, lock: SpecLock, images: any[], pages: ServerSvgPage[] = []) {
   if (job.payload.includeImages === false) return;
 
   let missingPlans = findMissingRequiredImagePlans(spec, images);
@@ -1351,17 +1654,18 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: `第 ${slide.pageNumber} 页缺少可用图片素材，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
-      result: { spec, lock, outline: spec.outline, images, svgPages: [] },
+      message: `第 ${slide.pageNumber} 页缺少可用图片，正在为"${slide.title}"自动重试...`,
+      result: { spec, lock, outline: spec.outline, images, svgPages: sortServerSvgPages(pages) },
     });
     const image = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, 45);
     await assertJobActive(job);
+    if (image.url && !image.error) image.metadata = await getImageMetadata(image.url);
     upsertServerImage(images, image);
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: image.error ? `图片素材未生成：${slide.title}` : `图片素材完成：${slide.title}`,
-      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: [] },
+      message: image.error ? `图片生成失败："${slide.title}"` : `图片生成完成："${slide.title}"`,
+      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
     });
   }
 
@@ -1372,7 +1676,7 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
       phase: 'images',
       progress: 45,
       message: `图片自动重试后仍未完成：${missingText}`,
-      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: [] },
+      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
     });
     throw new Error(`图片自动重试后仍未完成：${missingText}。请手动重试图片后再继续。`);
   }
@@ -1384,7 +1688,7 @@ async function ensureServerImagesForLayout(
   lock: SpecLock,
   slide: SpecSlide,
   images: any[],
-  pages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>
+  pages: ServerSvgPage[]
 ) {
   if (job.payload.includeImages === false || !slideNeedsImageServer(slide)) {
     return [];
@@ -1401,17 +1705,18 @@ async function ensureServerImagesForLayout(
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: `第 ${slide.pageNumber} 页缺少可用图片素材，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
+      message: `第 ${slide.pageNumber} 页缺少可用图片，正在为"${slide.title}"自动重试...`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
     });
 
     const retryImage = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, 45);
     await assertJobActive(job);
+    if (retryImage.url && !retryImage.error) retryImage.metadata = await getImageMetadata(retryImage.url);
     upsertServerImage(images, retryImage);
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: retryImage.error ? `图片素材未生成：${slide.title}` : `图片素材完成：${slide.title}`,
+      message: retryImage.error ? `图片生成失败："${slide.title}"` : `图片生成完成："${slide.title}"`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
     });
   }
@@ -1422,7 +1727,7 @@ async function ensureServerImagesForLayout(
   await updateJob(job, {
     phase: 'images',
     progress: 45,
-    message: `第 ${slide.pageNumber} 页图片素材自动重试后仍未完成：${slide.title}`,
+    message: `第 ${slide.pageNumber} 页图片自动重试后仍未完成："${slide.title}"`,
     result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
   });
   throw new Error(`第 ${slide.pageNumber} 页需要图片素材，但图片自动重试后仍未生成：${slide.title}`);
@@ -1437,22 +1742,57 @@ async function generateSvgPages(
   apiKey: string,
   baseUrl: string,
   model: string,
-  existingPages: Array<{ pageNumber: number; svg: string; speakerNotes: string }> = []
+  existingPages: ServerSvgPage[] = []
 ) {
-  const pages: Array<{ pageNumber: number; svg: string; speakerNotes: string }> = sortServerSvgPages(existingPages)
+  const pages: ServerSvgPage[] = sortServerSvgPages(existingPages)
     .filter((page) => page.svg && !isFallbackSvgPage(page.svg));
-  const existingPageNumbers = new Set(pages.map((page) => page.pageNumber));
-  const slidesToGenerate = spec.outline.filter((slide) => !existingPageNumbers.has(slide.pageNumber));
+  const existingByPage = new Map(pages.map((page) => [page.pageNumber, page]));
   let cursor = 0;
   let completed = pages.length;
 
-  await ensureRequiredImagesBeforeLayout(job, spec, lock, images);
-  if (!slidesToGenerate.length) return sortServerSvgPages(pages);
+  await ensureRequiredImagesBeforeLayout(job, spec, lock, images, pages);
+  await preloadImageMetadata(images);
+  await updateJob(job, {
+    phase: 'layout',
+    progress: 48,
+    message: '正在准备页面素材缓存',
+    result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
+  });
+
+  const slidesToGenerate: Array<{ slide: SpecSlide; signature: string; slideImages: any[] }> = [];
+  for (const slide of spec.outline) {
+    const slideImages = findReadyServerImagesForSlide(images, slide);
+    const signature = slideSignature({ job, spec, lock, slide, slideImages, provider, baseUrl, model });
+    const existing = existingByPage.get(slide.pageNumber);
+    if (
+      existing?.svg &&
+      !isFallbackSvgPage(existing.svg) &&
+      (existing.signature === signature || (!existing.signature && job.payload.resumeStage === 'layout'))
+    ) {
+      existing.signature = existing.signature || signature;
+      existing.sourceHash = existing.sourceHash || signature;
+      existing.quality = { ...(existing.quality || {}), reused: true };
+      continue;
+    }
+    slidesToGenerate.push({ slide, signature, slideImages });
+  }
+
+  completed = spec.outline.length - slidesToGenerate.length;
+  if (!slidesToGenerate.length) {
+    await updateJob(job, {
+      phase: 'layout',
+      progress: 95,
+      message: '页面内容未变化，已复用现有 SVG',
+      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
+    });
+    return sortServerSvgPages(pages);
+  }
 
   async function worker() {
     while (cursor < slidesToGenerate.length) {
       await assertJobActive(job);
-      const slide = slidesToGenerate[cursor++];
+      const task = slidesToGenerate[cursor++];
+      const { slide, signature } = task;
       await updateJob(job, {
         phase: 'layout',
         progress: 50 + Math.round((completed / Math.max(1, spec.outline.length)) * 45),
@@ -1460,16 +1800,26 @@ async function generateSvgPages(
       });
 
       const slideImages = await ensureServerImagesForLayout(job, spec, lock, slide, images, pages);
+      await preloadImageMetadata(slideImages);
+      const currentSignature = slideSignature({ job, spec, lock, slide, slideImages, provider, baseUrl, model }) || signature;
       await assertJobActive(job);
-      const svg = await generatePageSvg(spec, lock, slide, slideImages, provider, apiKey, baseUrl, model);
+      const pageResult = await generatePageSvg(spec, lock, slide, slideImages, provider, apiKey, baseUrl, model);
       await assertJobActive(job);
-      upsertServerSvgPage(pages, { pageNumber: slide.pageNumber, svg, speakerNotes: slide.speakerNotes || '' });
+      upsertServerSvgPage(pages, {
+        pageNumber: slide.pageNumber,
+        svg: pageResult.svg,
+        speakerNotes: slide.speakerNotes || '',
+        signature: currentSignature,
+        sourceHash: currentSignature,
+        generatedAt: Date.now(),
+        quality: pageResult.quality,
+      });
       completed += 1;
       await updateJob(job, {
         phase: 'layout',
         progress: 50 + Math.round((completed / Math.max(1, spec.outline.length)) * 45),
-        message: `第 ${slide.pageNumber} 页生成完成`,
-        result: { spec, lock, outline: spec.outline, images, svgPages: sortServerSvgPages(pages) },
+        message: `第 ${slide.pageNumber} 页生成完成：${slide.title}`,
+        result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
       });
     }
   }
@@ -1519,6 +1869,7 @@ async function generatePageSvg(
   const imageAssets = toExecutorImageAssets(slideImages);
   const userPrompt = buildExecutorPagePrompt(slide, slimSpec, slimLock, imageAssets, undefined, executorContext);
   let lastError: unknown = null;
+  let lastQuality: ReturnType<typeof finalizeSvgQuality> | null = null;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -1531,24 +1882,80 @@ async function generatePageSvg(
         throw new Error('AI 返回的 SVG 内容不完整');
       }
       let quality = finalizeSvgQuality(rawSvg, spec, slide, undefined, imageAssets);
+      lastQuality = quality;
       if (quality.blockingIssues.length) {
-        const repairOutput = await streamText(provider, apiKey, baseUrl, model, [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, imageAssets) },
-        ]);
-        const repairedSvg = ensureImageUsedInSvg(cleanSvgOutput(repairOutput), slide, spec, imageAssets);
-        quality = finalizeSvgQuality(repairedSvg || quality.svg, spec, slide, undefined, imageAssets);
+        quality = await repairSvgQualityWithFallback({
+          provider,
+          apiKey,
+          baseUrl,
+          model,
+          systemPrompt,
+          spec,
+          slide,
+          imageAssets,
+          quality,
+        });
+        lastQuality = quality;
       }
       if (quality.blockingIssues.length && attempt < 3) {
         throw new Error(`页面质量检查未通过：${summarizeSvgQualityIssues(quality.blockingIssues, 3)}`);
       }
-      return quality.svg;
+      return {
+        svg: quality.svg,
+        quality: {
+          repaired: quality.repaired,
+          issues: quality.issues.length,
+          blockingIssues: quality.blockingIssues.length,
+          attempts: attempt,
+        },
+      };
     } catch (error) {
       lastError = error;
+      if (!isRetriablePageGenerationError(error) && attempt >= 2) break;
     }
   }
 
+  if (lastQuality?.blockingIssues?.length) {
+    throw new Error(`页面质量检查未通过：${summarizeSvgQualityIssues(lastQuality.blockingIssues, 5)}`);
+  }
   throw lastError instanceof Error ? lastError : new Error('页面 SVG 生成失败');
+}
+
+function isRetriablePageGenerationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /timeout|timed out|429|rate limit|5\d\d|fetch failed|ECONNRESET|ECONNREFUSED|socket|空|empty|incomplete|不完整|质量检查/i.test(message);
+}
+
+async function repairSvgQualityWithFallback(input: {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  systemPrompt: string;
+  spec: DesignSpec;
+  slide: SpecSlide;
+  imageAssets: ReturnType<typeof toExecutorImageAssets>;
+  quality: ReturnType<typeof finalizeSvgQuality>;
+}) {
+  const { provider, apiKey, baseUrl, model, systemPrompt, spec, slide, imageAssets } = input;
+  let quality = input.quality;
+
+  const patchOutput = await streamText(provider, apiKey, baseUrl, model, [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: buildSvgQualityPatchPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, imageAssets) },
+  ]).catch(() => '');
+  const patchSvg = ensureImageUsedInSvg(cleanSvgOutput(patchOutput), slide, spec, imageAssets);
+  if (patchSvg && patchSvg.includes('<svg') && patchSvg.includes('</svg>')) {
+    quality = finalizeSvgQuality(patchSvg, spec, slide, undefined, imageAssets);
+  }
+  if (!quality.blockingIssues.length) return quality;
+
+  const repairOutput = await streamText(provider, apiKey, baseUrl, model, [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, imageAssets) },
+  ]);
+  const repairedSvg = ensureImageUsedInSvg(cleanSvgOutput(repairOutput), slide, spec, imageAssets);
+  return finalizeSvgQuality(repairedSvg || quality.svg, spec, slide, undefined, imageAssets);
 }
 
 async function runExportJob(job: ExportQueuedJob) {
