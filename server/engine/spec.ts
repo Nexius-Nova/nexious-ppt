@@ -48,9 +48,28 @@ export interface SpecSlide {
   bullets: string[];
   speakerNotes: string;
   visualPrompt: string;
-  layout: 'cover' | 'chapter' | 'content' | 'content-image' | 'content-chart' | 'ending' | 'toc' | string;
+  imagePlan?: SpecSlideImagePlan[];
+  layout:
+    | 'cover'
+    | 'chapter'
+    | 'content'
+    | 'mixed-media'
+    | 'visual-focus'
+    | 'media-grid'
+    | 'content-image'
+    | 'content-chart'
+    | 'ending'
+    | 'toc'
+    | string;
   rhythm: 'anchor' | 'dense' | 'breathing';
   chartHint?: string;
+}
+
+export interface SpecSlideImagePlan {
+  id: string;
+  prompt: string;
+  purpose?: 'background' | 'hero' | 'supporting' | 'detail' | 'texture' | 'diagram' | string;
+  style?: string;
 }
 
 export interface SkillExtension {

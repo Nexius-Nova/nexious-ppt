@@ -461,6 +461,12 @@ function specSlideToOutlineSlide(slide: SpecSlide, fallbackIndex: number): Slide
     bullets: Array.isArray(slide.bullets) ? slide.bullets.map(item => String(item || '').trim()).filter(Boolean) : [],
     speakerNotes: String(slide.speakerNotes || ''),
     visualPrompt: String(slide.visualPrompt || ''),
+    imagePlan: Array.isArray(slide.imagePlan) ? slide.imagePlan.map((plan, index) => ({
+      id: String(plan?.id || `img-${index + 1}`),
+      prompt: String(plan?.prompt || '').trim(),
+      purpose: plan?.purpose ? String(plan.purpose) : undefined,
+      style: plan?.style ? String(plan.style) : undefined,
+    })).filter(plan => plan.prompt) : undefined,
     chartHint: slide.chartHint ? String(slide.chartHint) : undefined,
     layout: slide.layout as SlideLayout | undefined,
   };
@@ -774,6 +780,7 @@ export const useAgentStore = defineStore('agent', () => {
       bullets: s.bullets || [],
       speakerNotes: s.speakerNotes || '',
       visualPrompt: s.visualPrompt || '',
+      imagePlan: Array.isArray(s.imagePlan) ? s.imagePlan : undefined,
       chartHint: s.chartHint,
       layout: s.layout as SlideLayout,
     }));
@@ -788,20 +795,25 @@ export const useAgentStore = defineStore('agent', () => {
           }))
           .sort((left: any, right: any) => left.pageNumber - right.pageNumber)
       : [];
-    const requiredImageSlideIds = new Set(
-      (result.spec.outline || [])
-        .filter((slide: any) => slideNeedsImage(slide))
-        .map((slide: any) => String(slide.id))
-    );
-    const readyImageSlideIds = new Set(
+    const requiredImageTasks = (result.spec.outline || [])
+      .filter((slide: any) => slideNeedsImage(slide))
+      .flatMap((slide: any) =>
+        normalizeSlideImagePlans(slide).map((plan) => imageTaskKey(String(slide.id), plan.id))
+      );
+    const readyImageTaskIds = new Set(
       nextImages
         .filter((image: any) => image?.url && !image.error)
-        .map((image: any) => String(image.slideId))
+        .map((image: any) => imageTaskKey(String(image.slideId), String(image.assetId || 'img-1')))
     );
-    const requiredImageCount = requiredImageSlideIds.size;
-    const readyImageCount = [...requiredImageSlideIds].filter((id) => readyImageSlideIds.has(id)).length;
+    const requiredImageCount = requiredImageTasks.length;
+    const readyImageCount = requiredImageTasks.filter((id: string) => readyImageTaskIds.has(id)).length;
     const imagesComplete = requiredImageCount === 0 || readyImageCount >= requiredImageCount;
-    const layoutComplete = nextSvgPages.length >= (result.spec.outline?.length || nextOutline.length || 0);
+    const totalLayoutPages = result.spec.outline?.length || nextOutline.length || 0;
+    const completedLayoutPages = validLayoutPageCount(totalLayoutPages, nextSvgPages);
+    const layoutComplete = totalLayoutPages > 0 && completedLayoutPages >= totalLayoutPages;
+    const layoutProgress = totalLayoutPages
+      ? Math.min(100, Math.round((completedLayoutPages / totalLayoutPages) * 100))
+      : 0;
 
     const nextSteps = baseState.steps.map((step): WorkflowStep => {
       if (step.id === 'outline') return { ...step, status: 'done' as const, progress: 100 };
@@ -812,8 +824,8 @@ export const useAgentStore = defineStore('agent', () => {
       }
       if (step.id === 'layout') {
         if (options.final && layoutComplete) return { ...step, status: 'done' as const, progress: 100 };
-        if (options.phase === 'layout') return { ...step, status: 'running' as const, progress: Math.min(99, options.progress || step.progress || 0) };
-        return { ...step, status: step.status === 'done' ? step.status : 'idle' as const, progress: step.status === 'done' ? step.progress : 0 };
+        if (options.phase === 'layout') return { ...step, status: 'running' as const, progress: Math.min(99, Math.max(layoutProgress, options.progress || step.progress || 0)) };
+        return { ...step, status: 'idle' as const, progress: layoutProgress };
       }
       if (step.id === 'preview' && options.final && layoutComplete) return { ...step, status: 'done' as const, progress: 100 };
       return step;
@@ -827,9 +839,9 @@ export const useAgentStore = defineStore('agent', () => {
       specLock: result.lock,
       svgPages: nextSvgPages,
       steps: nextSteps,
-      executorCursor: nextSvgPages.length,
+      executorCursor: completedLeadingLayoutPages(totalLayoutPages, nextSvgPages),
       waitingForImageRetry: !imagesComplete,
-      lastActiveStep: options.final ? 'preview' : options.phase === 'layout' ? 'layout' : options.phase === 'images' ? 'images' : baseState.lastActiveStep,
+      lastActiveStep: options.final ? (layoutComplete ? 'preview' : 'layout') : options.phase === 'layout' ? 'layout' : options.phase === 'images' ? 'images' : baseState.lastActiveStep,
     };
   }
 
@@ -1220,10 +1232,45 @@ export const useAgentStore = defineStore('agent', () => {
     activePpt.value.updatedAt = Date.now();
   }
 
-  function getReadyImageSlideIds(sourceImages = images.value) {
+  function normalizeSlideImagePlans(slide: { imagePlan?: any[]; visualPrompt?: string }) {
+    const rawPlans = Array.isArray(slide.imagePlan) ? slide.imagePlan : [];
+    const plans = rawPlans
+      .slice(0, 4)
+      .map((plan: any, index) => {
+        const prompt = String(plan?.prompt || '').trim();
+        if (!prompt) return null;
+        return {
+          id: String(plan?.id || `img-${index + 1}`).replace(/[^\w-]/g, '-').slice(0, 40) || `img-${index + 1}`,
+          prompt,
+          purpose: plan?.purpose ? String(plan.purpose).slice(0, 80) : undefined,
+          style: plan?.style ? String(plan.style).slice(0, 80) : undefined,
+        };
+      })
+      .filter(Boolean) as Array<{ id: string; prompt: string; purpose?: string; style?: string }>;
+
+    if (plans.length) return plans;
+
+    const legacyVisualPrompt = String(slide.visualPrompt || '').trim();
+    if (!legacyVisualPrompt || Array.isArray(slide.imagePlan)) return [];
+    return [{ id: 'img-1', prompt: legacyVisualPrompt, purpose: 'supporting' }];
+  }
+
+  function imageTaskKey(slideId: string, assetId = 'img-1') {
+    return `${slideId}::${assetId}`;
+  }
+
+  function getReadyImageTaskKeys(sourceImages = images.value) {
     return sourceImages
       .filter((image) => image.selected && !image.error && Boolean(image.url))
-      .map((image) => image.slideId);
+      .map((image) => imageTaskKey(image.slideId, image.assetId || 'img-1'));
+  }
+
+  function getReadyImageSlideIds(sourceImages = images.value) {
+    return [...new Set(
+      sourceImages
+        .filter((image) => image.selected && !image.error && Boolean(image.url))
+        .map((image) => image.slideId)
+    )];
   }
 
   function syncGeneratedSlidesFromImages() {
@@ -1245,10 +1292,15 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function upsertGeneratedImage(image: GeneratedImage) {
-    const existingIdx = images.value.findIndex(img => img.slideId === image.slideId);
+    const assetId = image.assetId || 'img-1';
+    const existingIdx = images.value.findIndex(img =>
+      img.id === image.id ||
+      (img.slideId === image.slideId && (img.assetId || 'img-1') === assetId)
+    );
     const existingImage = existingIdx >= 0 ? images.value[existingIdx] : null;
     const nextImage: GeneratedImage = {
       ...image,
+      assetId,
       selected: image.error ? (image.selected ?? existingImage?.selected ?? true) : true,
     };
     if (existingIdx >= 0) {
@@ -1260,16 +1312,28 @@ export const useAgentStore = defineStore('agent', () => {
 
   function imageGenerationGate() {
     const requiredSlides = slidesRequiringGeneratedImages();
+    const requiredTasks = requiredSlides.flatMap((slide) =>
+      normalizeSlideImagePlans(slide).map((plan) => ({ slide, plan, key: imageTaskKey(slide.id, plan.id) }))
+    );
+    const readyTaskKeys = new Set(getReadyImageTaskKeys());
     const readySlideIds = new Set(getReadyImageSlideIds());
-    const missingSlides = requiredSlides.filter((slide) => !readySlideIds.has(slide.id));
+    const missingTasks = requiredTasks.filter((task) => !readyTaskKeys.has(task.key));
+    const missingSlidesMap = new Map<string, typeof requiredSlides[number]>();
+    for (const task of missingTasks) {
+      missingSlidesMap.set(task.slide.id, task.slide);
+    }
+    const missingSlides = [...missingSlidesMap.values()];
 
     return {
       requiredSlides,
+      requiredTasks,
       readySlideIds,
+      readyTaskKeys,
+      missingTasks,
       missingSlides,
-      readyCount: requiredSlides.filter((slide) => readySlideIds.has(slide.id)).length,
-      total: requiredSlides.length,
-      complete: missingSlides.length === 0,
+      readyCount: requiredTasks.filter((task) => readyTaskKeys.has(task.key)).length,
+      total: requiredTasks.length,
+      complete: missingTasks.length === 0,
     };
   }
 
@@ -1460,7 +1524,7 @@ export const useAgentStore = defineStore('agent', () => {
     waitingForImageRetry.value = Boolean(normalizedState.waitingForImageRetry);
     pauseRequested.value = false;
     resumeStage.value = normalizedState.resumeStage || normalizedState.lastActiveStep || null;
-    executorCursor.value = normalizedState.executorCursor || svgPages.value.length || 0;
+    executorCursor.value = completedLeadingLayoutPages(layoutPageCount());
     if (normalizedState.lastActiveStep && workflowSteps.some(step => step.id === normalizedState.lastActiveStep)) {
       activeStep.value = normalizedState.lastActiveStep;
     }
@@ -1790,7 +1854,13 @@ export const useAgentStore = defineStore('agent', () => {
         }))
       : [];
     sortSvgPagesByPageNumber();
-    executorCursor.value = svgPages.value.length;
+    const totalLayoutPages = result.spec.outline?.length || outline.value.length || 0;
+    const completedLayoutPages = validLayoutPageCount(totalLayoutPages);
+    const layoutComplete = totalLayoutPages > 0 && completedLayoutPages >= totalLayoutPages;
+    const layoutProgress = totalLayoutPages
+      ? Math.min(100, Math.round((completedLayoutPages / totalLayoutPages) * 100))
+      : 0;
+    executorCursor.value = completedLeadingLayoutPages(totalLayoutPages);
     syncGeneratedSlidesFromImages();
     setStepStatus('outline', 'done', 100);
 
@@ -1805,8 +1875,13 @@ export const useAgentStore = defineStore('agent', () => {
         return;
       }
       setStepStatus('images', 'done', 100);
-      setStepStatus('layout', 'done', 100);
-      setStepStatus('preview', 'done', 100);
+      setStepStatus('layout', layoutComplete ? 'done' : 'idle', layoutComplete ? 100 : layoutProgress);
+      setStepStatus('preview', layoutComplete ? 'done' : 'idle', layoutComplete ? 100 : 0);
+      activeStep.value = layoutComplete ? 'preview' : 'layout';
+      if (!layoutComplete) {
+        const missingPages = missingLayoutPageNumbers(totalLayoutPages);
+        pushLog(`服务端任务结束，但页面未全部生成：缺少第 ${missingPages.join('、')} 页。点击运行当前阶段可继续补生成。`);
+      }
       return;
     }
 
@@ -1830,7 +1905,7 @@ export const useAgentStore = defineStore('agent', () => {
       }
       activeStep.value = 'layout';
       setStepStatus('images', 'done', 100);
-      setStepStatus('layout', 'running', Math.min(99, options.progress || steps.value.find(step => step.id === 'layout')?.progress || 0));
+      setStepStatus('layout', 'running', Math.min(99, Math.max(layoutProgress, options.progress || steps.value.find(step => step.id === 'layout')?.progress || 0)));
       setStepStatus('preview', 'idle', 0);
     }
   }
@@ -2096,8 +2171,14 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     if (resumeFrom === 'preview') {
+      const readiness = exportReadiness();
       activeStep.value = 'preview';
-      setStepStatus('preview', 'done', svgPages.value.length > 0 ? 100 : 0);
+      setStepStatus('preview', readiness.ready ? 'done' : 'idle', readiness.ready ? 100 : 0);
+      if (!readiness.ready) {
+        activeStep.value = 'layout';
+        updateLayoutStepAfterPageRetry();
+        pushLog(readiness.message);
+      }
       await syncToProjectNow();
       return;
     }
@@ -2213,17 +2294,19 @@ export const useAgentStore = defineStore('agent', () => {
 
   function refreshPreviewStepAfterPageMutation() {
     const totalPages = layoutPageCount();
-    if (totalPages > 0 && svgPages.value.length >= totalPages && !hasPendingLayoutPages(totalPages)) {
+    const completedPages = validLayoutPageCount(totalPages);
+    if (totalPages > 0 && completedPages >= totalPages && !hasPendingLayoutPages(totalPages)) {
       setStepStatus('layout', 'done', 100);
       activeStep.value = 'preview';
       return;
     }
 
-    if (svgPages.value.length > 0) {
-      setStepStatus('layout', 'idle', Math.round((svgPages.value.length / Math.max(1, totalPages)) * 100));
+    if (completedPages > 0) {
+      setStepStatus('layout', 'idle', Math.round((completedPages / Math.max(1, totalPages)) * 100));
     } else {
       setStepStatus('layout', 'idle', 0);
     }
+    setStepStatus('preview', 'idle', 0);
   }
 
   function escapeSvgText(value: string) {
@@ -2340,38 +2423,66 @@ export const useAgentStore = defineStore('agent', () => {
     return designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount || svgPages.value.length;
   }
 
-  function hasPendingLayoutPages(totalPages = layoutPageCount()) {
-    if (totalPages <= 0) return false;
-    const pagesByNumber = new Map(svgPages.value.map(page => [page.pageNumber, page]));
+  function validLayoutPageCount(
+    totalPages = layoutPageCount(),
+    pages: Array<{ pageNumber: number; svg?: string }> = svgPages.value
+  ) {
+    if (totalPages <= 0) return 0;
+    const pagesByNumber = new Map(pages.map(page => [page.pageNumber, page]));
+    let count = 0;
     for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
       const page = pagesByNumber.get(pageNumber);
-      if (!page || isFallbackSvgPage(page.svg)) return true;
+      if (page?.svg?.trim() && !isFallbackSvgPage(page.svg)) count += 1;
     }
-    return false;
+    return count;
+  }
+
+  function missingLayoutPageNumbers(
+    totalPages = layoutPageCount(),
+    pages: Array<{ pageNumber: number; svg?: string }> = svgPages.value
+  ) {
+    if (totalPages <= 0) return [];
+    const pagesByNumber = new Map(pages.map(page => [page.pageNumber, page]));
+    const missing: number[] = [];
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      const page = pagesByNumber.get(pageNumber);
+      if (!page?.svg?.trim() || isFallbackSvgPage(page.svg)) missing.push(pageNumber);
+    }
+    return missing;
+  }
+
+  function hasPendingLayoutPages(totalPages = layoutPageCount()) {
+    return missingLayoutPageNumbers(totalPages).length > 0;
   }
 
   function exportReadiness() {
     const totalPages = layoutPageCount();
     if (totalPages <= 0) return { ready: false, totalPages, completedPages: 0, message: '请先生成大纲和页面后再导出。' };
-    const completedPages = completedLeadingLayoutPages(totalPages);
-    if (hasPendingLayoutPages(totalPages)) {
+    const missingPages = missingLayoutPageNumbers(totalPages);
+    const completedPages = totalPages - missingPages.length;
+    if (missingPages.length > 0) {
+      const missingText = missingPages.slice(0, 8).join('、');
+      const suffix = missingPages.length > 8 ? ` 等 ${missingPages.length} 页` : '';
       return {
         ready: false,
         totalPages,
         completedPages,
-        message: `页面尚未全部生成完成：已完成 ${completedPages}/${totalPages} 页，请先完成页面生成后再导出。`,
+        message: `页面尚未全部生成完成：已完成 ${completedPages}/${totalPages} 页，缺少第 ${missingText}${suffix} 页，请先完成页面生成后再导出。`,
       };
     }
     return { ready: true, totalPages, completedPages: totalPages, message: '' };
   }
 
-  function completedLeadingLayoutPages(totalPages = layoutPageCount()) {
+  function completedLeadingLayoutPages(
+    totalPages = layoutPageCount(),
+    pages: Array<{ pageNumber: number; svg?: string }> = svgPages.value
+  ) {
     if (totalPages <= 0) return 0;
-    const pagesByNumber = new Map(svgPages.value.map(page => [page.pageNumber, page]));
+    const pagesByNumber = new Map(pages.map(page => [page.pageNumber, page]));
 
     for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
       const page = pagesByNumber.get(pageNumber);
-      if (!page || isFallbackSvgPage(page.svg)) return pageNumber - 1;
+      if (!page?.svg?.trim() || isFallbackSvgPage(page.svg)) return pageNumber - 1;
     }
 
     return totalPages;
@@ -2380,14 +2491,7 @@ export const useAgentStore = defineStore('agent', () => {
   function updateLayoutStepAfterPageRetry() {
     const totalPages = layoutPageCount();
     if (totalPages <= 0) return;
-    const pagesByNumber = new Map(svgPages.value.map(page => [page.pageNumber, page]));
-    let completedPages = 0;
-
-    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
-      const page = pagesByNumber.get(pageNumber);
-      if (page && !isFallbackSvgPage(page.svg)) completedPages += 1;
-    }
-
+    const completedPages = validLayoutPageCount(totalPages);
     const progress = Math.min(100, Math.round((completedPages / totalPages) * 100));
     if (completedPages >= totalPages) {
       executorCursor.value = totalPages;
@@ -2466,27 +2570,35 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function isSearchSkill(skill: SkillDefinition) {
+    const category = normalizeInputSkillCategory(skill.category);
+    if (category === 'Web 搜索') return true;
     if (skill.capabilities?.includes('web-search')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
     return /web|search|google|bing|搜索|联网|资料收集/.test(text);
   }
 
   function isFileParseSkill(skill: SkillDefinition) {
-    if (skill.capabilities?.includes('file-parse')) return true;
+    const category = normalizeInputSkillCategory(skill.category);
+    if (category === '文件解析' || category === '图片识别') return true;
+    if (skill.capabilities?.includes('file-parse') || skill.capabilities?.includes('image-ocr')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
-    return /file|parse|docx|pdf|文件|解析|读取/.test(text);
+    return /file|parse|docx|pdf|ocr|image|vision|文件|解析|读取|图片|识别/.test(text);
   }
 
   function isTopicSkill(skill: SkillDefinition) {
+    const category = normalizeInputSkillCategory(skill.category);
+    if (['行业资料分析', '学术论文解析', '财报分析', '企业知识库检索'].includes(category)) return true;
     if (skill.capabilities?.includes('topic-extract') || skill.capabilities?.includes('content-refine')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
-    return /topic|title|主题|提炼|标题/.test(text);
+    return /topic|title|industry|paper|academic|finance|knowledge|主题|提炼|标题|行业|论文|财报|知识库/.test(text);
   }
 
   function isConstraintSkill(skill: SkillDefinition) {
-    if (skill.capabilities?.includes('generation-constraint')) return true;
+    const category = normalizeInputSkillCategory(skill.category);
+    if (['页面类型判断', '图表表格标记', '公式图片时间线标记'].includes(category)) return true;
+    if (skill.capabilities?.includes('generation-constraint') || skill.capabilities?.includes('outline-mark')) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
-    return /constraint|config|rule|约束|配置|规则|提示词/.test(text);
+    return /constraint|config|rule|outline|chart|table|formula|timeline|约束|配置|规则|提示词|大纲|页面类型|图表|表格|公式|时间线/.test(text);
   }
 
   function wantsWebSearch(text: string) {
@@ -2500,7 +2612,10 @@ export const useAgentStore = defineStore('agent', () => {
   function skillSelectionReason(skill: SkillDefinition, category: string, autoSelected: boolean) {
     if (skill.enabled) return '用户已选择';
     if (!autoSelected) return '';
-    if (category === '资料收集') return '根据输入中的联网/搜索意图自动选择';
+    if (category === 'Web 搜索') return '根据输入中的联网/搜索意图自动选择';
+    if (category === '文件解析' || category === '图片识别') return '根据上传文件自动选择';
+    if (['行业资料分析', '学术论文解析', '财报分析', '企业知识库检索'].includes(category)) return '根据资料整理需求自动选择';
+    if (['页面类型判断', '图表表格标记', '公式图片时间线标记'].includes(category)) return '根据大纲和页面类型需求自动选择';
     if (category === '文件解析') return '根据上传文件自动选择';
     if (category === '主题提炼') return '根据主题自动提炼需求自动选择';
     if (category === '生成约束') return '根据提示词、模板或配置自动选择';
@@ -2523,6 +2638,14 @@ export const useAgentStore = defineStore('agent', () => {
     const unselected = categorySkills.filter((skill) => !skill.enabled);
 
     let shouldAutoSelect = false;
+    if (category === 'Web 搜索') shouldAutoSelect = wantsWebSearch(options.userText);
+    if (category === '文件解析' || category === '图片识别') shouldAutoSelect = wantsFileParsing(options.files);
+    if (['行业资料分析', '学术论文解析', '财报分析', '企业知识库检索'].includes(category)) {
+      shouldAutoSelect = Boolean(options.userText || options.files.length || options.hasSkillContext);
+    }
+    if (['页面类型判断', '图表表格标记', '公式图片时间线标记'].includes(category)) {
+      shouldAutoSelect = Boolean(options.userText || options.files.length || options.hasSkillContext || options.hasGenerationControls);
+    }
     if (category === '资料收集') shouldAutoSelect = wantsWebSearch(options.userText);
     if (category === '文件解析') shouldAutoSelect = wantsFileParsing(options.files);
     if (category === '主题提炼') shouldAutoSelect = Boolean(options.userText || options.files.length || options.hasSkillContext);
@@ -2530,18 +2653,27 @@ export const useAgentStore = defineStore('agent', () => {
 
     const autoSelected = shouldAutoSelect
       ? unselected.filter((skill) => {
-          if (category === '资料收集') return isSearchSkill(skill);
-          if (category === '文件解析') return isFileParseSkill(skill);
-          if (category === '主题提炼') return isTopicSkill(skill);
-          if (category === '生成约束') return isConstraintSkill(skill);
+          if (category === 'Web 搜索' || category === '资料收集') return isSearchSkill(skill);
+          if (category === '文件解析' || category === '图片识别') return isFileParseSkill(skill);
+          if (['行业资料分析', '学术论文解析', '财报分析', '企业知识库检索', '主题提炼'].includes(category)) return isTopicSkill(skill);
+          if (['页面类型判断', '图表表格标记', '公式图片时间线标记', '生成约束'].includes(category)) return isConstraintSkill(skill);
           return true;
-        }).slice(0, category === '资料收集' ? 2 : 1)
+        }).slice(0, category === 'Web 搜索' || category === '资料收集' ? 2 : 1)
       : [];
 
     return [...selected, ...autoSelected].map((skill) => ({
       skill,
       reason: skillSelectionReason(skill, category, autoSelected.some((item) => item.id === skill.id)),
     }));
+  }
+
+  function uniqueSkillPlans(plans: Array<{ skill: SkillDefinition; reason: string }>) {
+    const seen = new Set<string>();
+    return plans.filter((plan) => {
+      if (seen.has(plan.skill.id)) return false;
+      seen.add(plan.skill.id);
+      return true;
+    });
   }
 
   function stripSkillContextBlock(content: string) {
@@ -2913,12 +3045,29 @@ export const useAgentStore = defineStore('agent', () => {
       hasGenerationControls,
     };
     const searchIntent = wantsWebSearch(selectionOptions.userText);
-    const collectSkills = autoSelectSkillsByCategory('资料收集', selectionOptions);
+    const collectSkills = uniqueSkillPlans([
+      ...autoSelectSkillsByCategory('Web 搜索', selectionOptions),
+      ...autoSelectSkillsByCategory('资料收集', selectionOptions),
+    ]);
     const fileParseSkills = files.length
-      ? autoSelectSkillsByCategory('文件解析', selectionOptions)
+      ? uniqueSkillPlans([
+          ...autoSelectSkillsByCategory('文件解析', selectionOptions),
+          ...autoSelectSkillsByCategory('图片识别', selectionOptions),
+        ])
       : [];
-    const topicSkills = autoSelectSkillsByCategory('主题提炼', selectionOptions);
-    const constraintSkills = autoSelectSkillsByCategory('生成约束', selectionOptions);
+    const topicSkills = uniqueSkillPlans([
+      ...autoSelectSkillsByCategory('行业资料分析', selectionOptions),
+      ...autoSelectSkillsByCategory('学术论文解析', selectionOptions),
+      ...autoSelectSkillsByCategory('财报分析', selectionOptions),
+      ...autoSelectSkillsByCategory('企业知识库检索', selectionOptions),
+      ...autoSelectSkillsByCategory('主题提炼', selectionOptions),
+    ]);
+    const constraintSkills = uniqueSkillPlans([
+      ...autoSelectSkillsByCategory('页面类型判断', selectionOptions),
+      ...autoSelectSkillsByCategory('图表表格标记', selectionOptions),
+      ...autoSelectSkillsByCategory('公式图片时间线标记', selectionOptions),
+      ...autoSelectSkillsByCategory('生成约束', selectionOptions),
+    ]);
     const skillContextChunks: string[] = [];
     const inputUrls = extractInputUrls(userContent);
 
@@ -4179,7 +4328,7 @@ export const useAgentStore = defineStore('agent', () => {
       }
 
       const existingGate = updateImageStepFromGate('running');
-      const pendingSlides = slidesRequiringImages.filter((slide) => !existingGate.readySlideIds.has(slide.id));
+      const pendingSlides = [...new Map(existingGate.missingTasks.map((task) => [task.slide.id, task.slide])).values()];
 
       if (pendingSlides.length === 0) {
         pushLog('图片已完成。');
@@ -4199,10 +4348,12 @@ export const useAgentStore = defineStore('agent', () => {
         bullets: [...(s.bullets || [])],
         speakerNotes: s.speakerNotes || '',
         visualPrompt: s.visualPrompt || [s.title, ...(s.bullets || [])].filter(Boolean).join('，'),
+        imagePlan: Array.isArray(s.imagePlan) ? s.imagePlan : undefined,
       });
 
       const runImageBatch = async (batchSlides: typeof pendingSlides, attemptLabel: 'initial' | 'retry') => {
         const baseReadyCount = imageGenerationGate().readyCount;
+        const baseTotal = imageGenerationGate().total || slidesRequiringImages.length;
         await generateSlideImages(
           batchSlides.map(toImageRequest),
           parameters.value.imageStyle,
@@ -4216,8 +4367,9 @@ export const useAgentStore = defineStore('agent', () => {
               if (!isRunContextActive(ctx)) return;
               if (slideId === '__progress__') {
                 const pendingProgress = (image as any)._progress || 0;
-                const completedPending = Math.round((pendingProgress / 100) * batchSlides.length);
-                const progress = Math.round(((baseReadyCount + completedPending) / slidesRequiringImages.length) * 100);
+                const batchTaskCount = batchSlides.reduce((sum, slide) => sum + normalizeSlideImagePlans(slide).length, 0);
+                const completedPending = Math.round((pendingProgress / 100) * Math.max(1, batchTaskCount));
+                const progress = Math.round(((baseReadyCount + completedPending) / Math.max(1, baseTotal)) * 100);
                 setStepStatus('images', 'running', Math.min(99, progress));
                 return;
               }
@@ -4253,15 +4405,16 @@ export const useAgentStore = defineStore('agent', () => {
 
       let gate = updateImageStepFromGate('running');
       if (!gate.complete) {
-        const failedTitles = gate.missingSlides.map((slide) => slide.title).join('、');
+        const failedTitles = gate.missingTasks.map((task) => `${task.slide.title}/${task.plan.purpose || task.plan.id}`).join('、');
         pushLog(`图片生成未全部成功，正在自动重试：${failedTitles}`);
-        await runImageBatch(gate.missingSlides, 'retry');
+        const retrySlides = [...new Map(gate.missingTasks.map((task) => [task.slide.id, task.slide])).values()];
+        await runImageBatch(retrySlides, 'retry');
         if (!isRunContextActive(ctx)) return false;
         gate = updateImageStepFromGate('idle');
       }
 
       if (!gate.complete) {
-        const failedTitles = gate.missingSlides.map((slide) => slide.title).join('、');
+        const failedTitles = gate.missingTasks.map((task) => `${task.slide.title}/${task.plan.purpose || task.plan.id}`).join('、');
         pushLog(`图片自动重试后仍未完成：${failedTitles}。请手动重试成功后再继续。`);
         activeStep.value = 'images';
         currentGeneratingSlide.value = null;
@@ -4291,11 +4444,11 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function generateSingleSlideImageForWorkflow(
-    sourceSlide: { id: string; title: string; bullets?: string[]; speakerNotes?: string; visualPrompt?: string },
+    sourceSlide: { id: string; title: string; bullets?: string[]; speakerNotes?: string; visualPrompt?: string; imagePlan?: any[] },
     ctx: RunContext,
     options: { announce?: boolean } = {}
-  ): Promise<GeneratedImage | null> {
-    if (!isRunContextActive(ctx)) return null;
+  ): Promise<GeneratedImage[]> {
+    if (!isRunContextActive(ctx)) return [];
     currentGeneratingSlide.value = sourceSlide.id;
     if (options.announce) {
       pushLog(`重新生成图片：${sourceSlide.title}`);
@@ -4309,6 +4462,7 @@ export const useAgentStore = defineStore('agent', () => {
           bullets: [...(sourceSlide.bullets || [])],
           speakerNotes: sourceSlide.speakerNotes || '',
           visualPrompt: sourceSlide.visualPrompt || [sourceSlide.title, ...(sourceSlide.bullets || [])].filter(Boolean).join('，'),
+          imagePlan: Array.isArray(sourceSlide.imagePlan) ? sourceSlide.imagePlan : undefined,
         }],
         parameters.value.imageStyle,
         {
@@ -4335,8 +4489,8 @@ export const useAgentStore = defineStore('agent', () => {
         1,
         { imageModelId: selectedImageModelId.value }
       );
-      if (!isRunContextActive(ctx)) return null;
-      return result[0] || null;
+      if (!isRunContextActive(ctx)) return [];
+      return result;
     } finally {
       if (isRunContextActive(ctx)) currentGeneratingSlide.value = null;
     }
@@ -4354,10 +4508,11 @@ export const useAgentStore = defineStore('agent', () => {
     activeStep.value = 'images';
 
     try {
-      const image = await generateSingleSlideImageForWorkflow(sourceSlide, ctx, { announce: true });
+      const retriedImages = await generateSingleSlideImageForWorkflow(sourceSlide, ctx, { announce: true });
       if (!isRunContextActive(ctx)) return;
 
-      if (image?.error || !image?.url) {
+      const hasFailed = retriedImages.some((image) => image.error || !image.url);
+      if (hasFailed || !retriedImages.length) {
         pushLog(`图片仍未生成：${sourceSlide.title}`);
       } else {
         pushLog(`图片重试成功：${sourceSlide.title}`);
@@ -4398,30 +4553,41 @@ export const useAgentStore = defineStore('agent', () => {
     return undefined;
   }
 
-  function findReadySlideImage(slideId: string) {
-    return images.value.find(img =>
-      img.slideId === slideId &&
-      img.selected &&
-      !img.error &&
-      Boolean(img.url)
-    );
+  function findReadySlideImages(slide: SpecSlide) {
+    return normalizeSlideImagePlans(slide)
+      .map((plan) => images.value.find(img =>
+        img.slideId === slide.id &&
+        (img.assetId || 'img-1') === plan.id &&
+        img.selected &&
+        !img.error &&
+        Boolean(img.url)
+      ))
+      .filter(Boolean) as GeneratedImage[];
   }
 
-  async function ensureSlideImageForLayout(slide: SpecSlide, ctx: RunContext): Promise<string | undefined> {
-    if (!slideNeedsImage(slide)) return undefined;
+  async function ensureSlideImagesForLayout(slide: SpecSlide, ctx: RunContext): Promise<GeneratedImage[]> {
+    if (!slideNeedsImage(slide)) return [];
 
-    const existingUrl = await ensureExecutorImageUrl(findReadySlideImage(slide.id));
-    if (existingUrl) return existingUrl;
-    if (!isRunContextActive(ctx)) return undefined;
+    const plans = normalizeSlideImagePlans(slide);
+    const existingImages = findReadySlideImages(slide);
+    for (const image of existingImages) {
+      await ensureExecutorImageUrl(image);
+    }
+    const refreshedExisting = findReadySlideImages(slide);
+    if (refreshedExisting.length >= plans.length) return refreshedExisting;
+    if (!isRunContextActive(ctx)) return [];
 
-    pushLog(`第 ${slide.pageNumber} 页缺少可用图片，正在自动重试图片生成。`);
-    const image = await generateSingleSlideImageForWorkflow(slide, ctx);
-    if (!isRunContextActive(ctx)) return undefined;
+    pushLog(`第 ${slide.pageNumber} 页缺少可用图片素材，正在自动重试图片生成。`);
+    const retriedImages = await generateSingleSlideImageForWorkflow(slide, ctx);
+    if (!isRunContextActive(ctx)) return [];
 
-    const retryUrl = await ensureExecutorImageUrl(image || findReadySlideImage(slide.id));
-    if (retryUrl) {
-      pushLog(`第 ${slide.pageNumber} 页图片自动重试成功，继续生成页面。`);
-      return retryUrl;
+    for (const image of retriedImages) {
+      await ensureExecutorImageUrl(image);
+    }
+    const readyImages = findReadySlideImages(slide);
+    if (readyImages.length >= plans.length) {
+      pushLog(`第 ${slide.pageNumber} 页图片素材自动重试成功，继续生成页面。`);
+      return readyImages;
     }
 
     activeStep.value = 'images';
@@ -4432,7 +4598,7 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function generateSlideSvg(slide: SpecSlide, ctx: RunContext): Promise<string> {
-    const imageUrl = await ensureSlideImageForLayout(slide, ctx);
+    const imageAssets = await ensureSlideImagesForLayout(slide, ctx);
     if (!isRunContextActive(ctx)) return '';
 
     const spec = designSpec.value!;
@@ -4476,7 +4642,7 @@ export const useAgentStore = defineStore('agent', () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         svg = await aiApi.executorPageStream(
-          { spec: slimSpec as any, lock: slimLock as any, slide, imageUrl, textModelId: selectedTextModelId.value },
+          { spec: slimSpec as any, lock: slimLock as any, slide, imageAssets, textModelId: selectedTextModelId.value },
           {
             onStart: () => {},
             onContent: () => {},
@@ -4531,21 +4697,34 @@ export const useAgentStore = defineStore('agent', () => {
       const spec = designSpec.value;
       if (!spec) return;
       const totalPages = spec.outline.length;
-      const startIndex = options.resume
-        ? Math.min(Math.max(executorCursor.value || svgPages.value.length, 0), totalPages)
-        : 0;
+      const existingValidPages = options.resume
+        ? new Set(svgPages.value
+            .filter(page => page.svg?.trim() && !isFallbackSvgPage(page.svg))
+            .map(page => page.pageNumber))
+        : new Set<number>();
+      const slidesToGenerate = options.resume
+        ? spec.outline.filter(slide => !existingValidPages.has(slide.pageNumber))
+        : spec.outline;
 
-      let nextIndex = startIndex;
-      let completedPages = startIndex;
+      let nextIndex = 0;
+      let completedPages = validLayoutPageCount(totalPages);
       let stopLayoutWorkers = false;
+
+      if (slidesToGenerate.length === 0) {
+        executorCursor.value = totalPages;
+        setStepStatus('layout', 'done', 100);
+        pushLog('页面已全部生成完成。');
+        await syncWorkflowProgress(true);
+        return;
+      }
 
       async function runNextPage() {
         if (!isRunContextActive(ctx) || stopLayoutWorkers) return;
         const i = nextIndex;
         nextIndex += 1;
-        if (i >= totalPages) return;
+        if (i >= slidesToGenerate.length) return;
 
-        const slide = spec.outline[i];
+        const slide = slidesToGenerate[i];
         const progress = Math.round((completedPages / totalPages) * 100);
         setStepStatus('layout', 'running', progress);
         pushLog(`正在生成第 ${slide.pageNumber} 页：${slide.title}`);
@@ -4561,6 +4740,7 @@ export const useAgentStore = defineStore('agent', () => {
           });
 
           pushLog(`第 ${slide.pageNumber} 页生成完成。`);
+          completedPages = validLayoutPageCount(totalPages);
         } catch (pageError) {
           if (isMissingSlideImageError(pageError)) {
             stopLayoutWorkers = true;
@@ -4582,7 +4762,7 @@ export const useAgentStore = defineStore('agent', () => {
           });
         }
 
-        completedPages += 1;
+        completedPages = validLayoutPageCount(totalPages);
         executorCursor.value = completedLeadingLayoutPages(totalPages);
         setStepStatus('layout', 'running', Math.min(99, Math.round((completedPages / totalPages) * 100)));
         await syncWorkflowProgress(false);
@@ -4593,10 +4773,21 @@ export const useAgentStore = defineStore('agent', () => {
         await runNextPage();
       }
 
-      const workerCount = Math.min(LAYOUT_GENERATION_CONCURRENCY, Math.max(1, totalPages - startIndex));
+      const workerCount = Math.min(LAYOUT_GENERATION_CONCURRENCY, Math.max(1, slidesToGenerate.length));
       await Promise.all(Array.from({ length: workerCount }, () => runNextPage()));
       if (!isRunContextActive(ctx)) return;
       if (shouldPauseAt('layout')) {
+        await syncWorkflowProgress(true);
+        return;
+      }
+
+      const missingPages = missingLayoutPageNumbers(totalPages);
+      if (missingPages.length > 0) {
+        const completedValidPages = validLayoutPageCount(totalPages);
+        executorCursor.value = completedLeadingLayoutPages(totalPages);
+        setStepStatus('layout', 'idle', Math.round((completedValidPages / totalPages) * 100));
+        setStepStatus('preview', 'idle', 0);
+        pushLog(`页面生成未完成，缺少第 ${missingPages.join('、')} 页。点击运行当前阶段可继续补生成。`);
         await syncWorkflowProgress(true);
         return;
       }
@@ -4727,8 +4918,8 @@ export const useAgentStore = defineStore('agent', () => {
     }
 
     const totalPages = designSpec.value?.outline.length || outline.value.length || parameters.value.slideCount;
-    const hasPartialPages = svgPages.value.length > 0 && svgPages.value.length < totalPages;
-    await runExecutor({ resume: hasPartialPages || executorCursor.value > 0, ctx });
+    const shouldResumeLayout = svgPages.value.length > 0 || executorCursor.value > 0 || hasPendingLayoutPages(totalPages);
+    await runExecutor({ resume: shouldResumeLayout, ctx });
   }
 
   async function runSkills() {
@@ -4939,13 +5130,23 @@ export const useAgentStore = defineStore('agent', () => {
       clearProjectRunningJob(currentQueuedProjectId);
       if (!isRunContextActive(ctx)) return;
       applyQueuedGenerationResult(finalJob.result, { final: true });
-      activeStep.value = 'preview';
-      clearPauseState();
+      const readiness = exportReadiness();
+      activeStep.value = readiness.ready ? 'preview' : 'layout';
+      if (readiness.ready) {
+        clearPauseState();
+      } else {
+        resumeStage.value = 'layout';
+        pushLog(readiness.message);
+      }
       activeQueueJobId.value = null;
       activeGenerationJobId.value = null;
       await syncToProjectNow();
 
-      toastStore.success('PPT 生成完成', '可以在预览区查看结果');
+      if (readiness.ready) {
+        toastStore.success('PPT 生成完成', '可以在预览区查看结果');
+      } else {
+        toastStore.warning('页面未全部生成', '请在生成页面阶段运行当前阶段补齐缺失页面');
+      }
     } catch (error) {
       if (queuedProjectId && !(pauseRequested.value || (error instanceof Error && error.message === '任务已取消'))) {
         clearProjectRunningJob(queuedProjectId);

@@ -18,7 +18,7 @@ export async function analyzeDeckInput(
         slideCount: params.slideCount,
         tone: params.tone,
         summaryLength: params.summaryLength,
-        promptContent: promptContent || ''
+        promptContent: promptContent || '',
       },
       {
         onStart: (message) => {
@@ -35,7 +35,7 @@ export async function analyzeDeckInput(
         onError: (message) => {
           callbacks?.onError?.(message);
           toastStore.error('生成大纲失败', message);
-        }
+        },
       }
     );
 
@@ -45,6 +45,7 @@ export async function analyzeDeckInput(
       bullets: item.bullets,
       speakerNotes: item.speakerNotes,
       visualPrompt: item.visualPrompt,
+      imagePlan: item.imagePlan,
       chartHint: item.chartHint,
       layout: item.layout as SlideLayout | undefined,
     }));
@@ -53,6 +54,50 @@ export async function analyzeDeckInput(
     toastStore.error('生成大纲失败', error instanceof Error ? error.message : '未知错误');
     throw error;
   }
+}
+
+type ImageTask = {
+  slide: SlideOutline;
+  plan: {
+    id: string;
+    prompt: string;
+    purpose?: string;
+    style: string;
+  };
+};
+
+function normalizeImageTasks(outline: SlideOutline[], fallbackStyle: ImageStyle): ImageTask[] {
+  return outline.flatMap((slide) => {
+    const plans = Array.isArray(slide.imagePlan)
+      ? slide.imagePlan
+          .slice(0, 4)
+          .map((plan, index) => ({
+            id: String(plan?.id || `img-${index + 1}`).replace(/[^\w-]/g, '-').slice(0, 40) || `img-${index + 1}`,
+            prompt: String(plan?.prompt || '').trim(),
+            purpose: plan?.purpose ? String(plan.purpose).slice(0, 80) : undefined,
+            style: plan?.style ? String(plan.style).slice(0, 80) : fallbackStyle,
+          }))
+          .filter((plan) => plan.prompt)
+      : [];
+
+    if (plans.length) return plans.map((plan) => ({ slide, plan }));
+
+    const legacyPrompt = String(slide.visualPrompt || '').trim();
+    if (!legacyPrompt || Array.isArray(slide.imagePlan)) return [];
+    return [{
+      slide,
+      plan: {
+        id: 'img-1',
+        prompt: legacyPrompt,
+        purpose: 'supporting',
+        style: fallbackStyle,
+      },
+    }];
+  });
+}
+
+function buildImageTitle(slide: SlideOutline, plan: ImageTask['plan']) {
+  return `${slide.title}${plan.purpose ? ` / ${plan.purpose}` : ''}`;
 }
 
 export async function generateSlideImages(
@@ -71,55 +116,71 @@ export async function generateSlideImages(
   const images: GeneratedImage[] = [];
   const imageCache = new Map<string, GeneratedImage>();
   const pendingImageRequests = new Map<string, Promise<GeneratedImage>>();
-  const total = outline.length;
+  const imageTasks = normalizeImageTasks(outline, style);
+  const total = imageTasks.length;
   const safeConcurrency = Math.max(1, Math.min(3, Math.floor(concurrency) || 1));
   let completed = 0;
 
-  async function processSlide(slide: SlideOutline): Promise<GeneratedImage> {
-    const cacheKey = `${style}::${slide.visualPrompt || slide.title}`.trim().toLowerCase();
+  function setStepProgress(progress: number) {
+    callbacks?.onComplete?.('__progress__', {
+      id: '__progress__',
+      slideId: '__progress__',
+      title: '',
+      prompt: '',
+      style: '',
+      url: '',
+      selected: false,
+      error: false,
+      _progress: progress,
+    } as any);
+  }
+
+  async function processTask({ slide, plan }: ImageTask): Promise<GeneratedImage> {
+    const cacheKey = `${plan.style}::${plan.prompt}`.trim().toLowerCase();
+    const title = buildImageTitle(slide, plan);
+
+    const buildReusedImage = (source: GeneratedImage): GeneratedImage => ({
+      ...source,
+      id: `${slide.id}-${plan.id}`,
+      slideId: slide.id,
+      assetId: plan.id,
+      title,
+      prompt: plan.prompt,
+      purpose: plan.purpose,
+      style: plan.style,
+      selected: true,
+    });
+
     const cached = imageCache.get(cacheKey);
     if (cached?.url && !cached.error) {
-      const reusedImage: GeneratedImage = {
-        ...cached,
-        id: `${slide.id}-image-1`,
-        slideId: slide.id,
-        title: slide.title,
-        prompt: slide.visualPrompt,
-        selected: true,
-      };
-      completed++;
-      setStepProgress(Math.round((completed / total) * 100));
+      const reusedImage = buildReusedImage(cached);
+      completed += 1;
+      setStepProgress(Math.round((completed / Math.max(1, total)) * 100));
       callbacks?.onComplete?.(slide.id, reusedImage);
       return reusedImage;
     }
 
     const pendingImage = pendingImageRequests.get(cacheKey);
     if (pendingImage) {
-      const sharedImage = await pendingImage;
-      const reusedImage: GeneratedImage = {
-        ...sharedImage,
-        id: `${slide.id}-image-1`,
-        slideId: slide.id,
-        title: slide.title,
-        prompt: slide.visualPrompt,
-        selected: true,
-      };
-      completed++;
-      setStepProgress(Math.round((completed / total) * 100));
+      const reusedImage = buildReusedImage(await pendingImage);
+      completed += 1;
+      setStepProgress(Math.round((completed / Math.max(1, total)) * 100));
       callbacks?.onComplete?.(slide.id, reusedImage);
       return reusedImage;
     }
 
     try {
-      callbacks?.onStart?.(slide.id, `正在为"${slide.title}"生成图片...`);
+      callbacks?.onStart?.(slide.id, `正在生成图片素材：${title}`);
 
       const imagePromise = aiApi.generateImageStream(
         {
           slideId: slide.id,
-          title: slide.title,
-          prompt: slide.visualPrompt,
-          style,
-          imageModelId: options.imageModelId || null
+          assetId: plan.id,
+          title,
+          prompt: plan.prompt,
+          purpose: plan.purpose,
+          style: plan.style,
+          imageModelId: options.imageModelId || null,
         },
         {
           onStart: (message) => {
@@ -131,20 +192,20 @@ export async function generateSlideImages(
           onError: (message) => {
             callbacks?.onError?.(slide.id, message);
             toastStore.warning('图片未生成', message);
-          }
+          },
         }
       );
+
       pendingImageRequests.set(cacheKey, imagePromise);
       const image = await imagePromise;
       pendingImageRequests.delete(cacheKey);
 
-      completed++;
-      const progress = Math.round((completed / total) * 100);
-      setStepProgress(progress);
+      completed += 1;
+      setStepProgress(Math.round((completed / Math.max(1, total)) * 100));
 
       if (!image.error && image.url) {
         imageCache.set(cacheKey, image);
-        toastStore.success('图片生成完成', slide.title);
+        toastStore.success('图片生成完成', title);
       } else if (image.error) {
         callbacks?.onComplete?.(slide.id, image);
       }
@@ -152,46 +213,34 @@ export async function generateSlideImages(
       return image;
     } catch (error) {
       pendingImageRequests.delete(cacheKey);
-      console.warn(`生成图片失败: ${slide.id}`, error);
-      completed++;
-      const progress = Math.round((completed / total) * 100);
-      setStepProgress(progress);
+      console.warn(`生成图片失败: ${slide.id}/${plan.id}`, error);
+      completed += 1;
+      setStepProgress(Math.round((completed / Math.max(1, total)) * 100));
 
       const errorImage: GeneratedImage = {
-        id: `${slide.id}-image-1`,
+        id: `${slide.id}-${plan.id}`,
         slideId: slide.id,
-        title: slide.title,
-        prompt: slide.visualPrompt,
-        style,
+        assetId: plan.id,
+        title,
+        prompt: plan.prompt,
+        purpose: plan.purpose,
+        style: plan.style,
         url: '',
         selected: true,
         error: true,
-        errorMessage: error instanceof Error ? error.message : '未知错误'
+        errorMessage: error instanceof Error ? error.message : '未知错误',
       };
       callbacks?.onComplete?.(slide.id, errorImage);
-      callbacks?.onError?.(slide.id, error instanceof Error ? error.message : '未知错误');
+      callbacks?.onError?.(slide.id, errorImage.errorMessage || '未知错误');
       return errorImage;
     }
   }
 
-  function setStepProgress(progress: number) {
-    callbacks?.onComplete?.('__progress__', { id: '__progress__', slideId: '__progress__', title: '', prompt: '', style: '', url: '', selected: false, error: false, _progress: progress } as any);
-  }
-
-  const batches: SlideOutline[][] = [];
-  for (let i = 0; i < outline.length; i += safeConcurrency) {
-    batches.push(outline.slice(i, i + safeConcurrency));
-  }
-
-  for (const batch of batches) {
-    const results = await Promise.allSettled(
-      batch.map(slide => processSlide(slide))
-    );
-
+  for (let i = 0; i < imageTasks.length; i += safeConcurrency) {
+    const batch = imageTasks.slice(i, i + safeConcurrency);
+    const results = await Promise.allSettled(batch.map(task => processTask(task)));
     for (const result of results) {
-      if (result.status === 'fulfilled') {
-        images.push(result.value);
-      }
+      if (result.status === 'fulfilled') images.push(result.value);
     }
   }
 
@@ -200,6 +249,9 @@ export async function generateSlideImages(
   const successCount = images.filter(img => !img.error && img.url).length;
   const totalCount = images.length;
 
+  if (totalCount === 0) {
+    return images;
+  }
   if (successCount === totalCount) {
     toastStore.success('所有图片生成完成', `共 ${totalCount} 张`);
   } else if (successCount > 0) {
@@ -216,6 +268,6 @@ export async function exportDeck(format: 'pptx' | 'pdf') {
   return {
     format,
     name: `nexious-agent-deck.${format}`,
-    status: 'ready' as const
+    status: 'ready' as const,
   };
 }

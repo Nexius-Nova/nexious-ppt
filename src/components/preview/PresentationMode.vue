@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, watch, ref } from 'vue';
 import { X, ChevronLeft, ChevronRight } from 'lucide-vue-next';
 import PrivateBackground from '@/components/common/PrivateBackground.vue';
 import { getTemplateColors } from '@/composables/templateColors';
+import { layoutNeedsVisual, normalizeSlideLayout } from '@/utils/layoutSemantics';
 import type { SlideOutline, GeneratedImage, AgentParameters } from '@/types/agent';
 
 const props = defineProps<{
@@ -72,6 +73,14 @@ function currentImage(): GeneratedImage | null {
   if (!slide) return null;
   return props.imageMap.get(slide.id) || null;
 }
+
+function currentLayout() {
+  return normalizeSlideLayout(currentSlide.value?.layout);
+}
+
+function currentNeedsVisual() {
+  return layoutNeedsVisual(currentSlide.value?.layout);
+}
 </script>
 
 <template>
@@ -85,10 +94,10 @@ function currentImage(): GeneratedImage | null {
           </button>
         </div>
 
-        <div class="present-canvas" :class="`present-canvas--${currentSlide?.layout || 'text-only'}`" :style="{ background: getColor().bg }">
+        <div class="present-canvas" :class="`present-canvas--${currentLayout()}`" :style="{ background: getColor().bg }">
           <div class="present-accent-strip" :style="{ background: getColor().accent }" />
-          <!-- text-only / text-image / image-text: structured content -->
-          <div v-if="(currentSlide?.layout || 'text-only') !== 'full-image'" class="present-content" :class="{ 'present-content--right': (currentSlide?.layout || 'text-only') === 'image-text' }">
+          <!-- Structured content -->
+          <div v-if="currentLayout() !== 'visual-focus'" class="present-content">
             <div class="present-slide-label" :style="{ color: getColor().accent }">
               SLIDE {{ String(currentIndex + 1).padStart(2, '0') }}
             </div>
@@ -103,22 +112,18 @@ function currentImage(): GeneratedImage | null {
           </div>
           <!-- Image -->
           <PrivateBackground
-            v-if="(currentSlide?.layout || 'text-only') !== 'text-only' && currentImage()?.url"
+            v-if="currentNeedsVisual() && currentImage()?.url"
             class="present-image"
             :src="currentImage()?.url"
             :class="{
-              'present-image--right': (currentSlide?.layout || 'text-only') === 'text-image',
-              'present-image--left': (currentSlide?.layout || 'text-only') === 'image-text',
-              'present-image--full': (currentSlide?.layout || 'text-only') === 'full-image'
+              'present-image--full': currentLayout() === 'visual-focus'
             }"
           />
           <div
-            v-if="(currentSlide?.layout || 'text-only') !== 'text-only' && !currentImage()?.url"
+            v-if="currentNeedsVisual() && !currentImage()?.url"
             class="present-image present-image--placeholder"
             :class="{
-              'present-image--right': (currentSlide?.layout || 'text-only') === 'text-image',
-              'present-image--left': (currentSlide?.layout || 'text-only') === 'image-text',
-              'present-image--full': (currentSlide?.layout || 'text-only') === 'full-image'
+              'present-image--full': currentLayout() === 'visual-focus'
             }"
           >
             <span class="present-image__hint">暂无图片</span>
@@ -213,11 +218,14 @@ function currentImage(): GeneratedImage | null {
 }
 
 .present-canvas--text-image,
-.present-canvas--image-text {
+.present-canvas--image-text,
+.present-canvas--mixed-media,
+.present-canvas--media-grid {
   flex-direction: row;
 }
 
-.present-canvas--full-image {
+.present-canvas--full-image,
+.present-canvas--visual-focus {
   padding: 0;
 }
 

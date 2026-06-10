@@ -1,23 +1,23 @@
 import type { DesignSpec, SpecLock, SpecSlide } from './spec.js';
 import { renderSpecLockMarkdown } from './ppt-exporter.js';
-import { shouldUseContainFitForSlide } from './imageComposition.js';
 
 const IMAGE_INTENT_PATTERN =
   /(配图|图片|插图|图示|示意图|视觉|场景图|海报|照片|封面图|背景图|产品图|架构图|流程图|路线图|信息图|生成图|image|illustration|visual|photo|poster|diagram|infographic)/i;
 
-export interface ImageSlot {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  aspectRatio: number;
-  placement: 'left' | 'right' | 'center' | 'full';
-  fit: 'cover' | 'contain';
-}
+const IMAGE_LAYOUTS = new Set(['mixed-media', 'visual-focus', 'media-grid', 'content-image', 'text-image', 'image-text', 'full-image']);
 
 export interface ExecutorPromptContext {
   iconGuide?: string;
   chartTemplateSvg?: string;
+}
+
+export interface ExecutorImageAsset {
+  id?: string;
+  url: string;
+  title?: string;
+  prompt?: string;
+  purpose?: string;
+  style?: string;
 }
 
 export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock, context: ExecutorPromptContext = {}): string {
@@ -33,9 +33,10 @@ export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock, cont
 4. 禁止使用渐变、<style>、class、<foreignObject>、<mask>、rgba()、@font-face、<animate>、<script>、<textPath>、<g opacity>、<image opacity>。
 5. 文本使用 <text> 和 <tspan>，XML 保留字符必须转义。
 6. 顶层内容使用 <g id="..."> 分组，id 使用英文 kebab-case。
-7. 不要引用不存在的图片；除非用户提供短 http/https 图片 URL，否则不要写 <image>。如果提供了图片 URL，当前页必须至少使用一次 <image href="图片URL">，并用 x/y/width/height 明确放置。
+7. 不要引用不存在的图片；除非本页提供了图片素材 URL，否则不要写 <image>。如果提供了图片素材，必须按素材清单使用，不要编造新 URL。
 8. 模板、提示词和 Skill 已经在 Strategist 阶段折算进规格；本阶段不要追加 Skill 规则。
-9. 不要输出通用灰底 bullet 页。必须根据 layout/rhythm 设计当前页构图：cover 强视觉中心，toc 有目录结构，content-chart 有图表结构，content-image 有图片区，ending 有收束感。即使没有图片，也要用 SVG 形状、分栏、编号、轴线或信息框表达差异。
+9. 不要输出通用灰底 bullet 页。必须根据 layout/rhythm 设计当前页构图：cover 强视觉中心，toc 有目录结构，content-chart 有图表结构，mixed-media/visual-focus/media-grid 表示视觉内容参与叙事但不固定图片位置，ending 有收束感。即使没有图片，也要用 SVG 形状、分栏、编号、轴线或信息框表达差异。
+10. 图片操作能力：可以对 <image> 自主设置 x/y/width/height；可以用 preserveAspectRatio="xMidYMid slice|meet|none" 做裁切或非等比缩放；可以用 transform="rotate(...)"、transform="scale(sx sy)" 或父级 <g transform="..."> 做旋转、等比/非等比缩放和平移；可以用 <clipPath> + rect/circle/ellipse/path/polygon 做规则或不规则剪切。图片不能越界、不能遮挡标题/正文/图表等关键信息。
 
 Animation export structure:
 - Use meaningful top-level <g> groups for visible animated content: title-block, hero-visual, key-message, chart-area, timeline, content-card-1, content-card-2, summary-bar.
@@ -51,8 +52,8 @@ export function buildExecutorPagePrompt(
   slide: SpecSlide,
   spec: DesignSpec,
   lock: SpecLock,
-  imageUrl?: string,
-  imageSlot: ImageSlot = calculateImageSlot(slide, spec),
+  imageInput?: string | ExecutorImageAsset[],
+  _imageSlot?: unknown,
   context: ExecutorPromptContext = {}
 ): string {
   const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
@@ -60,13 +61,16 @@ export function buildExecutorPagePrompt(
   const layout = lock.pageLayouts[pageKey] || slide.layout;
   const chart = lock.pageCharts[pageKey] || slide.chartHint || '';
   const bullets = slide.bullets.slice(0, 8).join(' | ') || '无';
+  const layoutText = String(slide.layout || '').toLowerCase();
   const needsVisual = Boolean(
+    (slide.imagePlan || []).length ||
     slide.visualPrompt ||
-    ['content-image', 'text-image', 'image-text', 'full-image'].includes(String(slide.layout)) ||
+    IMAGE_LAYOUTS.has(layoutText) ||
     IMAGE_INTENT_PATTERN.test([slide.title, ...slide.bullets, slide.speakerNotes, slide.chartHint].filter(Boolean).join(' '))
   );
-  const imageInstruction = imageUrl
-    ? `必须使用这张生成图片：${imageUrl}。图片槽位固定为 x=${imageSlot.x}, y=${imageSlot.y}, width=${imageSlot.width}, height=${imageSlot.height}, aspectRatio=${imageSlot.aspectRatio.toFixed(2)}, placement=${imageSlot.placement}。请写入 <image href="${imageUrl}" x="${imageSlot.x}" y="${imageSlot.y}" width="${imageSlot.width}" height="${imageSlot.height}" preserveAspectRatio="xMidYMid ${imageSlot.fit === 'contain' ? 'meet' : 'slice'}"/>。不要改变图片槽位，不要让图片压住标题、要点、编号或图表，不要再画醒目的红色边框、遮挡层、大面积白底占位或重复示意图。`
+  const imageAssets = normalizeExecutorImageAssets(imageInput);
+  const imageInstruction = imageAssets.length
+    ? `本页可用图片素材如下，是否全部使用、使用几张、每张的位置/尺寸/裁切/旋转/缩放都由你根据内容自主决定，但被使用的素材必须来自清单，不能编造 URL：\n${formatExecutorImageAssets(imageAssets)}\n图片工具：使用 <image href="素材URL" x="..." y="..." width="..." height="..." preserveAspectRatio="xMidYMid slice|meet|none"/>；可用 <clipPath> + rect/circle/ellipse/path/polygon 做不规则剪切；可在 <image> 或父级 <g> 上使用 transform="rotate(angle cx cy) scale(sx sy) translate(dx dy)" 做旋转、非等比缩放和移动。不要固定套用某个图片位置，不要让图片压住标题、正文、编号、图表或关键组件。`
     : needsVisual
       ? `需要视觉表达：${slide.visualPrompt || slide.title}。当前没有可用图片 URL，请用 SVG 图形、示意框、图示或抽象插画表达，不要写 <image>。`
       : '不使用图片。';
@@ -88,6 +92,35 @@ ${context.chartTemplateSvg ? `\nNexious PPT chart template SVG reference. Learn 
 请让本页构图明显匹配 layout=${layout} 与 rhythm=${rhythm}，不要复用上一页版式。
 
 输出纯 SVG。`;
+}
+
+function normalizeExecutorImageAssets(input?: string | ExecutorImageAsset[]): ExecutorImageAsset[] {
+  if (!input) return [];
+  if (typeof input === 'string') {
+    const url = input.trim();
+    return url ? [{ id: 'img-1', url }] : [];
+  }
+  return input
+    .filter((asset) => asset?.url && !String((asset as any).error || '').trim())
+    .slice(0, 8)
+    .map((asset, index) => ({
+      id: String(asset.id || `img-${index + 1}`),
+      url: String(asset.url),
+      title: asset.title ? String(asset.title) : undefined,
+      prompt: asset.prompt ? String(asset.prompt).slice(0, 360) : undefined,
+      purpose: asset.purpose ? String(asset.purpose).slice(0, 80) : undefined,
+      style: asset.style ? String(asset.style).slice(0, 80) : undefined,
+    }));
+}
+
+function formatExecutorImageAssets(assets: ExecutorImageAsset[]) {
+  return assets.map((asset, index) => [
+    `- assetId: ${asset.id || `img-${index + 1}`}`,
+    `url: ${asset.url}`,
+    asset.purpose ? `purpose: ${asset.purpose}` : '',
+    asset.style ? `style: ${asset.style}` : '',
+    asset.prompt ? `prompt: ${asset.prompt}` : '',
+  ].filter(Boolean).join('；')).join('\n');
 }
 
 export function cleanSvgOutput(raw: string): string {
@@ -118,71 +151,12 @@ export function sanitizeGeneratedSvg(svg: string): string {
   result = result.replace(/\s+on[a-z]+\s*=\s*(['"])[\s\S]*?\1/gi, '');
   result = result.replace(/\s+(?:href|xlink:href)\s*=\s*(['"])\s*javascript:[\s\S]*?\1/gi, '');
   result = result.replace(/\s+(?:href|xlink:href)\s*=\s*(['"])\s*data:(?!image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,)[\s\S]*?\1/gi, '');
-  result = result.replace(/<image\b([^>]*?)\s+(?:href|xlink:href)\s*=\s*(['"])(https?:\/\/(?!localhost(?::\d+)?\/generated-images\/)[^'"]+)\2([^>]*)\/?>/gi, '');
+  result = result.replace(/<image\b([^>]*?)\s+(?:href|xlink:href)\s*=\s*(['"])(https?:\/\/(?![^'"]*\/generated-images\/)[^'"]+)\2([^>]*)\/?>/gi, '');
   result = result.replace(/<use\b[^>]*(?:href|xlink:href)\s*=\s*(['"])\s*(?:https?:|javascript:)[\s\S]*?\1[^>]*\/?>/gi, '');
   return result.trim();
 }
 
-function escapeAttribute(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-export function calculateImageSlot(slide: SpecSlide, spec: DesignSpec): ImageSlot {
-  const canvas = spec.canvas;
-  const layout = String(slide.layout || '').toLowerCase();
-  const marginX = Math.round(canvas.width * 0.055);
-  const top = Math.round(canvas.height * 0.19);
-  const contentBottom = Math.round(canvas.height * 0.88);
-  const contentHeight = contentBottom - top;
-
-  if (layout.includes('full') || layout.includes('cover')) {
-    const width = Math.round(canvas.width * 0.84);
-    const height = Math.round(canvas.height * 0.62);
-    const x = Math.round((canvas.width - width) / 2);
-    const y = Math.round(canvas.height * 0.2);
-    return { x, y, width, height, aspectRatio: width / height, placement: 'center', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
-  }
-
-  if (layout.includes('image-text')) {
-    const width = Math.round(canvas.width * 0.38);
-    const height = Math.round(contentHeight * 0.72);
-    return { x: marginX, y: top, width, height, aspectRatio: width / height, placement: 'left', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
-  }
-
-  if (layout.includes('text-image') || layout.includes('content-image')) {
-    const width = Math.round(canvas.width * 0.38);
-    const height = Math.round(contentHeight * 0.72);
-    const x = canvas.width - marginX - width;
-    return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
-  }
-
-  const width = Math.round(canvas.width * 0.34);
-  const height = Math.round(contentHeight * 0.62);
-  const x = canvas.width - marginX - width;
-  return { x, y: top, width, height, aspectRatio: width / height, placement: 'right', fit: shouldUseContainFitForSlide(slide) ? 'contain' : 'cover' };
-}
-
-function buildGeneratedImageGroup(slide: SpecSlide, spec: DesignSpec, imageUrl: string, imageSlot = calculateImageSlot(slide, spec)): string {
-  const preserveAspectRatio = imageSlot.fit === 'contain' ? 'xMidYMid meet' : 'xMidYMid slice';
-  return `
-  <g id="generated-image">
-    <rect x="${imageSlot.x - 8}" y="${imageSlot.y - 8}" width="${imageSlot.width + 16}" height="${imageSlot.height + 16}" fill="${spec.visualTheme.colors.surface}" stroke="${spec.visualTheme.colors.border}" stroke-width="1"/>
-    <image href="${escapeAttribute(imageUrl)}" x="${imageSlot.x}" y="${imageSlot.y}" width="${imageSlot.width}" height="${imageSlot.height}" preserveAspectRatio="${preserveAspectRatio}"/>
-  </g>`;
-}
-
-export function ensureImageUsedInSvg(svg: string, slide: SpecSlide, spec: DesignSpec, imageUrl?: string): string {
-  if (!imageUrl || !svg) return svg;
-  const imageGroup = buildGeneratedImageGroup(slide, spec, imageUrl);
-  const closeIndex = svg.toLowerCase().lastIndexOf('</svg>');
-  if (closeIndex < 0) return svg;
-
-  const cleanedSvg = svg.replace(/<g\b[^>]*\bid\s*=\s*(['"])generated-image\1[^>]*>[\s\S]*?<\/g>/gi, '');
-  const cleanedCloseIndex = cleanedSvg.toLowerCase().lastIndexOf('</svg>');
-  if (cleanedCloseIndex < 0) return svg;
-  return `${cleanedSvg.slice(0, cleanedCloseIndex)}${imageGroup}\n${cleanedSvg.slice(cleanedCloseIndex)}`;
+export function ensureImageUsedInSvg(svg: string, _slide: SpecSlide, _spec: DesignSpec, imageInput?: string | ExecutorImageAsset[]): string {
+  if (!imageInput || !svg) return svg;
+  return svg;
 }

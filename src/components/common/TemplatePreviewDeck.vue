@@ -261,6 +261,8 @@ const visibleSlides = computed(() => props.slides.slice(0, 3));
 }
 
 .template-preview-deck__slide--content-image::after,
+.template-preview-deck__slide--mixed-media::after,
+.template-preview-deck__slide--media-grid::after,
 .template-preview-deck__slide--content-chart::after {
   content: '';
   position: absolute;

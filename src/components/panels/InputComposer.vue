@@ -8,7 +8,11 @@ import UiTextarea from '@/components/ui/UiTextarea.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import TemplatePreviewDeck from '@/components/common/TemplatePreviewDeck.vue';
-import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
+import {
+  SKILL_WORKFLOW_STAGES,
+  getSkillCategoryDescription,
+  normalizeInputSkillCategory
+} from '@/constants/inputSkillCategories';
 import type { AgentParameters, ConfigOptionGroups, ConfigOptionKey, DeckInput, ImageModelConfig, InputProcessStep, PromptDefinition, PptTemplate, SkillDefinition, TemplateAsset, TemplateAssetSettings, TextModelConfig, UploadedFileContent } from '@/types/agent';
 
 type TemplatePreviewSlide = NonNullable<TemplateAssetSettings['previewSlides']>[number];
@@ -152,13 +156,22 @@ const activeResourceText = computed(() => {
   return items.length ? items.join(' · ') : '使用默认配置';
 });
 
-const skillGroups = computed(() =>
-  INPUT_SKILL_CATEGORIES.map((category) => ({
-    category,
-    skills: props.skills
-      .filter((skill) => normalizeInputSkillCategory(skill.category) === category)
-      .sort((a, b) => a.order - b.order)
-  }))
+const skillStageGroups = computed(() =>
+  SKILL_WORKFLOW_STAGES.map((stage) => {
+    const categories = stage.categories.map((category) => ({
+      name: category,
+      description: getSkillCategoryDescription(category),
+      skills: props.skills
+        .filter((skill) => normalizeInputSkillCategory(skill.category) === normalizeInputSkillCategory(category))
+        .sort((a, b) => a.order - b.order)
+    })).filter((category) => category.skills.length > 0);
+    return {
+      ...stage,
+      categories,
+      skillCount: categories.reduce((sum, category) => sum + category.skills.length, 0),
+      selectedCount: categories.reduce((sum, category) => sum + category.skills.filter((skill) => skill.enabled).length, 0)
+    };
+  }).filter((stage) => stage.skillCount > 0)
 );
 
 const promptOptions = computed(() => [
@@ -525,46 +538,59 @@ function handleFileChange(event: Event) {
 
             <div v-else-if="activeModule === 'skills'" class="skill-picker" aria-label="本次使用的 Skill">
               <p class="skill-picker__summary">
-                本次已选择 {{ selectedSkillCount }} 个 Skill。网页搜索类 Skill 放在“资料收集”中执行，文件类 Skill 会在上传文件后参与解析。
+                本次已选择 {{ selectedSkillCount }} 个 Skill。系统会按工作流阶段自动调用，输入页只负责选择本次 PPT 可用的能力。
               </p>
               <div v-if="skills.length" class="skill-picker__groups">
                 <section
-                  v-for="group in skillGroups"
-                  :key="group.category"
-                  class="skill-picker-group"
+                  v-for="(stage, stageIndex) in skillStageGroups"
+                  :key="stage.id"
+                  class="skill-picker-stage"
                 >
-                  <header class="skill-picker-group__header">
-                    <span>{{ group.category }}</span>
-                    <small>{{ group.skills.length }} 个</small>
+                  <header class="skill-picker-stage__header">
+                    <span>{{ stageIndex + 1 }}. {{ stage.title }}</span>
+                    <small>{{ stage.selectedCount }}/{{ stage.skillCount }}</small>
                   </header>
-                  <div v-if="group.skills.length" class="skill-picker-group__list">
-                    <button
-                      v-for="skill in group.skills"
-                      :key="skill.id"
-                      type="button"
-                      class="skill-option"
-                      :class="{
-                        'skill-option--selected': skill.enabled,
-                        'skill-option--disabled': !canUseSkill(skill)
-                      }"
-                      :disabled="!canUseSkill(skill)"
-                      @click="handleSkillToggle(skill)"
+                  <p class="skill-picker-stage__desc">{{ stage.description }}</p>
+                  <div class="skill-picker-category-list">
+                    <article
+                      v-for="category in stage.categories"
+                      :key="category.name"
+                      class="skill-picker-group"
                     >
-                      <span class="skill-option__check">
-                        <CheckCircle2 v-if="skill.enabled" :size="16" />
-                        <Circle v-else :size="16" />
-                      </span>
-                      <span class="skill-option__content">
-                        <strong>{{ skill.name }}</strong>
-                        <span>{{ compactText(skill.description || skill.instruction || '暂无说明', 72) }}</span>
-                      </span>
-                      <span class="skill-option__meta">
-                        <small>{{ skillRuntimeLabel(skill) }}</small>
-                        <small>{{ skillStatusLabel(skill) }}</small>
-                      </span>
-                    </button>
+                      <header class="skill-picker-group__header">
+                        <span>{{ category.name }}</span>
+                        <small>{{ category.skills.length }} 个</small>
+                      </header>
+                      <p class="skill-picker-group__desc">{{ category.description }}</p>
+                      <div v-if="category.skills.length" class="skill-picker-group__list">
+                        <button
+                          v-for="skill in category.skills"
+                          :key="skill.id"
+                          type="button"
+                          class="skill-option"
+                          :class="{
+                            'skill-option--selected': skill.enabled,
+                            'skill-option--disabled': !canUseSkill(skill)
+                          }"
+                          :disabled="!canUseSkill(skill)"
+                          @click="handleSkillToggle(skill)"
+                        >
+                          <span class="skill-option__check">
+                            <CheckCircle2 v-if="skill.enabled" :size="16" />
+                            <Circle v-else :size="16" />
+                          </span>
+                          <span class="skill-option__content">
+                            <strong>{{ skill.name }}</strong>
+                            <span>{{ compactText(skill.description || skill.instruction || '暂无说明', 72) }}</span>
+                          </span>
+                          <span class="skill-option__meta">
+                            <small>{{ skillRuntimeLabel(skill) }}</small>
+                            <small>{{ skillStatusLabel(skill) }}</small>
+                          </span>
+                        </button>
+                      </div>
+                    </article>
                   </div>
-                  <p v-else class="skill-picker-group__empty">暂无此类 Skill</p>
                 </section>
               </div>
               <div v-else class="resource-empty">
@@ -1492,9 +1518,61 @@ function handleFileChange(event: Event) {
   gap: 12px;
 }
 
+.skill-picker-stage {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--color-surface);
+}
+
+.skill-picker-stage__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.skill-picker-stage__header span {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.skill-picker-stage__header small {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.skill-picker-stage__desc,
+.skill-picker-group__desc {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.skill-picker-category-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .skill-picker-group {
   display: grid;
   gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--color-panel);
 }
 
 .skill-picker-group__header {
@@ -1502,8 +1580,6 @@ function handleFileChange(event: Event) {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  border-bottom: 1px solid var(--color-border);
-  padding-bottom: 6px;
 }
 
 .skill-picker-group__header span {
@@ -1937,6 +2013,10 @@ function handleFileChange(event: Event) {
   .resource-empty {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .skill-picker-category-list {
+    grid-template-columns: 1fr;
   }
 
   .skill-option {

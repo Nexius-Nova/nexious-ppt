@@ -1,5 +1,12 @@
 import type { AgentParameters, GeneratedImage, SlideOutline } from '@/types/agent';
 
+function normalizeExportLayout(layout: string): string {
+  const normalized = String(layout || 'text-only').trim().toLowerCase();
+  if (normalized === 'text-image' || normalized === 'image-text' || normalized === 'content-image') return 'mixed-media';
+  if (normalized === 'full-image') return 'visual-focus';
+  return normalized || 'text-only';
+}
+
 const templateColors: Record<AgentParameters['template'], { bg: string; panel: string; accent: string; text: string; muted: string }> = {
   auto: {
     bg: 'F7F8F5',
@@ -107,6 +114,18 @@ async function exportOutlineToPptxLegacy(
       hasImage: true,
       imgX: 7.8, imgY: 1.1, imgW: 4.7, imgH: 3.2
     },
+    'mixed-media': {
+      titleX: 0.72, titleY: 1.08, titleW: 6.8,
+      bulletsX: 0.82, bulletsY: 2.15, bulletsW: 6.3,
+      hasImage: true,
+      imgX: 7.8, imgY: 1.1, imgW: 4.7, imgH: 3.2
+    },
+    'media-grid': {
+      titleX: 0.72, titleY: 0.95, titleW: 11.2,
+      bulletsX: 0.82, bulletsY: 2.0, bulletsW: 6.3,
+      hasImage: true,
+      imgX: 7.8, imgY: 1.35, imgW: 4.7, imgH: 3.5
+    },
     'image-text': {
       titleX: 5.8, titleY: 1.08, titleW: 6.8,
       bulletsX: 5.9, bulletsY: 2.15, bulletsW: 6.3,
@@ -114,6 +133,13 @@ async function exportOutlineToPptxLegacy(
       imgX: 0.72, imgY: 1.1, imgW: 4.7, imgH: 3.2
     },
     'full-image': {
+      titleX: 0.72, titleY: 5.2, titleW: 11.2,
+      bulletsX: 0.82, bulletsY: 5.8, bulletsW: 0,
+      hasImage: true,
+      imgX: 0.35, imgY: 0.3, imgW: 12.6, imgH: 6.9,
+      isFullBg: true
+    },
+    'visual-focus': {
       titleX: 0.72, titleY: 5.2, titleW: 11.2,
       bulletsX: 0.82, bulletsY: 5.8, bulletsW: 0,
       hasImage: true,
@@ -137,7 +163,7 @@ async function exportOutlineToPptxLegacy(
   outline.forEach((slideItem, index) => {
     const slide = pptx.addSlide();
     const image = imageBySlide.get(slideItem.id);
-    const layoutKey = slideItem.layout || 'text-only';
+    const layoutKey = normalizeExportLayout(slideItem.layout || 'text-only');
     const cfg = LAYOUT[layoutKey] || LAYOUT['text-only'];
 
     slide.background = { color: colors.bg };
@@ -159,7 +185,7 @@ async function exportOutlineToPptxLegacy(
       fontSize: 9,
       bold: true
     });
-    const titleSz = slideItem.layoutParams?.titleSize ?? (layoutKey === 'full-image' ? 22 : 26);
+    const titleSz = slideItem.layoutParams?.titleSize ?? (layoutKey === 'visual-focus' ? 22 : 26);
     const bulletSz = slideItem.layoutParams?.bulletSize ?? (layoutKey === 'text-only' ? 14 : 13);
     const imgRatio = slideItem.layoutParams?.imageRatio ?? 0.45;
 
@@ -175,7 +201,7 @@ async function exportOutlineToPptxLegacy(
       fit: 'shrink'
     });
 
-    // Bullets (skip for full-image when no space)
+    // Bullets (skip for visual-focus when no space)
     if (cfg.bulletsW !== 0 && slideItem.bullets.length > 0) {
       slide.addText(
         slideItem.bullets.map((bullet) => ({ text: bullet, options: { bullet: { type: 'bullet' } } })),

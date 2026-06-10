@@ -1,0 +1,144 @@
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <g id="background">
+    <rect x="0" y="0" width="1280" height="720" fill="#0E1020" />
+    <rect x="0" y="28" width="1280" height="58" fill="#1B1F3B" />
+    <rect x="0" y="634" width="1280" height="58" fill="#1B1F3B" />
+    <g id="top-film-holes">
+      <rect x="34" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="94" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="154" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="214" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="274" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="334" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="394" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="454" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="514" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="574" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="634" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="694" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="754" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="814" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="874" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="934" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="994" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="1054" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="1114" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="1174" y="45" width="28" height="20" rx="4" fill="#0E1020" />
+    </g>
+    <g id="bottom-film-holes">
+      <rect x="34" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="94" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="154" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="214" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="274" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="334" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="394" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="454" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="514" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="574" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="634" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="694" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="754" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="814" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="874" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="934" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="994" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="1054" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="1114" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+      <rect x="1174" y="653" width="28" height="20" rx="4" fill="#0E1020" />
+    </g>
+    <line x1="70" y1="116" x2="1210" y2="116" stroke="#3A3F5C" stroke-width="2" />
+    <line x1="70" y1="614" x2="1210" y2="614" stroke="#3A3F5C" stroke-width="2" />
+  </g>
+  <g id="title-block">
+    <text x="70" y="134" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="36" font-weight="700">为什么电影越来越依赖技术？</text>
+    <text x="73" y="170" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="20">从“摄影机记录现实”，到“现实拍摄 + 数字制作”共同完成银幕画面</text>
+    <rect x="1072" y="118" width="138" height="40" rx="20" fill="#F5A623" />
+    <text x="1103" y="145" fill="#1B1F3B" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="20" font-weight="700">TECH</text>
+  </g>
+  <g id="logic-diagram">
+    <rect x="70" y="205" width="354" height="354" rx="18" fill="#1B1F3B" stroke="#3A3F5C" stroke-width="2" />
+    <text x="100" y="242" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="26" font-weight="700">画面生成逻辑</text>
+    <text x="100" y="274" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">技术不是炫技，而是补足“拍不到”的部分</text>
+    <rect x="100" y="304" width="128" height="86" rx="10" fill="#0E1020" stroke="#3A3F5C" stroke-width="2" />
+    <path d="M118 348 L145 328 L173 350 L197 332 L210 346" fill="none" stroke="#00A7A7" stroke-width="2" />
+    <circle cx="136" cy="330" r="7" fill="#F5A623" />
+    <text x="119" y="376" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">现实拍摄</text>
+    <rect x="266" y="304" width="128" height="86" rx="10" fill="#0E1020" stroke="#3A3F5C" stroke-width="2" />
+    <circle cx="304" cy="332" r="5" fill="#00A7A7" />
+    <circle cx="333" cy="326" r="5" fill="#00A7A7" />
+    <circle cx="357" cy="344" r="5" fill="#00A7A7" />
+    <circle cx="318" cy="358" r="5" fill="#00A7A7" />
+    <line x1="304" y1="332" x2="333" y2="326" stroke="#A9B0C3" stroke-width="2" />
+    <line x1="333" y1="326" x2="357" y2="344" stroke="#A9B0C3" stroke-width="2" />
+    <line x1="357" y1="344" x2="318" y2="358" stroke="#A9B0C3" stroke-width="2" />
+    <line x1="318" y1="358" x2="304" y2="332" stroke="#A9B0C3" stroke-width="2" />
+    <text x="285" y="376" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">数字制作</text>
+    <line x1="229" y1="347" x2="263" y2="347" stroke="#F5A623" stroke-width="2" />
+    <polygon points="263,347 253,341 253,353" fill="#F5A623" />
+    <rect x="100" y="432" width="294" height="82" rx="12" fill="#F7F3EA" />
+    <path d="M126 473 L160 445 L194 473 L228 446 L262 473 L296 447 L330 473 L365 448" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <rect x="123" y="456" width="244" height="34" fill="#1B1F3B" />
+    <circle cx="168" cy="473" r="6" fill="#F5A623" />
+    <circle cx="247" cy="473" r="6" fill="#00A7A7" />
+    <circle cx="326" cy="473" r="6" fill="#F5A623" />
+    <text x="138" y="538" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">最终银幕画面 = 真实表演 + 可控想象</text>
+    <path d="M89 220 L137 220 M89 220 L89 268" fill="none" stroke="#F5A623" stroke-width="2" />
+    <path d="M405 220 L357 220 M405 220 L405 268" fill="none" stroke="#F5A623" stroke-width="2" />
+    <path d="M89 544 L137 544 M89 544 L89 496" fill="none" stroke="#F5A623" stroke-width="2" />
+    <path d="M405 544 L357 544 M405 544 L405 496" fill="none" stroke="#F5A623" stroke-width="2" />
+  </g>
+  <g id="reasons-grid">
+    <rect x="456" y="205" width="364" height="166" rx="18" fill="#1B1F3B" stroke="#3A3F5C" stroke-width="2" />
+    <rect x="478" y="227" width="44" height="44" rx="12" fill="#F5A623" />
+    <path d="M490 255 L499 244 L510 255 L518 247" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <text x="540" y="242" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="26" font-weight="700">01 观众期待更大场面</text>
+    <text x="540" y="276" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="20">
+      <tspan x="540" dy="0">外星世界、超级英雄、灾难场景</tspan>
+      <tspan x="540" dy="28">很难完全依靠实拍完成</tspan>
+    </text>
+    <rect x="485" y="306" width="300" height="38" rx="8" fill="#0E1020" />
+    <text x="506" y="331" fill="#00A7A7" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">目标：让银幕尺度超过现实片场</text>
+    <rect x="846" y="205" width="364" height="166" rx="18" fill="#1B1F3B" stroke="#3A3F5C" stroke-width="2" />
+    <rect x="868" y="227" width="44" height="44" rx="12" fill="#00A7A7" />
+    <path d="M890 238 L904 245 L900 264 L890 270 L880 264 L876 245 Z" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <path d="M882 254 L888 260 L900 247" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <text x="930" y="242" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="26" font-weight="700">02 制作需要更安全</text>
+    <text x="930" y="276" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="20">
+      <tspan x="930" dy="0">危险动作、爆炸、极端环境</tspan>
+      <tspan x="930" dy="28">可以用数字方式补充</tspan>
+    </text>
+    <rect x="875" y="306" width="300" height="38" rx="8" fill="#0E1020" />
+    <text x="896" y="331" fill="#F5A623" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">目标：降低演员与剧组真实风险</text>
+    <rect x="456" y="393" width="364" height="166" rx="18" fill="#1B1F3B" stroke="#3A3F5C" stroke-width="2" />
+    <rect x="478" y="415" width="44" height="44" rx="12" fill="#00A7A7" />
+    <circle cx="500" cy="437" r="12" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <circle cx="495" cy="434" r="2" fill="#1B1F3B" />
+    <circle cx="505" cy="434" r="2" fill="#1B1F3B" />
+    <path d="M494 445 Q500 450 506 445" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <text x="540" y="430" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="26" font-weight="700">03 创作边界被扩大</text>
+    <text x="540" y="464" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="20">
+      <tspan x="540" dy="0">不存在的生物、年轻化角色、</tspan>
+      <tspan x="540" dy="28">幻想城市都能被创造</tspan>
+    </text>
+    <rect x="485" y="494" width="300" height="38" rx="8" fill="#0E1020" />
+    <text x="506" y="519" fill="#F5A623" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">目标：让导演拍到原来拍不到</text>
+    <rect x="846" y="393" width="364" height="166" rx="18" fill="#1B1F3B" stroke="#3A3F5C" stroke-width="2" />
+    <rect x="868" y="415" width="44" height="44" rx="12" fill="#F5A623" />
+    <rect x="881" y="428" width="18" height="18" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <path d="M876 452 L904 424" fill="none" stroke="#1B1F3B" stroke-width="2" />
+    <text x="930" y="430" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="26" font-weight="700">04 成本与效率重分配</text>
+    <text x="930" y="464" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="20">
+      <tspan x="930" dy="0">前期可预览，后期可修改，</tspan>
+      <tspan x="930" dy="28">团队可远程协作</tspan>
+    </text>
+    <rect x="875" y="494" width="300" height="38" rx="8" fill="#0E1020" />
+    <text x="896" y="519" fill="#00A7A7" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">目标：把成本花在更可控的位置</text>
+  </g>
+  <g id="bottom-note">
+    <rect x="70" y="572" width="1140" height="42" rx="17" fill="#0E1020" stroke="#3A3F5C" stroke-width="2" />
+    <circle cx="95" cy="593" r="7" fill="#F5A623" />
+    <text x="116" y="598" fill="#F4F1E8" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14" font-weight="700">一句话理解：</text>
+    <text x="222" y="598" fill="#A9B0C3" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="14">技术让电影拍到原来拍不到、拍不起或不安全的内容。</text>
+  </g>
+</svg>

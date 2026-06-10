@@ -129,8 +129,16 @@ ${colorGuide}
       "title": "页面标题",
       "bullets": ["要点 1", "要点 2"],
       "speakerNotes": "演讲备注",
-      "visualPrompt": "仅当确实需要配图时填写",
-      "layout": "cover|chapter|toc|content|content-image|content-chart|ending",
+      "visualPrompt": "兼容字段：可填写该页最重要的一条图片需求；没有图片则为空",
+      "imagePlan": [
+        {
+          "id": "img-1",
+          "prompt": "图片生成提示词",
+          "purpose": "background|hero|supporting|detail|texture|diagram",
+          "style": "写实|插画|信息图|产品图|纹理等"
+        }
+      ],
+      "layout": "cover|chapter|toc|content|mixed-media|visual-focus|media-grid|content-chart|ending",
       "rhythm": "anchor|dense|breathing",
       "chartHint": "仅图表页填写，如 bar_chart、timeline、matrix_2x2"
     }
@@ -139,7 +147,7 @@ ${colorGuide}
 
 硬性规则：
 1. 不要等待确认，直接生成完整规格。
-2. 第一页必须是 cover，最后一页建议是 ending；内容足够时可以加入 toc 或 chapter。
+2. 第一页必须是 cover，最后一页建议是 ending；内容足够时可以加入 toc 或 chapter。cover 代表封面结构，不代表必须使用大图片。
 3. ${slideCountGuide}
 4. rhythm 必须服务叙事：cover、toc、chapter、ending 用 anchor；信息密集页用 dense；单一观点或关键结论页用 breathing。
 5. 颜色只能使用 HEX；不能使用渐变、rgba 或透明色；整体至少包含 3 个有区分度的色相，避免一整套单色系。
@@ -147,12 +155,13 @@ ${colorGuide}
 7. 只有 templateAsset 存在时，才参考模板方案。模板方案只影响当前项目，不允许变成全局风格。
 8. 模板只提供视觉设计样式参考，包括色彩、字体、图标、版式节奏、构图比例、留白、装饰方式和 SVG 绘制风格；模板不得影响用户输入内容。
 9. outline 的标题、要点、speakerNotes、visualPrompt 的语义内容必须来自用户主题、内容资料和额外提示词，不允许从模板名称、模板说明、模板示例页或模板 SVG 中提取业务内容。
-10. layout 要先匹配用户内容，再借鉴模板的视觉版式。图表页用 content-chart；需要配图、场景图、示意图、封面图，或图片能明显提升表达时，用 content-image 并填写 visualPrompt。
+10. layout 要先匹配用户内容，再借鉴模板的视觉版式。图表页用 content-chart；图文/素材混排用 mixed-media；视觉主导页用 visual-focus；多素材页用 media-grid。每页是否需要图片、需要几张图片、图片用途和图片风格必须由你根据用户内容自主决定，并写入 imagePlan；不需要图片时 imagePlan 必须为空数组。不要因为 layout=cover/mixed-media/visual-focus 就机械生成图片，也不要限制图片位置。旧 layout 名 content-image/text-image/image-text 仅用于兼容旧项目，新生成不要使用。
 11. speakerNotes 使用中文，能帮助演讲者自然讲述。
 12. ${lengthGuide}
 13. 默认视觉模式为 ${mode}。
-14. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、visualPrompt 都要和用户内容强相关。
-15. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。`;
+14. imagePlan 只描述图片素材需求，不描述固定坐标、固定槽位或固定排版。每页最多 4 张图片素材；如果用户明确要求多图、案例对比、产品矩阵、过程图，可以使用 2-4 张；普通内容页通常 0-1 张。
+15. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、imagePlan 都要和用户内容强相关。封面构图要多样化，避免所有项目都使用居中大图。
+16. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。`;
 
   const user = `主题：${input.topic || '未提供，请从内容资料中自动提炼'}
 内容资料：${input.content || '用户未提供详细资料，请基于主题生成结构完整、信息可信但不过度编造的演示文稿。'}
@@ -421,11 +430,35 @@ function normalizeOutline(rawOutline: any[], input: StrategistInput): SpecSlide[
       bullets: Array.isArray(item.bullets) ? item.bullets.map(String).filter(Boolean).slice(0, 8) : [],
       speakerNotes: String(item.speakerNotes || ''),
       visualPrompt: String(item.visualPrompt || ''),
+      imagePlan: normalizeImagePlan(item.imagePlan, item.visualPrompt),
       layout,
       rhythm: normalizeRhythm(item.rhythm, layout),
       chartHint: item.chartHint ? String(item.chartHint) : undefined,
     };
   });
+}
+
+function normalizeImagePlan(value: unknown, legacyVisualPrompt?: unknown): SpecSlide['imagePlan'] {
+  const source = Array.isArray(value) ? value : [];
+  const plans = source
+    .slice(0, 4)
+    .map((item: any, index) => {
+      const prompt = String(item?.prompt || '').trim();
+      if (!prompt) return null;
+      return {
+        id: String(item?.id || `img-${index + 1}`).replace(/[^\w-]/g, '-').slice(0, 40) || `img-${index + 1}`,
+        prompt,
+        purpose: item?.purpose ? String(item.purpose).slice(0, 40) : undefined,
+        style: item?.style ? String(item.style).slice(0, 80) : undefined,
+      };
+    })
+    .filter(Boolean) as NonNullable<SpecSlide['imagePlan']>;
+
+  if (plans.length) return plans;
+
+  const legacy = String(legacyVisualPrompt || '').trim();
+  if (!legacy) return [];
+  return [{ id: 'img-1', prompt: legacy, purpose: 'supporting' }];
 }
 
 function fitOutlineToTargetCount(source: any[], targetCount: number, input: StrategistInput) {
@@ -444,6 +477,7 @@ function fitOutlineToTargetCount(source: any[], targetCount: number, input: Stra
         ? '收束本次演示内容，并引导听众进入讨论或下一步行动。'
         : `围绕「${input.topic || '当前主题'}」补充一页可讲述、可落地的内容。`,
       visualPrompt: '',
+      imagePlan: [],
       layout: isEnding ? 'ending' : 'content',
       rhythm: isEnding ? 'anchor' : 'dense',
     });
@@ -467,8 +501,16 @@ function resolveFallbackTemplate(input: StrategistInput): string {
 }
 
 function normalizeLayout(value: string | undefined, index: number, total: number): SpecSlide['layout'] {
-  const allowed = new Set(['cover', 'chapter', 'content', 'content-image', 'content-chart', 'ending', 'toc']);
-  if (value && allowed.has(value)) return value;
+  const normalized = String(value || '').trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    'content-image': 'mixed-media',
+    'text-image': 'mixed-media',
+    'image-text': 'mixed-media',
+    'full-image': 'visual-focus',
+  };
+  const layout = aliases[normalized] || normalized;
+  const allowed = new Set(['cover', 'chapter', 'content', 'mixed-media', 'visual-focus', 'media-grid', 'content-chart', 'ending', 'toc']);
+  if (layout && allowed.has(layout)) return layout;
   if (index === 0) return 'cover';
   if (index === total - 1) return 'ending';
   return 'content';
@@ -477,7 +519,7 @@ function normalizeLayout(value: string | undefined, index: number, total: number
 function normalizeRhythm(value: string | undefined, layout: string): SpecSlide['rhythm'] {
   if (value === 'anchor' || value === 'dense' || value === 'breathing') return value;
   if (layout === 'cover' || layout === 'chapter' || layout === 'toc' || layout === 'ending') return 'anchor';
-  if (layout === 'content-image') return 'breathing';
+  if (layout === 'mixed-media' || layout === 'visual-focus' || layout === 'media-grid' || layout === 'content-image') return 'breathing';
   return 'dense';
 }
 
@@ -503,10 +545,10 @@ function buildFallbackSpec(input: StrategistInput): DesignSpec {
     iconStyle: 'tabler-outline',
     imageUsage: normalizeImageUsage(undefined, input.imageStyle),
     outline: [
-      { id: 'slide-1', pageNumber: 1, title: fallbackTopic || '项目概览', bullets: [], speakerNotes: '开场介绍本次演示的主题和目标。', visualPrompt: '', layout: 'cover', rhythm: 'anchor' },
-      { id: 'slide-2', pageNumber: 2, title: '核心背景', bullets: ['问题背景与现状', '关键机会与挑战', '本次汇报的判断框架'], speakerNotes: '说明为什么这个主题值得讨论，并建立听众的共同上下文。', visualPrompt: '', layout: 'content', rhythm: 'dense' },
-      { id: 'slide-3', pageNumber: 3, title: '关键方案', bullets: ['明确目标与边界', '拆解执行路径', '建立反馈机制'], speakerNotes: '围绕可执行性展开方案，突出主次关系。', visualPrompt: '', layout: 'content', rhythm: 'dense' },
-      { id: 'slide-4', pageNumber: 4, title: '总结与下一步', bullets: ['形成共识', '明确责任', '推进落地'], speakerNotes: '收束观点，并给出下一步行动建议。', visualPrompt: '', layout: 'ending', rhythm: 'anchor' },
+      { id: 'slide-1', pageNumber: 1, title: fallbackTopic || '项目概览', bullets: [], speakerNotes: '开场介绍本次演示的主题和目标。', visualPrompt: '', imagePlan: [], layout: 'cover', rhythm: 'anchor' },
+      { id: 'slide-2', pageNumber: 2, title: '核心背景', bullets: ['问题背景与现状', '关键机会与挑战', '本次汇报的判断框架'], speakerNotes: '说明为什么这个主题值得讨论，并建立听众的共同上下文。', visualPrompt: '', imagePlan: [], layout: 'content', rhythm: 'dense' },
+      { id: 'slide-3', pageNumber: 3, title: '关键方案', bullets: ['明确目标与边界', '拆解执行路径', '建立反馈机制'], speakerNotes: '围绕可执行性展开方案，突出主次关系。', visualPrompt: '', imagePlan: [], layout: 'content', rhythm: 'dense' },
+      { id: 'slide-4', pageNumber: 4, title: '总结与下一步', bullets: ['形成共识', '明确责任', '推进落地'], speakerNotes: '收束观点，并给出下一步行动建议。', visualPrompt: '', imagePlan: [], layout: 'ending', rhythm: 'anchor' },
     ],
     skillExtensions: [],
   };

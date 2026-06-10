@@ -60,12 +60,29 @@ export interface ConfigOption {
 
 export type ConfigOptionGroups = Record<ConfigOptionKey, ConfigOption[]>;
 
-export type SlideLayout = 'text-only' | 'text-image' | 'image-text' | 'full-image' | 'title-center' | 'two-column';
+export type SlideLayout =
+  | 'text-only'
+  | 'mixed-media'
+  | 'visual-focus'
+  | 'media-grid'
+  | 'content-chart'
+  | 'text-image'
+  | 'image-text'
+  | 'full-image'
+  | 'title-center'
+  | 'two-column';
 
 export interface SlideLayoutParams {
   titleSize?: number;
   bulletSize?: number;
   imageRatio?: number; // 0.4 ~ 0.9, image width ratio
+}
+
+export interface SlideImagePlan {
+  id: string;
+  prompt: string;
+  purpose?: string;
+  style?: string;
 }
 
 export interface SlideOutline {
@@ -74,6 +91,7 @@ export interface SlideOutline {
   bullets: string[];
   speakerNotes: string;
   visualPrompt: string;
+  imagePlan?: SlideImagePlan[];
   chartHint?: string;
   layout?: SlideLayout;
   layoutParams?: SlideLayoutParams;
@@ -82,8 +100,10 @@ export interface SlideOutline {
 export interface GeneratedImage {
   id: string;
   slideId: string;
+  assetId?: string;
   title: string;
   prompt: string;
+  purpose?: string;
   style: ImageStyle | string;
   url: string;
   selected: boolean;
@@ -569,6 +589,7 @@ export interface SpecSlide {
   bullets: string[];
   speakerNotes: string;
   visualPrompt: string;
+  imagePlan?: SlideImagePlan[];
   layout: string;
   rhythm: 'anchor' | 'dense' | 'breathing';
   chartHint?: string;

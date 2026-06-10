@@ -616,7 +616,7 @@ function normalizePackage(files: Map<string, Buffer>, fallbackName: string): Pac
     name: manifest.name || path.parse(fallbackName).name || 'Untitled Skill',
     description: manifest.description || 'Uploaded skill package',
     icon: manifest.icon || 'Zap',
-    category: manifest.category || '资料收集',
+    category: manifest.category || 'Web 搜索',
     capabilities,
     inputContract: manifest.inputContract || null,
     outputContract: manifest.outputContract || null,
@@ -1344,22 +1344,68 @@ async function readSkillMarkdownSampleFile(skill: any) {
   return null;
 }
 
+async function buildImageHealthSampleFile() {
+  let dataBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+  try {
+    const { Resvg } = await import('@resvg/resvg-js');
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300">
+  <rect width="480" height="300" fill="#F8FAFC"/>
+  <rect x="44" y="42" width="392" height="216" rx="24" fill="#FFFFFF" stroke="#2563EB" stroke-width="8"/>
+  <text x="240" y="132" text-anchor="middle" font-family="Arial, sans-serif" font-size="42" font-weight="700" fill="#0F172A">Nexious PPT</text>
+  <text x="240" y="190" text-anchor="middle" font-family="Arial, sans-serif" font-size="30" fill="#2563EB">Skill Test Image</text>
+</svg>`;
+    dataBase64 = Buffer.from(new Resvg(svg).render().asPng()).toString('base64');
+  } catch {
+    // Keep the health check independent from optional native rendering failures.
+  }
+
+  return {
+    name: 'skill-image-test.png',
+    dataBase64,
+    mimeType: 'image/png',
+    extension: 'png',
+    kind: 'image',
+    status: 'parsed',
+    text: '图片识别 Skill 健康测试图片：画面包含 Nexious PPT 和 Skill Test Image 文本。',
+    content: '请识别这张健康测试图片的画面内容和可见文字。',
+    summary: '系统内置图片健康测试样本。',
+  };
+}
+
 async function buildSkillHealthInput(skill: any) {
   const testSample = parseJsonRecord(skill?.test_sample);
-  if (Object.keys(testSample).length > 0) return testSample;
-
   const capabilities = parseStoredCapabilities(skill?.capabilities);
   const categoryText = String(skill?.category || '').toLowerCase();
   const nameText = String(skill?.name || '').toLowerCase();
-  const isSearch = capabilities.includes('web-search') || /search|web|collect|资料收集|搜索|联网/.test(`${categoryText} ${nameText}`);
-  const isFileParse = capabilities.includes('file-parse') || /file|parse|文件|解析/.test(`${categoryText} ${nameText}`);
+  const entryText = String(skill?.entry || '').toLowerCase();
+  const packageText = `${categoryText} ${nameText} ${entryText}`;
+  const isSearch = capabilities.includes('web-search') || /search|web|collect|web 搜索|资料收集|搜索|联网/.test(packageText);
+  const isFileParse = capabilities.includes('file-parse') || /file|parse|文件|解析|markitdown|markdown[_-]?adapter/.test(packageText);
+  const imageText = packageText;
+  const isImageTool = capabilities.includes('image-tool') || /image|vision|picture|ocr|图片|图像|视觉|识别/.test(imageText);
+  const isImageSearch = /image\s*search|图片搜索|素材搜索/.test(imageText);
+  const isImageGeneration = /image\s*(gen|generation)|生成图片|图片生成|配图/.test(imageText);
+  const needsImageFile = isImageTool && !isImageSearch && !isImageGeneration;
 
-  if (isSearch) {
+  if (Object.keys(testSample).length > 0 && !isFileParse && !needsImageFile) return testSample;
+
+  if (isImageSearch) {
     return {
-      purpose: '资料收集',
-      query: '手机发展历程',
-      topic: '手机发展历程',
-      content: '请联网搜索手机发展历程，并返回可用于 PPT 的简要资料。',
+      ...testSample,
+      purpose: 'image-search',
+      query: String(testSample.query || testSample.topic || '现代办公协作场景配图'),
+      topic: String(testSample.topic || '现代办公协作场景配图'),
+      content: String(testSample.content || '请搜索适合 PPT 使用的现代办公协作场景图片素材，返回标题、来源和可用链接。'),
+    };
+  }
+
+  if (isImageGeneration) {
+    return {
+      ...testSample,
+      purpose: 'image-generation',
+      topic: String(testSample.topic || 'Nexious PPT 健康测试配图'),
+      prompt: String(testSample.prompt || '生成一张简洁、清晰的 PPT 配图：现代办公桌面、蓝色点缀、适合 16:9 幻灯片。'),
+      content: String(testSample.content || '请根据提示词生成或返回一张适合 PPT 使用的测试图片结果。'),
     };
   }
 
@@ -1375,12 +1421,45 @@ async function buildSkillHealthInput(skill: any) {
       status: 'parsed',
       summary: '健康测试 Markdown 文件。',
     };
+    const sampleFiles = Array.isArray(testSample.fileContents)
+      ? testSample.fileContents
+      : Array.isArray(testSample.files)
+        ? testSample.files
+        : [];
     return {
+      ...testSample,
       purpose: '文件解析',
       topic: 'Skill 健康测试',
       content: '请解析随本次健康测试传入的 skill.md 文件，并返回可用于 PPT 输入阶段的 Markdown 文本摘要。',
-      fileContents: [sampleFile],
-      files: [sampleFile],
+      fileContents: sampleFiles.length ? sampleFiles : [sampleFile],
+      files: sampleFiles.length ? sampleFiles : [sampleFile],
+    };
+  }
+
+  if (needsImageFile) {
+    const sampleFile = await buildImageHealthSampleFile();
+    const sampleFiles = Array.isArray(testSample.fileContents)
+      ? testSample.fileContents
+      : Array.isArray(testSample.files)
+        ? testSample.files
+        : [];
+    return {
+      ...testSample,
+      purpose: '图片识别',
+      topic: String(testSample.topic || 'Skill 图片健康测试'),
+      content: String(testSample.content || '请识别随本次健康测试传入的图片，返回画面内容、可见文字和可用于 PPT 的要点。'),
+      fileContents: sampleFiles.length ? sampleFiles : [sampleFile],
+      files: sampleFiles.length ? sampleFiles : [sampleFile],
+      images: sampleFiles.length ? sampleFiles : [sampleFile],
+    };
+  }
+
+  if (isSearch) {
+    return {
+      purpose: '资料收集',
+      query: '手机发展历程',
+      topic: '手机发展历程',
+      content: '请联网搜索手机发展历程，并返回可用于 PPT 的简要资料。',
     };
   }
 
@@ -1962,7 +2041,7 @@ function buildPythonSkillArgs(input: unknown) {
   const query = inferSkillQuery(input);
   if (!query) return [];
 
-  if (/search|collect|web|资料收集/i.test(purpose)) {
+  if (/search|collect|web|web 搜索|资料收集|图片搜索|素材搜索/i.test(purpose)) {
     return [query, '--max-results', '5', '--format', 'markdown'];
   }
   return [];

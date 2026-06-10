@@ -4,6 +4,7 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import PrivateBackground from '@/components/common/PrivateBackground.vue';
 import { getTemplateColors } from '@/composables/templateColors';
+import { layoutNeedsVisual, normalizeSlideLayout } from '@/utils/layoutSemantics';
 import type { SlideOutline, GeneratedImage, AgentParameters } from '@/types/agent';
 
 const props = defineProps<{
@@ -24,6 +25,14 @@ const emit = defineEmits<{
 
 function getTemplateColor() {
   return getTemplateColors(props.parameters.template);
+}
+
+function currentLayout() {
+  return normalizeSlideLayout(props.slide?.layout);
+}
+
+function currentNeedsVisual() {
+  return layoutNeedsVisual(props.slide?.layout);
 }
 
 function onKeyDown(event: KeyboardEvent) {
@@ -62,7 +71,7 @@ function onKeyDown(event: KeyboardEvent) {
         <div class="preview-canvas-wrapper">
           <div
             class="preview-canvas"
-            :class="`preview-canvas--${slide.layout || 'text-only'}`"
+            :class="`preview-canvas--${currentLayout()}`"
             :style="{
               background: getTemplateColor().bg,
               borderColor: getTemplateColor().panel
@@ -71,8 +80,8 @@ function onKeyDown(event: KeyboardEvent) {
             <div class="preview-meta" :style="{ color: getTemplateColor().accent }">
               SLIDE {{ String(index + 1).padStart(2, '0') }}
             </div>
-            <!-- text-only / text-image / image-text: structured content -->
-            <div v-if="(slide.layout || 'text-only') !== 'full-image'" class="preview-text-block" :class="{ 'preview-text-block--right': (slide.layout || 'text-only') === 'image-text' }">
+            <!-- Structured content -->
+            <div v-if="currentLayout() !== 'visual-focus'" class="preview-text-block">
               <h2 :style="{ color: getTemplateColor().text }">{{ slide.title }}</h2>
               <ul :style="{ color: getTemplateColor().muted }">
                 <li v-for="bullet in slide.bullets" :key="bullet">{{ bullet }}</li>
@@ -82,22 +91,18 @@ function onKeyDown(event: KeyboardEvent) {
             <h2 v-else class="preview-title-overlay" :style="{ color: getTemplateColor().text }">{{ slide.title }}</h2>
             <!-- Image -->
             <PrivateBackground
-              v-if="(slide.layout || 'text-only') !== 'text-only' && image?.url"
+              v-if="currentNeedsVisual() && image?.url"
               class="preview-image"
               :src="image.url"
               :class="{
-                'preview-image--right': (slide.layout || 'text-only') === 'text-image',
-                'preview-image--left': (slide.layout || 'text-only') === 'image-text',
-                'preview-image--full': (slide.layout || 'text-only') === 'full-image'
+                'preview-image--full': currentLayout() === 'visual-focus'
               }"
             />
             <div
-              v-if="(slide.layout || 'text-only') !== 'text-only' && !image?.url"
+              v-if="currentNeedsVisual() && !image?.url"
               class="preview-image preview-image--placeholder"
               :class="{
-                'preview-image--right': (slide.layout || 'text-only') === 'text-image',
-                'preview-image--left': (slide.layout || 'text-only') === 'image-text',
-                'preview-image--full': (slide.layout || 'text-only') === 'full-image'
+                'preview-image--full': currentLayout() === 'visual-focus'
               }"
             >
               <span class="preview-image__hint">暂无图片</span>
@@ -210,13 +215,16 @@ function onKeyDown(event: KeyboardEvent) {
 }
 
 .preview-canvas--text-image,
-.preview-canvas--image-text {
+.preview-canvas--image-text,
+.preview-canvas--mixed-media,
+.preview-canvas--media-grid {
   flex-direction: row;
   align-items: center;
   gap: 20px;
 }
 
-.preview-canvas--full-image {
+.preview-canvas--full-image,
+.preview-canvas--visual-focus {
   padding: 0;
 }
 

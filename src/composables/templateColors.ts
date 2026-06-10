@@ -9,7 +9,7 @@ export interface TemplateColorScheme {
   bulletSize?: number;  // px, default 14
   imageRatio?: number;  // 0.4 ~ 0.7, default 0.5
   padding?: number;     // px, default 40
-  preferredLayout?: string; // e.g. 'text-image'
+  preferredLayout?: string; // e.g. 'mixed-media'
 }
 
 /**
@@ -38,7 +38,7 @@ export const TEMPLATE_COLORS: Record<string, TemplateColorScheme> = {
     bulletSize: 13,
     imageRatio: 0.45,
     padding: 40,
-    preferredLayout: 'text-image'
+    preferredLayout: 'mixed-media'
   },
   creative: {
     bg: '#1a0a2e',
@@ -50,7 +50,7 @@ export const TEMPLATE_COLORS: Record<string, TemplateColorScheme> = {
     bulletSize: 14,
     imageRatio: 0.55,
     padding: 48,
-    preferredLayout: 'full-image'
+    preferredLayout: 'visual-focus'
   },
   education: {
     bg: '#0c1929',
@@ -74,7 +74,7 @@ export const TEMPLATE_COLORS: Record<string, TemplateColorScheme> = {
     bulletSize: 13,
     imageRatio: 0.5,
     padding: 44,
-    preferredLayout: 'text-image'
+    preferredLayout: 'mixed-media'
   },
   nature: {
     bg: '#0a1a0f',
@@ -86,7 +86,7 @@ export const TEMPLATE_COLORS: Record<string, TemplateColorScheme> = {
     bulletSize: 13,
     imageRatio: 0.5,
     padding: 40,
-    preferredLayout: 'image-text'
+    preferredLayout: 'mixed-media'
   },
   ocean: {
     bg: '#08101a',
@@ -98,7 +98,7 @@ export const TEMPLATE_COLORS: Record<string, TemplateColorScheme> = {
     bulletSize: 13,
     imageRatio: 0.5,
     padding: 40,
-    preferredLayout: 'text-image'
+    preferredLayout: 'mixed-media'
   }
 };
 

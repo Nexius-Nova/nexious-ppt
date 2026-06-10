@@ -1,11 +1,10 @@
 import type { DesignSpec, SpecSlide } from './spec.js';
-import type { ImageSlot } from './executor.js';
 
 export type SvgQualityIssueType =
   | 'invalid-svg'
   | 'text-overflow'
   | 'image-out-of-canvas'
-  | 'image-out-of-slot'
+  | 'required-image-missing'
   | 'image-overlap-content'
   | 'element-overlap'
   | 'low-contrast'
@@ -30,6 +29,14 @@ export interface SvgQualityResult {
 
 type Box = { x: number; y: number; width: number; height: number };
 type SvgElementBox = Box & { tag: string; attrs: Record<string, string>; text?: string; source: string; index: number };
+export interface SvgQualityImageAsset {
+  id?: string;
+  url: string;
+  title?: string;
+  prompt?: string;
+  purpose?: string;
+  style?: string;
+}
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
@@ -62,14 +69,6 @@ function attrOrStyle(attrs: Record<string, string>, attr: string, fallback = '')
   return attrs[attr] || styleValue(attrs, attr) || fallback;
 }
 
-function escapeAttribute(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -83,6 +82,14 @@ function stripTags(value: string) {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .trim();
+}
+
+function escapeAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function normalizeHexColor(value: string | undefined): string | undefined {
@@ -222,70 +229,11 @@ function addOrReplaceSvgAttributes(svg: string, spec: DesignSpec) {
   return svg.replace(open, patched);
 }
 
-function removeGeneratedImageArtifacts(svg: string, imageUrl?: string) {
-  let result = svg.replace(/<g\b[^>]*\bid\s*=\s*(['"])generated-image\1[^>]*>[\s\S]*?<\/g>/gi, '');
-  result = result.replace(/<clipPath\b[^>]*\bid\s*=\s*(['"])generated-image-clip[^'"]*\1[^>]*>[\s\S]*?<\/clipPath>/gi, '');
-  if (imageUrl) {
-    const escaped = escapeRegExp(imageUrl);
-    result = result.replace(new RegExp(`<image\\b[^>]*(?:href|xlink:href)\\s*=\\s*(['"])${escaped}\\1[^>]*(?:/>|>[\\s\\S]*?<\\/image>)`, 'gi'), '');
-  }
-  return result;
-}
-
-function buildGeneratedImageGroup(imageUrl: string, slot: ImageSlot, slide: SpecSlide) {
-  const clipId = `generated-image-clip-p${slide.pageNumber}`;
-  const preserveAspectRatio = slot.fit === 'contain' ? 'xMidYMid meet' : 'xMidYMid slice';
-  return `
-  <defs>
-    <clipPath id="${clipId}">
-      <rect x="${slot.x}" y="${slot.y}" width="${slot.width}" height="${slot.height}"/>
-    </clipPath>
-  </defs>
-  <g id="generated-image" data-quality-managed="true">
-    <rect x="${slot.x}" y="${slot.y}" width="${slot.width}" height="${slot.height}" fill="none" stroke="none"/>
-    <image href="${escapeAttribute(imageUrl)}" x="${slot.x}" y="${slot.y}" width="${slot.width}" height="${slot.height}" preserveAspectRatio="${preserveAspectRatio}" clip-path="url(#${clipId})"/>
-  </g>`;
-}
-
 function isFullCanvasBox(box: Box, spec: DesignSpec) {
   return box.x <= FLOAT_TOLERANCE &&
     box.y <= FLOAT_TOLERANCE &&
     box.width >= spec.canvas.width - FLOAT_TOLERANCE &&
     box.height >= spec.canvas.height - FLOAT_TOLERANCE;
-}
-
-function insertAt(svg: string, fragment: string, index: number) {
-  return `${svg.slice(0, index)}\n${fragment}\n${svg.slice(index)}`;
-}
-
-function findGeneratedImageInsertIndex(svg: string, spec: DesignSpec, slot: ImageSlot) {
-  const closeIndex = svg.toLowerCase().lastIndexOf('</svg>');
-  if (closeIndex < 0) return svg.length;
-
-  const open = svg.match(/<svg\b[^>]*>/i)?.[0];
-  const afterOpen = open ? svg.indexOf(open) + open.length : 0;
-  const texts = extractElementBoxes(svg, 'text').sort((a, b) => a.index - b.index);
-  const firstTextInSlot = texts.find((text) => rectsOverlap(text, slot, 6));
-  const textLimit = firstTextInSlot?.index ?? closeIndex;
-  const visualBoxes = [
-    ...extractElementBoxes(svg, 'rect'),
-    ...extractElementBoxes(svg, 'line'),
-    ...extractElementBoxes(svg, 'path'),
-    ...extractElementBoxes(svg, 'image'),
-  ];
-  const lastSlotShapeEnd = visualBoxes
-    .filter((item) => item.index < textLimit)
-    .filter((item) => rectsOverlap(item, slot, 2))
-    .filter((item) => !isFullCanvasBox(item, spec))
-    .reduce((max, item) => Math.max(max, item.index + item.source.length), afterOpen);
-
-  return Math.min(Math.max(lastSlotShapeEnd, afterOpen), closeIndex);
-}
-
-function repairGeneratedImage(svg: string, spec: DesignSpec, slide: SpecSlide, imageSlot: ImageSlot, imageUrl?: string) {
-  if (!imageUrl) return svg;
-  const cleaned = removeGeneratedImageArtifacts(svg, imageUrl);
-  return insertAt(cleaned, buildGeneratedImageGroup(imageUrl, imageSlot, slide), findGeneratedImageInsertIndex(cleaned, spec, imageSlot));
 }
 
 function repairTextCanvasOverflow(svg: string, spec: DesignSpec) {
@@ -321,9 +269,8 @@ function repairTextCanvasOverflow(svg: string, spec: DesignSpec) {
   return result;
 }
 
-function deterministicRepair(svg: string, spec: DesignSpec, slide: SpecSlide, imageSlot: ImageSlot, imageUrl?: string) {
+function deterministicRepair(svg: string, spec: DesignSpec) {
   let result = addOrReplaceSvgAttributes(svg, spec);
-  result = repairGeneratedImage(result, spec, slide, imageSlot, imageUrl);
   result = repairTextCanvasOverflow(result, spec);
   return result;
 }
@@ -332,7 +279,30 @@ function issue(type: SvgQualityIssueType, severity: SvgQualitySeverity, message:
   return { type, severity, message, element, bbox };
 }
 
-function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageSlot: ImageSlot, imageUrl?: string): SvgQualityIssue[] {
+function normalizeQualityImageAssets(input?: string | SvgQualityImageAsset[]): SvgQualityImageAsset[] {
+  if (!input) return [];
+  if (typeof input === 'string') {
+    const url = input.trim();
+    return url ? [{ id: 'img-1', url }] : [];
+  }
+  return input
+    .filter((asset) => asset?.url && typeof asset.url === 'string')
+    .slice(0, 8)
+    .map((asset, index) => ({
+      id: String(asset.id || `img-${index + 1}`),
+      url: String(asset.url),
+      title: asset.title ? String(asset.title).slice(0, 120) : undefined,
+      prompt: asset.prompt ? String(asset.prompt).slice(0, 360) : undefined,
+      purpose: asset.purpose ? String(asset.purpose).slice(0, 80) : undefined,
+      style: asset.style ? String(asset.style).slice(0, 80) : undefined,
+    }));
+}
+
+function imageHrefOf(img: SvgElementBox) {
+  return String(img.attrs.href || img.attrs['xlink:href'] || '');
+}
+
+function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageInput?: string | SvgQualityImageAsset[]): SvgQualityIssue[] {
   const issues: SvgQualityIssue[] = [];
   const open = svg.match(/<svg\b[^>]*>/i)?.[0];
   if (!open || !/<\/svg>\s*$/i.test(svg.trim())) {
@@ -346,8 +316,9 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageSlot: 
   const lines = extractElementBoxes(svg, 'line');
   const paths = extractElementBoxes(svg, 'path');
   const layout = String(slide.layout || '').toLowerCase();
-  const generatedImages = imageUrl
-    ? images.filter((img) => String(img.attrs.href || img.attrs['xlink:href'] || '').includes(imageUrl))
+  const imageAssets = normalizeQualityImageAssets(imageInput);
+  const generatedImages = imageAssets.length
+    ? images.filter((img) => imageAssets.some((asset) => imageHrefOf(img).includes(asset.url)))
     : [];
 
   for (const text of texts) {
@@ -378,25 +349,20 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageSlot: 
     }
   }
 
-  if (imageUrl) {
-    if (!generatedImages.length) {
-      issues.push(issue('image-out-of-slot', 'error', 'Required generated image was not found on this page.'));
+  if (imageAssets.length) {
+    for (const asset of imageAssets) {
+      const found = images.some((img) => imageHrefOf(img).includes(asset.url));
+      if (!found) {
+        issues.push(issue('required-image-missing', 'error', `Required generated image was not found on this page: ${asset.id || asset.title || asset.url.slice(0, 32)}`));
+      }
     }
     for (const img of generatedImages) {
-      const slotDelta = Math.abs(img.x - imageSlot.x) +
-        Math.abs(img.y - imageSlot.y) +
-        Math.abs(img.width - imageSlot.width) +
-        Math.abs(img.height - imageSlot.height);
-      if (slotDelta > 12) {
-        issues.push(issue('image-out-of-slot', 'error', 'Image is not placed in the required slot.', 'image', img));
-      }
-      if (!layout.includes('cover') && !layout.includes('full')) {
-        for (const text of texts) {
-          const overlap = intersectionArea(img, text);
-          if (overlap > Math.min(text.width * text.height, img.width * img.height) * 0.08) {
-            issues.push(issue('image-overlap-content', 'error', `Image may cover text: ${(text.text || '').slice(0, 24)}`, 'image/text', img));
-            break;
-          }
+      for (const text of texts) {
+        const overlap = intersectionArea(img, text);
+        const threshold = layout.includes('cover') || layout.includes('full') ? 0.18 : 0.08;
+        if (overlap > Math.min(text.width * text.height, img.width * img.height) * threshold) {
+          issues.push(issue('image-overlap-content', 'error', `Image may cover text: ${(text.text || '').slice(0, 24)}`, 'image/text', img));
+          break;
         }
       }
       const chartLikeElements = [...rects, ...lines, ...paths].filter((item) => {
@@ -443,9 +409,9 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageSlot: 
   return issues;
 }
 
-export function finalizeSvgQuality(svg: string, spec: DesignSpec, slide: SpecSlide, imageSlot: ImageSlot, imageUrl?: string): SvgQualityResult {
-  const repairedSvg = deterministicRepair(String(svg || ''), spec, slide, imageSlot, imageUrl);
-  const issues = inspectSvg(repairedSvg, spec, slide, imageSlot, imageUrl);
+export function finalizeSvgQuality(svg: string, spec: DesignSpec, slide: SpecSlide, _imageSlot?: unknown, imageInput?: string | SvgQualityImageAsset[]): SvgQualityResult {
+  const repairedSvg = deterministicRepair(String(svg || ''), spec);
+  const issues = inspectSvg(repairedSvg, spec, slide, imageInput);
   const blockingIssues = issues.filter((item) => item.severity === 'error');
   return { svg: repairedSvg, issues, blockingIssues, repaired: repairedSvg !== svg };
 }
@@ -461,13 +427,14 @@ export function buildSvgQualityRepairPrompt(
   svg: string,
   spec: DesignSpec,
   slide: SpecSlide,
-  imageSlot: ImageSlot,
+  _imageSlot: unknown,
   issues: SvgQualityIssue[],
-  imageUrl?: string
+  imageInput?: string | SvgQualityImageAsset[]
 ) {
   const issueSummary = summarizeSvgQualityIssues(issues, 10) || 'Quality check failed.';
-  const imageInstruction = imageUrl
-    ? `Keep exactly this generated image: ${imageUrl}. It must stay inside x=${imageSlot.x}, y=${imageSlot.y}, width=${imageSlot.width}, height=${imageSlot.height}, clipped by clipPath.`
+  const imageAssets = normalizeQualityImageAssets(imageInput);
+  const imageInstruction = imageAssets.length
+    ? `Use only these generated image assets, and keep every listed asset that is required by the slide plan:\n${imageAssets.map((asset, index) => `- ${asset.id || `img-${index + 1}`}: ${asset.url}${asset.purpose ? `, purpose: ${asset.purpose}` : ''}${asset.prompt ? `, prompt: ${asset.prompt}` : ''}`).join('\n')}\nYou may decide each image's position, size, crop, rotation and layering. Use preserveAspectRatio="xMidYMid slice|meet|none", clipPath with rect/circle/ellipse/path/polygon for regular or irregular cropping, and transform for rotate/scale/translate. Images must stay within the canvas and must not cover titles, body text, charts, or key components.`
     : 'Do not add any <image> element when no image URL is provided.';
 
   return `Repair this SVG slide. Output a complete SVG only. Do not explain.

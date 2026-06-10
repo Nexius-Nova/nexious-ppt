@@ -100,9 +100,13 @@ function zoomOut() {
       <div class="svg-deck-preview__viewport">
         <div class="svg-deck-preview__canvas" :style="{ transform: `scale(${scale})` }">
           <PrivateSvg
+            v-if="currentSvg"
             class="svg-deck-preview__slide"
             :svg="currentSvg"
           />
+          <div v-else class="svg-deck-preview__slide svg-deck-preview__slide--empty">
+            <span>第 {{ pages[activeIndex]?.pageNumber || activeIndex + 1 }} 页尚未生成</span>
+          </div>
         </div>
       </div>
       <div v-if="showNotes && currentNotes" class="svg-deck-preview__notes">
@@ -127,7 +131,8 @@ function zoomOut() {
           class="svg-deck-preview__thumb-img"
           alt=""
         />
-        <PrivateSvg v-else class="svg-deck-preview__thumb-svg" :svg="page.svg" />
+        <PrivateSvg v-else-if="page.svg" class="svg-deck-preview__thumb-svg" :svg="page.svg" />
+        <div v-else class="svg-deck-preview__thumb-empty">待生成</div>
         <span class="svg-deck-preview__thumb-num">{{ page.pageNumber }}</span>
       </div>
     </div>
@@ -255,6 +260,14 @@ function zoomOut() {
   font-size: 14px;
 }
 
+.svg-deck-preview__slide--empty {
+  display: grid;
+  place-items: center;
+  background: var(--color-panel);
+  color: var(--color-muted);
+  font-size: 14px;
+}
+
 .svg-deck-preview__slide-img {
   width: 100%;
   height: 100%;
@@ -340,6 +353,16 @@ function zoomOut() {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.svg-deck-preview__thumb-empty {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  background: var(--color-panel);
+  color: var(--color-muted);
+  font-size: 11px;
 }
 
 .svg-deck-preview__thumb-num {

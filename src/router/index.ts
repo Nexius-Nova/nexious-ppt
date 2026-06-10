@@ -1,11 +1,21 @@
 import { createRouter, createWebHistory } from "vue-router";
 import AgentWorkspace from "@/views/AgentWorkspace.vue";
 import AuthPage from "@/components/pages/AuthPage.vue";
+import HomePage from "@/components/pages/HomePage.vue";
 import { useAuthStore } from "@/stores/authStore";
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    {
+      path: "/",
+      name: "home",
+      component: HomePage,
+      meta: {
+        title: "AI PPT Agent - Nexious PPT",
+        public: true
+      }
+    },
     {
       path: "/login",
       name: "login",
@@ -13,14 +23,6 @@ export const router = createRouter({
       meta: {
         title: "登录 - AI PPT Agent",
         public: true
-      }
-    },
-    {
-      path: "/",
-      name: "home",
-      component: AgentWorkspace,
-      meta: {
-        title: "AI PPT Agent 工作区"
       }
     },
     {
@@ -104,7 +106,7 @@ router.beforeEach((to) => {
     };
   }
 
-  if (to.meta.public && authStore.token) {
+  if (to.name === "login" && authStore.token) {
     return "/my-ppt";
   }
 });

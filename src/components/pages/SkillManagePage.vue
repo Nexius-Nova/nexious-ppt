@@ -10,7 +10,11 @@ import DeleteConfirmModal from '@/components/common/DeleteConfirmModal.vue';
 import PageLoadingState from '@/components/common/PageLoadingState.vue';
 import { useToastStore } from '@/stores/toastStore';
 import { skillApi, type Skill, type SkillPackagePreview, type SkillPackagePreviewFile, type SkillPackageView } from '@/services/api';
-import { INPUT_SKILL_CATEGORIES, normalizeInputSkillCategory } from '@/constants/inputSkillCategories';
+import {
+  SKILL_WORKFLOW_STAGES,
+  getSkillCategoryDescription,
+  normalizeInputSkillCategory
+} from '@/constants/inputSkillCategories';
 import { translateErrorMessage } from '@/utils/errorMessages';
 
 const toastStore = useToastStore();
@@ -24,6 +28,7 @@ const loadError = ref('');
 const uploading = ref(false);
 const deleting = ref(false);
 const testingSkillIds = ref<Set<number>>(new Set());
+const updatingCategoryIds = ref<Set<number>>(new Set());
 const showPackagePreview = ref(false);
 const deleteTarget = ref<Skill | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
@@ -34,7 +39,9 @@ const showPackageView = ref(false);
 const packageView = ref<SkillPackageView | null>(null);
 const packageViewSkill = ref<Skill | null>(null);
 const packageViewLoadingId = ref<number | null>(null);
-const packageCategory = ref('资料收集');
+const packageCategory = ref('Web 搜索');
+const ALL_CATEGORY = 'all';
+const selectedCategory = ref(ALL_CATEGORY);
 
 const readyCount = computed(() =>
   skills.value.filter((skill) => ['ready', 'not_required'].includes(skill.install_status || 'not_required')).length
@@ -44,11 +51,37 @@ const passedCount = computed(() =>
 );
 let statusPollTimer: ReturnType<typeof setInterval> | null = null;
 const categoryOptions = computed(() =>
-  INPUT_SKILL_CATEGORIES.map((category) => ({
-    label: category,
+  SKILL_WORKFLOW_STAGES.flatMap((stage) => stage.categories.map((category) => ({
+    label: `${stage.title} / ${category}`,
     value: category,
     description: categoryDescription(category)
-  }))
+  })))
+);
+
+const categoryFilterOptions = computed(() => {
+  const counts = new Map<string, number>();
+  for (const skill of skills.value) {
+    const category = normalizeInputSkillCategory(skill.category);
+    counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  return [
+    { label: '全部', value: ALL_CATEGORY, count: skills.value.length },
+    ...SKILL_WORKFLOW_STAGES.flatMap((stage) =>
+      stage.categories
+        .filter((category) => counts.has(category))
+        .map((category) => ({
+          label: category,
+          value: category,
+          count: counts.get(category) || 0
+        }))
+    )
+  ];
+});
+
+const filteredSkills = computed(() =>
+  skills.value
+    .filter((skill) => selectedCategory.value === ALL_CATEGORY || normalizeInputSkillCategory(skill.category) === selectedCategory.value)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 );
 
 async function fetchSkills() {
@@ -113,6 +146,16 @@ function clearSkillTesting(id: number) {
   testingSkillIds.value = next;
 }
 
+function markCategoryUpdating(id: number) {
+  updatingCategoryIds.value = new Set([...updatingCategoryIds.value, id]);
+}
+
+function clearCategoryUpdating(id: number) {
+  const next = new Set(updatingCategoryIds.value);
+  next.delete(id);
+  updatingCategoryIds.value = next;
+}
+
 function fileToBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -130,7 +173,7 @@ function closePackagePreview() {
   showPackagePreview.value = false;
   packagePreview.value = null;
   pendingPackage.value = null;
-  packageCategory.value = '资料收集';
+  packageCategory.value = 'Web 搜索';
   packageFileName.value = '';
 }
 
@@ -191,7 +234,7 @@ async function confirmPackageUpload() {
     showPackagePreview.value = false;
     packagePreview.value = null;
     pendingPackage.value = null;
-    packageCategory.value = '资料收集';
+    packageCategory.value = 'Web 搜索';
     packageFileName.value = '';
     await fetchSkills();
     if (response.data?.id) markSkillTesting(response.data.id);
@@ -260,6 +303,32 @@ async function testSkill(skill: Skill) {
   }
 }
 
+async function updateSkillCategory(skill: Skill, category: string) {
+  const normalizedCategory = normalizeInputSkillCategory(category);
+  if (normalizeInputSkillCategory(skill.category) === normalizedCategory) return;
+  markCategoryUpdating(skill.id);
+  try {
+    const response = await skillApi.update(skill.id, {
+      name: skill.name,
+      description: skill.description || '',
+      icon: skill.icon || 'Zap',
+      category: normalizedCategory,
+      parameters: skill.parameters || {},
+      is_enabled: skill.is_enabled
+    });
+    if (!response.success) throw new Error(response.message || '更新 Skill 分类失败');
+    skills.value = skills.value.map((item) =>
+      item.id === skill.id ? { ...item, category: normalizedCategory } : item
+    );
+    toastStore.success('分类已更新', `「${skill.name}」已移动到 ${normalizedCategory}`);
+    emit('changed');
+  } catch (error) {
+    toastStore.error('更新失败', error instanceof Error ? error.message : '更新 Skill 分类失败');
+  } finally {
+    clearCategoryUpdating(skill.id);
+  }
+}
+
 function requestDelete(skill: Skill) {
   deleteTarget.value = skill;
 }
@@ -279,12 +348,6 @@ async function confirmDelete() {
   } finally {
     deleting.value = false;
   }
-}
-
-function runtimeLabel(skill: Skill) {
-  if (skill.runtime === 'python') return 'Python';
-  if (skill.runtime === 'node') return 'Node.js';
-  return '提示词';
 }
 
 function statusLabel(status?: string) {
@@ -329,52 +392,6 @@ function testStatusIcon(status?: string) {
   return CheckCircle2;
 }
 
-function skillProgress(skill: Skill) {
-  if (skill.test_status === 'passed') return 100;
-  if (skill.test_status === 'failed') return 100;
-  if (skill.test_status === 'testing') return 75;
-  if (skill.install_status === 'ready' || skill.install_status === 'not_required') return 45;
-  if (skill.install_status === 'installing') return 30;
-  if (skill.install_status === 'pending') return 15;
-  if (skill.install_status === 'failed') return 100;
-  return 8;
-}
-
-function skillFlowSteps(skill: Skill) {
-  const installLog = skill.install_log || '';
-  const packageSkill = Boolean(skill.package_path || skill.type === 'package');
-  const needsRuntime = packageSkill || skill.runtime !== 'prompt-only';
-  const adapting = ['pending', 'installing'].includes(skill.install_status || '') && /自动适配|等待自动适配/.test(installLog);
-  const adaptationDone = /自动适配完成|已生成执行入口|未发现需要生成的新执行入口|无需依赖初始化/.test(installLog) || (!needsRuntime && skill.install_status === 'not_required');
-  const installFailed = skill.install_status === 'failed';
-  return [
-    {
-      label: '解析包',
-      done: Boolean(skill.package_path || skill.type === 'prompt-only'),
-      active: skill.install_status === 'pending',
-      failed: false,
-    },
-    {
-      label: '智能适配',
-      done: adaptationDone || skill.install_status === 'ready',
-      active: adapting,
-      failed: installFailed && !adaptationDone,
-    },
-    {
-      label: '初始化依赖',
-      done: ['ready', 'not_required'].includes(skill.install_status || ''),
-      active: ['pending', 'installing'].includes(skill.install_status || ''),
-      failed: installFailed,
-    },
-    {
-      label: '健康测试',
-      done: skill.test_status === 'passed',
-      active: skill.test_status === 'testing',
-      failed: skill.test_status === 'failed',
-    },
-  ];
-}
-
 function previewDependencyLabel(preview: SkillPackagePreview) {
   if (preview.dependencyFile) return preview.dependencyFile;
   if (preview.inferredDependencies?.length) return `自动识别：${preview.inferredDependencies.join('、')}`;
@@ -382,10 +399,7 @@ function previewDependencyLabel(preview: SkillPackagePreview) {
 }
 
 function categoryDescription(category: string) {
-  if (category === '资料收集') return '包含 Web 搜索、资料补全、信息抓取等能力';
-  if (category === '文件解析') return '解析上传文件并提取可用文本或结构';
-  if (category === '主题提炼') return '从资料中识别主题、受众和表达目标';
-  return '整理提示词、模板和生成配置约束';
+  return getSkillCategoryDescription(category);
 }
 
 function formatFileSize(bytes: number) {
@@ -477,97 +491,94 @@ onBeforeUnmount(stopStatusPolling);
       description="上传一个 Skill 包后，输入阶段会按用户资料和文件自动选择可用 Skill。"
     />
 
-    <div v-else class="skill-list">
-      <article v-for="skill in skills" :key="skill.id" class="skill-card">
-        <div class="skill-card__main">
-          <div class="skill-card__icon">
-            <Zap :size="18" />
-          </div>
-          <div class="skill-card__content">
-            <div class="skill-card__title">
-              <h3>{{ skill.name }}</h3>
-              <UiBadge :tone="statusTone(skill.install_status)" size="sm">
-                <component
-                  :is="statusIcon(skill.install_status)"
-                  :size="12"
-                  :class="{ spin: skill.install_status === 'installing' || skill.install_status === 'pending' }"
-                />
-                {{ statusLabel(skill.install_status) }}
-              </UiBadge>
-              <UiBadge :tone="testStatusTone(skill.test_status)" size="sm">
-                <component
-                  :is="testStatusIcon(skill.test_status)"
-                  :size="12"
-                  :class="{ spin: skill.test_status === 'testing' }"
-                />
-                {{ testStatusLabel(skill.test_status) }}
-              </UiBadge>
+    <div v-else class="skill-workflow">
+      <section class="skill-filter" aria-label="Skill 分类筛选">
+        <button
+          v-for="option in categoryFilterOptions"
+          :key="option.value"
+          type="button"
+          class="skill-filter__item"
+          :class="{ 'skill-filter__item--active': selectedCategory === option.value }"
+          @click="selectedCategory = option.value"
+        >
+          <span>{{ option.label }}</span>
+          <small>{{ option.count }}</small>
+        </button>
+      </section>
+
+      <section class="skill-list" aria-label="Skill 列表">
+        <article v-for="skill in filteredSkills" :key="skill.id" class="skill-card">
+          <div class="skill-card__identity">
+            <span class="skill-card__icon">
+              <Zap :size="18" />
+            </span>
+            <div>
+              <h4>{{ skill.name }}</h4>
+              <p>
+                <strong>{{ normalizeInputSkillCategory(skill.category) }}</strong>
+                <span>{{ skill.description || '暂无说明' }}</span>
+              </p>
             </div>
-            <p>{{ skill.description || '暂无说明' }}</p>
-            <div class="skill-test-progress" :class="{ 'skill-test-progress--failed': skill.test_status === 'failed', 'skill-test-progress--passed': skill.test_status === 'passed' }">
-              <span :style="{ width: `${skillProgress(skill)}%` }" />
-            </div>
-            <ol class="skill-flow">
-              <li
-                v-for="item in skillFlowSteps(skill)"
-                :key="item.label"
-                :class="{
-                  'skill-flow__item--done': item.done,
-                  'skill-flow__item--active': item.active,
-                  'skill-flow__item--failed': item.failed
-                }"
-              >
-                <span />
-                <strong>{{ item.label }}</strong>
-              </li>
-            </ol>
-            <dl class="skill-meta">
-              <div>
-                <dt>运行时</dt>
-                <dd>{{ runtimeLabel(skill) }}</dd>
-              </div>
-              <div>
-                <dt>分类</dt>
-                <dd>{{ skill.category || '未分类' }}</dd>
-              </div>
-              <div>
-                <dt>入口</dt>
-                <dd>{{ skill.entry || '仅提示词' }}</dd>
-              </div>
-              <div>
-                <dt>依赖</dt>
-                <dd>{{ skill.dependency_file || '无' }}</dd>
-              </div>
-            </dl>
-            <details v-if="skill.install_log" class="skill-log">
-              <summary>查看初始化日志</summary>
-              <pre>{{ skill.install_log }}</pre>
-            </details>
-            <details v-if="skill.test_log" class="skill-log">
-              <summary>查看测试日志</summary>
-              <pre>{{ skill.test_log }}</pre>
-            </details>
           </div>
-        </div>
-        <div class="skill-card__actions">
-          <UiButton v-if="canViewSkillPackage(skill)" size="sm" variant="secondary" :loading="packageViewLoadingId === skill.id" @click="viewSkillPackage(skill)">
-            <Eye :size="13" />
-            查看包
-          </UiButton>
-          <UiButton v-if="skill.runtime !== 'prompt-only'" size="sm" variant="secondary" @click="reinstallSkill(skill)">
-            <RotateCw :size="13" />
-            重试初始化并测试
-          </UiButton>
-          <UiButton size="sm" variant="secondary" :loading="skill.test_status === 'testing' || testingSkillIds.has(skill.id)" @click="testSkill(skill)">
-            <CheckCircle2 :size="13" />
-            测试
-          </UiButton>
-          <UiButton size="sm" variant="danger" @click="requestDelete(skill)">
-            <Trash2 :size="13" />
-            删除
-          </UiButton>
-        </div>
-      </article>
+
+          <div class="skill-card__status">
+            <UiBadge :tone="statusTone(skill.install_status)" size="sm">
+              <component
+                :is="statusIcon(skill.install_status)"
+                :size="12"
+                :class="{ spin: skill.install_status === 'installing' || skill.install_status === 'pending' }"
+              />
+              {{ statusLabel(skill.install_status) }}
+            </UiBadge>
+            <UiBadge :tone="testStatusTone(skill.test_status)" size="sm">
+              <component
+                :is="testStatusIcon(skill.test_status)"
+                :size="12"
+                :class="{ spin: skill.test_status === 'testing' }"
+              />
+              {{ testStatusLabel(skill.test_status) }}
+            </UiBadge>
+          </div>
+
+          <div class="skill-card__category">
+            <UiSelect
+              :model-value="normalizeInputSkillCategory(skill.category)"
+              :options="categoryOptions"
+              :disabled="updatingCategoryIds.has(skill.id)"
+              placeholder="选择分类"
+              @update:model-value="updateSkillCategory(skill, $event)"
+            />
+          </div>
+
+          <div class="skill-card__actions">
+            <UiButton v-if="canViewSkillPackage(skill)" size="sm" variant="secondary" :loading="packageViewLoadingId === skill.id" @click="viewSkillPackage(skill)">
+              <Eye :size="13" />
+              查看包
+            </UiButton>
+            <UiButton v-if="skill.runtime !== 'prompt-only'" size="sm" variant="secondary" @click="reinstallSkill(skill)">
+              <RotateCw :size="13" />
+              初始化
+            </UiButton>
+            <UiButton size="sm" variant="secondary" :loading="skill.test_status === 'testing' || testingSkillIds.has(skill.id)" @click="testSkill(skill)">
+              <CheckCircle2 :size="13" />
+              测试
+            </UiButton>
+            <UiButton size="sm" variant="danger" @click="requestDelete(skill)">
+              <Trash2 :size="13" />
+              删除
+            </UiButton>
+          </div>
+
+          <details v-if="skill.install_log" class="skill-log">
+            <summary>查看初始化日志</summary>
+            <pre>{{ skill.install_log }}</pre>
+          </details>
+          <details v-if="skill.test_log" class="skill-log">
+            <summary>查看测试日志</summary>
+            <pre>{{ skill.test_log }}</pre>
+          </details>
+        </article>
+      </section>
     </div>
 
     <Teleport to="body">
@@ -834,195 +845,157 @@ onBeforeUnmount(stopStatusPolling);
   color: var(--color-muted);
 }
 
-.skill-list {
+.skill-workflow {
   display: grid;
   gap: 12px;
+}
+
+.skill-filter {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--color-surface);
+}
+
+.skill-filter__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--color-panel);
+  color: var(--color-muted);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.skill-filter__item:hover,
+.skill-filter__item--active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+
+.skill-filter__item small {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: inherit;
+  font-size: 11px;
+}
+
+.skill-list {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--color-surface);
 }
 
 .skill-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  align-items: start;
+  grid-template-columns: minmax(280px, 1fr) auto minmax(220px, 280px) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  padding: 14px;
-  background: var(--color-surface);
+  padding: 10px 12px;
+  background: var(--color-card);
 }
 
-.skill-card__main {
+.skill-card__identity {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
   min-width: 0;
 }
 
 .skill-card__icon {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   color: var(--color-accent);
   background: var(--color-accent-soft);
 }
 
-.skill-card__content {
+.skill-card__identity > div {
   display: grid;
-  gap: 8px;
+  gap: 5px;
   min-width: 0;
 }
 
-.skill-card__title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.skill-card__title h3 {
+.skill-card__identity h4 {
+  overflow: hidden;
   margin: 0;
   color: var(--color-text);
   font-size: 15px;
-  font-weight: 800;
+  font-weight: 850;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.skill-card__content p {
-  margin: 0;
-  color: var(--color-muted);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.skill-test-progress {
-  position: relative;
-  height: 7px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--color-border);
-}
-
-.skill-test-progress span {
-  position: absolute;
-  inset: 0 auto 0 0;
-  border-radius: inherit;
-  background: var(--color-warning);
-  transition: width var(--transition-normal);
-}
-
-.skill-test-progress--passed span {
-  background: var(--color-success);
-}
-
-.skill-test-progress--failed span {
-  background: var(--color-danger);
-}
-
-.skill-flow {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.skill-flow__item {
+.skill-card__identity p {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-width: 0;
-  padding: 6px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  overflow: hidden;
+  margin: 0;
   color: var(--color-muted);
-  background: var(--color-panel);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.skill-flow__item span {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--color-border-strong);
-}
-
-.skill-flow__item strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skill-flow__item--done {
-  border-color: color-mix(in srgb, var(--color-success) 42%, var(--color-border));
-  color: var(--color-success);
-  background: var(--color-success-soft);
-}
-
-.skill-flow__item--done span {
-  background: var(--color-success);
-}
-
-.skill-flow__item--active {
-  border-color: color-mix(in srgb, var(--color-accent) 42%, var(--color-border));
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-}
-
-.skill-flow__item--active span {
-  background: var(--color-accent);
-  animation: pulse-dot 1s ease-in-out infinite;
-}
-
-.skill-flow__item--failed {
-  border-color: color-mix(in srgb, var(--color-danger) 42%, var(--color-border));
-  color: var(--color-danger);
-  background: var(--color-danger-soft);
-}
-
-.skill-flow__item--failed span {
-  background: var(--color-danger);
-}
-
-.skill-meta {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-}
-
-.skill-meta div {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 8px;
-  background: var(--color-panel);
-}
-
-.skill-meta dt,
-.skill-meta dd {
-  min-width: 0;
-  margin: 0;
-}
-
-.skill-meta dt {
-  color: var(--color-subtle);
-  font-size: 11px;
-}
-
-.skill-meta dd {
-  overflow: hidden;
-  color: var(--color-text);
   font-size: 12px;
-  font-weight: 650;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.skill-card__identity p strong {
+  flex: 0 0 auto;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.skill-card__identity p span {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.skill-card__status {
+  display: flex;
+  justify-content: flex-start;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: none;
+}
+
+.skill-card__category {
+  min-width: 0;
+}
+
+.skill-card__category :deep(.ui-select) {
+  min-width: 0;
 }
 
 .skill-log {
+  grid-column: 1 / -1;
   border-top: 1px solid var(--color-border);
   padding-top: 8px;
 }
@@ -1035,7 +1008,8 @@ onBeforeUnmount(stopStatusPolling);
 }
 
 .skill-log pre {
-  max-height: 160px;
+  width: 100%;
+  max-height: 220px;
   overflow: auto;
   margin: 8px 0 0;
   border: 1px solid var(--color-border);
@@ -1050,7 +1024,7 @@ onBeforeUnmount(stopStatusPolling);
 .skill-card__actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
@@ -1437,21 +1411,14 @@ onBeforeUnmount(stopStatusPolling);
 }
 
 @media (max-width: 860px) {
-  .skill-card,
-  .skill-card__main {
+  .skill-card {
     grid-template-columns: 1fr;
+    align-items: stretch;
   }
 
+  .skill-card__status,
   .skill-card__actions {
-    justify-content: stretch;
-  }
-
-  .skill-meta {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .skill-flow {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: flex-start;
   }
 
   .package-view {
@@ -1497,8 +1464,6 @@ onBeforeUnmount(stopStatusPolling);
   }
 
   .upload-guide,
-  .skill-flow,
-  .skill-meta,
   .package-summary,
   .package-detected,
   .package-view__summary {
@@ -1516,10 +1481,8 @@ onBeforeUnmount(stopStatusPolling);
     height: 36px;
   }
 
-  .skill-card__title h3 {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .skill-card__identity {
+    grid-template-columns: 36px minmax(0, 1fr);
   }
 
   .loading-state {

@@ -54,7 +54,7 @@ export function shouldUseContainFitForSlide(slide: SpecSlide): boolean {
 
 export function buildImageCompositionPrompt(intent: ImageCompositionIntent, slot?: ImageSlotHint): string {
   const ratioText = slot
-    ? `最终用于 PPT 图片槽位：${Math.round(slot.width)}x${Math.round(slot.height)}，比例 ${slot.aspectRatio.toFixed(2)}:1，位置 ${slot.placement || 'content'}。`
+    ? '最终作为 PPT 页面视觉素材使用，页面生成 AI 会根据内容自主决定位置、尺寸、裁切方式和层级。'
     : '最终用于横向 PPT 页面插图。';
   const fit = slot?.fit || (intent === 'diagram' ? 'contain' : 'cover');
 

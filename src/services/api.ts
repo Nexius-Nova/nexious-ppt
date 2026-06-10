@@ -630,6 +630,7 @@ export interface GeneratedOutline {
   bullets: string[];
   speakerNotes: string;
   visualPrompt: string;
+  imagePlan?: Array<{ id: string; prompt: string; purpose?: string; style?: string }>;
   chartHint?: string;
   layout?: string;
 }
@@ -637,8 +638,10 @@ export interface GeneratedOutline {
 export interface GeneratedImage {
   id: string;
   slideId: string;
+  assetId?: string;
   title: string;
   prompt: string;
+  purpose?: string;
   style: string;
   url: string;
   selected: boolean;
@@ -746,6 +749,7 @@ export const aiApi = {
               bullets: item.bullets,
               speakerNotes: item.speakerNotes,
               visualPrompt: item.visualPrompt,
+              imagePlan: item.imagePlan,
               chartHint: item.chartHint,
               layout: item.layout
             }));
@@ -767,8 +771,10 @@ export const aiApi = {
   generateImageStream: async (
     data: {
       slideId: string;
+      assetId?: string;
       title: string;
       prompt: string;
+      purpose?: string;
       style: string;
       imageModelId?: string | null;
     },
@@ -787,8 +793,10 @@ export const aiApi = {
             image = {
               id: parsed.data.id,
               slideId: parsed.data.slideId,
+              assetId: parsed.data.assetId,
               title: parsed.data.title,
               prompt: parsed.data.prompt,
+              purpose: parsed.data.purpose,
               style: parsed.data.style,
               url: parsed.data.url,
               selected: parsed.data.selected
@@ -801,8 +809,10 @@ export const aiApi = {
               resolve({
                 id: parsed.data.id,
                 slideId: parsed.data.slideId,
+                assetId: parsed.data.assetId,
                 title: parsed.data.title,
                 prompt: parsed.data.prompt,
+                purpose: parsed.data.purpose,
                 style: parsed.data.style,
                 url: '',
                 selected: true,
@@ -912,7 +922,14 @@ export const aiApi = {
   },
 
   executorPageStream: async (
-    data: { spec: DesignSpec; lock: SpecLock; slide: SpecSlide; imageUrl?: string; textModelId?: string | null },
+    data: {
+      spec: DesignSpec;
+      lock: SpecLock;
+      slide: SpecSlide;
+      imageUrl?: string;
+      imageAssets?: Array<Partial<GeneratedImage> & { url: string }>;
+      textModelId?: string | null;
+    },
     callbacks: StreamCallbacks
   ): Promise<string> => {
     return new Promise((resolve, reject) => {

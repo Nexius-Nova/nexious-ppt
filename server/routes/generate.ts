@@ -8,7 +8,6 @@ import {
   buildExecutorSystemPrompt,
   buildExecutorPagePrompt,
   buildSvgQualityRepairPrompt,
-  calculateImageSlot,
   cleanSvgOutput,
   ensureImageUsedInSvg,
   finalizeSvgQuality
@@ -46,6 +45,28 @@ function normalizeExecutorImageUrl(value: unknown): string | undefined {
   if (/^https?:\/\//i.test(imageUrl)) return imageUrl;
   if (imageUrl.startsWith('/generated-images/')) return `${publicBaseUrl()}${imageUrl}`;
   return undefined;
+}
+
+function normalizeExecutorImageAssets(value: unknown, legacyImageUrl?: unknown) {
+  const rawItems = Array.isArray(value) ? value : [];
+  const assets = rawItems
+    .map((item: any, index) => {
+      const url = normalizeExecutorImageUrl(item?.url);
+      if (!url) return null;
+      return {
+        id: String(item?.assetId || item?.id || `img-${index + 1}`).slice(0, 80),
+        url,
+        title: item?.title ? String(item.title).slice(0, 120) : undefined,
+        prompt: item?.prompt ? String(item.prompt).slice(0, 360) : undefined,
+        purpose: item?.purpose ? String(item.purpose).slice(0, 80) : undefined,
+        style: item?.style ? String(item.style).slice(0, 80) : undefined,
+      };
+    })
+    .filter(Boolean);
+
+  if (assets.length) return assets;
+  const url = normalizeExecutorImageUrl(legacyImageUrl);
+  return url ? [{ id: 'img-1', url }] : [];
 }
 
 function buildAttachmentDisposition(fileName: string): string {
@@ -209,6 +230,16 @@ function normalizeStreamingSpecSlide(item: any, index: number): SpecSlide {
       : [],
     speakerNotes: String(item?.speakerNotes || ''),
     visualPrompt: String(item?.visualPrompt || ''),
+    imagePlan: Array.isArray(item?.imagePlan)
+      ? item.imagePlan
+          .map((plan: any, planIndex: number) => ({
+            id: String(plan?.id || `img-${planIndex + 1}`),
+            prompt: String(plan?.prompt || '').trim(),
+            purpose: plan?.purpose ? String(plan.purpose) : undefined,
+            style: plan?.style ? String(plan.style) : undefined,
+          }))
+          .filter((plan: any) => plan.prompt)
+      : undefined,
     layout: String(item?.layout || 'content'),
     rhythm: item?.rhythm === 'anchor' || item?.rhythm === 'dense' || item?.rhythm === 'breathing'
       ? item.rhythm
@@ -274,7 +305,7 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
 
 router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { spec, lock, slide, imageUrl, textModelId } = req.body;
+    const { spec, lock, slide, imageUrl, imageAssets, textModelId } = req.body;
 
     const defaultKey = await resolveGenerationApiKey(req.userId!, 'text', textModelId);
     if (!defaultKey) {
@@ -302,27 +333,27 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
     };
 
     let messages: Message[];
-    const safeImageUrl = normalizeExecutorImageUrl(imageUrl);
-    const imageSlot = calculateImageSlot(slide, spec);
+    const safeImageAssets = normalizeExecutorImageAssets(imageAssets, imageUrl);
     const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
     const iconGuide = await getIconGuide(effectiveLock.iconStyle);
     const chartTemplateSvg = await getChartSvg(effectiveLock.pageCharts?.[pageKey] || slide.chartHint);
     const executorContext = { iconGuide, chartTemplateSvg };
     const systemPrompt = buildExecutorSystemPrompt(spec, effectiveLock, executorContext);
-    const userPrompt = buildExecutorPagePrompt(slide, spec, effectiveLock, safeImageUrl, imageSlot, executorContext);
+    const userPrompt = buildExecutorPagePrompt(slide, spec, effectiveLock, safeImageAssets, undefined, executorContext);
 
     const estimatedTokens = Math.ceil((systemPrompt.length + userPrompt.length) / 3);
     console.log(`[Executor] Page ${slide.pageNumber}: systemPrompt=${systemPrompt.length}chars, userPrompt=${userPrompt.length}chars, ~${estimatedTokens}tokens`);
 
     if (estimatedTokens > 500000) {
       console.warn(`[Executor] Page ${slide.pageNumber}: prompt too large (~${estimatedTokens}tokens), using simplified prompt`);
-      const imagePreserveAspectRatio = imageSlot.fit === 'contain' ? 'xMidYMid meet' : 'xMidYMid slice';
       const simplifiedSystem = `你是PPT SVG执行器。画布: ${spec.canvas.width}x${spec.canvas.height}。颜色: primary=${lock.colors.primary}, accent=${lock.colors.accent}, bg=${lock.colors.background}, text=${lock.colors.text}, surface=${lock.colors.surface}, muted=${lock.colors.muted}。字体: ${spec.typography.titleFamily}。输出纯SVG代码，viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"。禁止<style>,class,<foreignObject>,rgba()。`;
-      const simplifiedUser = `生成第${slide.pageNumber}页SVG。标题: ${slide.title}。要点: ${slide.bullets.slice(0, 5).join(' | ')}。布局: ${slide.layout}。${safeImageUrl ? `必须使用图片：${safeImageUrl}，图片槽位固定为 x=${imageSlot.x}, y=${imageSlot.y}, width=${imageSlot.width}, height=${imageSlot.height}，写入 <image href="${safeImageUrl}" x="${imageSlot.x}" y="${imageSlot.y}" width="${imageSlot.width}" height="${imageSlot.height}" preserveAspectRatio="xMidYMid slice"/>。` : ''}输出纯SVG：`;
-      const normalizedSimplifiedUser = simplifiedUser.replace('preserveAspectRatio="xMidYMid slice"', `preserveAspectRatio="${imagePreserveAspectRatio}"`);
+      const simplifiedImageText = safeImageAssets.length
+        ? `可用图片素材：${safeImageAssets.map((asset: any) => `${asset.id}:${asset.url}`).join('；')}。是否使用、使用几张、位置、尺寸、裁切、旋转、缩放都由你按内容自主决定，只能使用清单 URL，不能遮挡标题、正文、图表或关键组件。`
+        : '不要写 <image>。';
+      const simplifiedUser = `生成第 ${slide.pageNumber} 页 SVG。标题：${slide.title}。要点：${slide.bullets.slice(0, 5).join(' | ')}。布局：${slide.layout}。${simplifiedImageText} 输出纯 SVG。`;
       messages = [
         { role: 'system', content: simplifiedSystem },
-        { role: 'user', content: normalizedSimplifiedUser },
+        { role: 'user', content: simplifiedUser },
       ];
     } else {
       messages = [
@@ -340,16 +371,16 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
 
     const fullContent = await streamText(provider, apiKey, baseUrl, model, messages, res);
 
-    let svg = ensureImageUsedInSvg(cleanSvgOutput(fullContent), slide, spec, safeImageUrl);
-    let quality = finalizeSvgQuality(svg, spec, slide, imageSlot, safeImageUrl);
+    let svg = ensureImageUsedInSvg(cleanSvgOutput(fullContent), slide, spec, safeImageAssets);
+    let quality = finalizeSvgQuality(svg, spec, slide, undefined, safeImageAssets);
     if (quality.blockingIssues.length) {
       res.write(`data: ${JSON.stringify({ status: 'quality-check', phase: 'executor', pageNumber: slide.pageNumber, message: '正在修复页面布局质量问题' })}\n\n`);
       const repairContent = await streamText(provider, apiKey, baseUrl, model, [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, imageSlot, quality.blockingIssues, safeImageUrl) },
+        { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, safeImageAssets) },
       ]);
-      svg = ensureImageUsedInSvg(cleanSvgOutput(repairContent), slide, spec, safeImageUrl);
-      quality = finalizeSvgQuality(svg || quality.svg, spec, slide, imageSlot, safeImageUrl);
+      svg = ensureImageUsedInSvg(cleanSvgOutput(repairContent), slide, spec, safeImageAssets);
+      quality = finalizeSvgQuality(svg || quality.svg, spec, slide, undefined, safeImageAssets);
     }
     svg = quality.svg;
 

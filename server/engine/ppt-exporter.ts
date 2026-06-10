@@ -422,6 +422,7 @@ function repairCommonSvgBreakage(rawSvg: string, spec: DesignSpec): string {
   svg = svg.replace(/\sfont-family='([^']*)'/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/"/g, ''))}"`);
   svg = svg.replace(/\sfont-family="([^"]*)"/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/"/g, ''))}"`);
   svg = svg.replace(/rgba\(\s*([^)]+)\)/gi, '#000000');
+  svg = removeUnsupportedClipPathTargets(svg);
   svg = removeDuplicateAttributes(svg);
   svg = escapeTextNodes(svg);
 
@@ -469,6 +470,16 @@ function flattenNestedSvgRoots(rawSvg: string): string {
   inner = inner.replace(/<\/svg>/gi, '</g>');
 
   return `${before}${inner}${after}`;
+}
+
+function removeUnsupportedClipPathTargets(svg: string): string {
+  return svg.replace(/<([A-Za-z][\w:.-]*)([^<>]*\bclip-path\s*=\s*(["'])[^"']*\3[^<>]*)>/gi, (full, tagName: string, attrs: string) => {
+    const normalizedTag = tagName.includes(':') ? tagName.split(':').pop()?.toLowerCase() : tagName.toLowerCase();
+    const isPptxCropWrapper = normalizedTag === 'svg' && /\bdata-pptx-crop\s*=\s*(["'])1\1/i.test(attrs);
+    if (normalizedTag === 'image' || isPptxCropWrapper) return full;
+    const cleanedAttrs = attrs.replace(/\s+clip-path\s*=\s*(["'])[^"']*\1/gi, '');
+    return `<${tagName}${cleanedAttrs}>`;
+  });
 }
 
 function readNumericAttr(attrs: string, name: string): number {

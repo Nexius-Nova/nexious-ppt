@@ -370,14 +370,17 @@ const LAYOUT_LABELS: Record<string, string> = {
   chapter: '章节页',
   section: '章节页',
   content: '内容页',
-  'content-image': '图文页',
+  'content-image': '图文混排',
+  'mixed-media': '图文混排',
+  'visual-focus': '视觉主导',
+  'media-grid': '多图素材',
   'content-chart': '图表页',
   ending: '收束页',
   summary: '总结页',
   'text-only': '纯文本页',
-  'text-image': '左文右图',
-  'image-text': '左图右文',
-  'full-image': '全图页',
+  'text-image': '图文混排',
+  'image-text': '图文混排',
+  'full-image': '视觉主导',
   'title-center': '居中标题页',
   'two-column': '双栏页',
   comparison: '对比页',
@@ -481,7 +484,7 @@ function inferImportedSlideLayout(index: number, total: number, texts: string[])
   if (index === 0) return 'cover';
   if (index === total - 1 && total > 1) return 'ending';
   if (texts.some((text) => /[%％]|同比|环比|增长|下降|数据|指标|表格|图表|趋势|矩阵/.test(text))) return 'content-chart';
-  if (texts.length >= 5) return 'content-image';
+  if (texts.length >= 5) return 'mixed-media';
   return 'content';
 }
 
@@ -720,7 +723,7 @@ function normalizeImportedDraft(
       layoutGuide: {
         cover: settings.layoutGuide?.cover || '封面参考导入 PPT 的首屏构图和标题层级',
         section: settings.layoutGuide?.section || '章节页参考导入 PPT 的转场节奏',
-        contentLayouts: settings.layoutGuide?.contentLayouts?.length ? settings.layoutGuide.contentLayouts : ['content', 'content-image', 'two-column'],
+        contentLayouts: settings.layoutGuide?.contentLayouts?.length ? settings.layoutGuide.contentLayouts : ['content', 'mixed-media', 'two-column'],
         dataLayouts: settings.layoutGuide?.dataLayouts?.length ? settings.layoutGuide.dataLayouts : ['content-chart', 'matrix_2x2'],
         summary: settings.layoutGuide?.summary || '总结页参考导入 PPT 的收束结构',
       },
@@ -1801,6 +1804,8 @@ onMounted(fetchTemplates);
 }
 
 .preview-deck__slide--content-image::after,
+.preview-deck__slide--mixed-media::after,
+.preview-deck__slide--media-grid::after,
 .preview-deck__slide--content-chart::after {
   content: '';
   position: absolute;
@@ -2296,6 +2301,8 @@ onMounted(fetchTemplates);
 }
 
 .ppt-preview-slide--content-image .ppt-preview-slide__stage::after,
+.ppt-preview-slide--mixed-media .ppt-preview-slide__stage::after,
+.ppt-preview-slide--media-grid .ppt-preview-slide__stage::after,
 .ppt-preview-slide--content-chart .ppt-preview-slide__stage::after {
   content: '';
   position: absolute;

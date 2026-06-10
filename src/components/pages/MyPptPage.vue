@@ -207,32 +207,31 @@ function deriveProjectDisplay(project: Project): ProjectDisplay {
     : getStepProgress(state?.steps, 'outline');
   const imageProgress = imageTotal === 0
     ? (outlineProgress === 100 ? 100 : getStepProgress(state?.steps, 'images'))
-    : Math.max(getStepProgress(state?.steps, 'images'), Math.round((imageReady / imageTotal) * 100));
+    : Math.round((imageReady / imageTotal) * 100);
   const layoutProgress = pageTotal > 0
-    ? Math.max(getStepProgress(state?.steps, 'layout'), Math.round((pageReady / pageTotal) * 100))
+    ? Math.round((pageReady / pageTotal) * 100)
     : getStepProgress(state?.steps, 'layout');
-  const previewProgress = (state?.exportArtifacts?.length || 0) > 0
-    ? 100
-    : getStepProgress(state?.steps, 'preview');
-  const progress = Math.round((inputProgress + outlineProgress + imageProgress + layoutProgress + previewProgress) / 5);
+  const pagesComplete = pageTotal > 0 && pageReady >= pageTotal;
+  const hasExportArtifact = (state?.exportArtifacts?.length || 0) > 0;
+  const progress = Math.round((inputProgress + outlineProgress + imageProgress + layoutProgress) / 4);
   const isPausedProject = Boolean(state?.paused);
   const hasRunningStep = !isPausedProject && Boolean(state?.workflowActive || state?.steps?.some((step) => step.status === 'running'));
-  const isComplete = previewProgress === 100 || (pageTotal > 0 && pageReady >= pageTotal && layoutProgress === 100);
+  const isComplete = pagesComplete && layoutProgress === 100;
 
-  let displayStatus: ProjectDisplayStatus = project.status;
+  let displayStatus: ProjectDisplayStatus = project.status === 'generating' ? 'generating' : 'draft';
   if (isPausedProject) {
     displayStatus = 'paused';
   } else if (hasRunningStep) {
     displayStatus = 'generating';
   } else if (isComplete) {
     displayStatus = 'completed';
-  } else if (progress > 0 && project.status !== 'completed') {
-    displayStatus = progress >= 100 ? 'completed' : 'draft';
+  } else if (progress > 0) {
+    displayStatus = 'draft';
   }
 
   let stageLabel = '等待输入';
   if (isPausedProject) stageLabel = '已暂停，可继续';
-  else if (isComplete) stageLabel = '已可导出';
+  else if (isComplete) stageLabel = hasExportArtifact ? '已导出' : '已可导出';
   else if (pageReady > 0) stageLabel = `页面 ${pageReady}/${pageTotal || pageReady}`;
   else if (imageTotal > 0) stageLabel = `图片 ${imageReady}/${imageTotal}`;
   else if (state?.designSpec || (state?.outline?.length || 0) > 0) stageLabel = `大纲 ${state?.outline?.length || state?.designSpec?.outline?.length || 0} 页`;

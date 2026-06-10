@@ -293,7 +293,7 @@ function buildImportedTemplateDraft(filename: string, result: Awaited<ReturnType
     layoutGuide: {
       cover: slides[0]?.visualSummary || '封面参考首屏构图、标题层级和主视觉区域',
       section: '章节页沿用原 PPT 的转场节奏、留白和视觉锚点',
-      contentLayouts: contentLayouts.length ? contentLayouts : ['content', 'content-image', 'two-column'],
+      contentLayouts: contentLayouts.length ? contentLayouts : ['content', 'mixed-media', 'two-column'],
       dataLayouts: dataLayouts.length ? dataLayouts : ['content-chart', 'matrix_2x2'],
       summary: slides[slides.length - 1]?.visualSummary || '总结页参考收束结构、关键结论区和行动建议区',
     },

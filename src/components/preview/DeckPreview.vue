@@ -9,6 +9,7 @@ import PrivateBackground from '@/components/common/PrivateBackground.vue';
 import SlidePreviewModal from './SlidePreviewModal.vue';
 import PresentationMode from './PresentationMode.vue';
 import { getTemplateColors, accentToTemplateColors } from '@/composables/templateColors';
+import { getLayoutLabel as getSemanticLayoutLabel, layoutNeedsVisual, normalizeSlideLayout } from '@/utils/layoutSemantics';
 import type { AgentParameters, ExportArtifact, GeneratedImage, SlideOutline } from '@/types/agent';
 
 const props = defineProps<{
@@ -53,17 +54,13 @@ function openPresentation(index: number) {
   showPresentation.value = true;
 }
 
+function getPreviewLayout(layout?: string) {
+  return normalizeSlideLayout(layout);
+}
+
 function getTemplateLabel(template: string) {
   const map: Record<string, string> = { business: '商务', creative: '创意', education: '教育' };
   return map[template] || template;
-}
-
-function getLayoutLabel(layout?: string): string {
-  const map: Record<string, string> = {
-    'text-only': '纯文字', 'text-image': '左文右图', 'image-text': '左图右文',
-    'full-image': '全幅', 'title-center': '居中标题', 'two-column': '双栏'
-  };
-  return map[layout || 'text-only'] || layout || '纯文字';
 }
 </script>
 
@@ -96,19 +93,19 @@ function getLayoutLabel(layout?: string): string {
           >
             <div
               class="preview-slide-canvas"
-              :class="`preview-slide-canvas--${slide.layout || 'text-only'}`"
+              :class="`preview-slide-canvas--${getPreviewLayout(slide.layout)}`"
               :style="{ background: colors.bg }"
             >
-              <!-- text-only / text-image / image-text: show content block -->
-              <div v-if="(slide.layout || 'text-only') !== 'full-image'" class="preview-content" :class="(slide.layout || 'text-only') === 'image-text' ? 'preview-content--right' : ''">
+              <!-- Structured preview content -->
+              <div v-if="getPreviewLayout(slide.layout) !== 'visual-focus'" class="preview-content">
                 <div class="preview-meta">
                   <UiBadge tone="accent" size="sm">Slide {{ index + 1 }}</UiBadge>
-                  <span class="preview-layout-tag">{{ getLayoutLabel(slide.layout) }}</span>
+                  <span class="preview-layout-tag">{{ getSemanticLayoutLabel(slide.layout) }}</span>
                 </div>
                 <h3 :style="{ color: colors.text }">{{ slide.title }}</h3>
                 <ul :style="{ color: colors.muted }">
-                  <li v-for="bullet in slide.bullets.slice(0, (slide.layout || 'text-only') === 'text-only' ? 4 : 3)" :key="bullet">{{ bullet }}</li>
-                  <li v-if="slide.bullets.length > ((slide.layout || 'text-only') === 'text-only' ? 4 : 3)" class="preview-more">+{{ slide.bullets.length - ((slide.layout || 'text-only') === 'text-only' ? 4 : 3) }} 更多</li>
+                  <li v-for="bullet in slide.bullets.slice(0, getPreviewLayout(slide.layout) === 'text-only' ? 4 : 3)" :key="bullet">{{ bullet }}</li>
+                  <li v-if="slide.bullets.length > (getPreviewLayout(slide.layout) === 'text-only' ? 4 : 3)" class="preview-more">+{{ slide.bullets.length - (getPreviewLayout(slide.layout) === 'text-only' ? 4 : 3) }} 更多</li>
                 </ul>
               </div>
               <!-- Full-image: title overlay -->
@@ -117,13 +114,11 @@ function getLayoutLabel(layout?: string): string {
               </div>
               <!-- Image area -->
               <PrivateBackground
-                v-if="(slide.layout || 'text-only') !== 'text-only' && imageBySlide.get(slide.id)?.url"
+                v-if="layoutNeedsVisual(slide.layout) && imageBySlide.get(slide.id)?.url"
                 class="preview-visual"
                 :src="imageBySlide.get(slide.id)?.url"
                 :class="{
-                  'preview-visual--right': (slide.layout || 'text-only') === 'text-image',
-                  'preview-visual--left': (slide.layout || 'text-only') === 'image-text',
-                  'preview-visual--full': (slide.layout || 'text-only') === 'full-image'
+                  'preview-visual--full': getPreviewLayout(slide.layout) === 'visual-focus'
                 }"
                 :style="{
                   backgroundColor: colors.panel
@@ -131,15 +126,13 @@ function getLayoutLabel(layout?: string): string {
               />
               <!-- Placeholder when layout expects image but none exists -->
               <div
-                v-if="(slide.layout || 'text-only') !== 'text-only' && (slide.layout || 'text-only') !== 'text-only' && !imageBySlide.get(slide.id)?.url"
+                v-if="layoutNeedsVisual(slide.layout) && !imageBySlide.get(slide.id)?.url"
                 class="preview-visual preview-visual--placeholder"
                 :class="{
-                  'preview-visual--right': (slide.layout || 'text-only') === 'text-image',
-                  'preview-visual--left': (slide.layout || 'text-only') === 'image-text',
-                  'preview-visual--full': (slide.layout || 'text-only') === 'full-image'
+                  'preview-visual--full': getPreviewLayout(slide.layout) === 'visual-focus'
                 }"
               >
-                <span class="preview-visual__hint">{{ (slide.layout || 'text-only') === 'full-image' ? '点击生成图片' : '图片占位' }}</span>
+                <span class="preview-visual__hint">{{ getPreviewLayout(slide.layout) === 'visual-focus' ? '点击生成图片' : '视觉素材' }}</span>
               </div>
               <div class="preview-accent-strip" :style="{ background: colors.accent }" />
               <div class="preview-overlay-icon">
@@ -438,11 +431,13 @@ function getLayoutLabel(layout?: string): string {
   max-width: 100%;
 }
 
-.preview-slide-canvas--full-image {
+.preview-slide-canvas--full-image,
+.preview-slide-canvas--visual-focus {
   position: relative;
 }
 
-.preview-slide-canvas--full-image .preview-accent-strip {
+.preview-slide-canvas--full-image .preview-accent-strip,
+.preview-slide-canvas--visual-focus .preview-accent-strip {
   z-index: 3;
 }
 

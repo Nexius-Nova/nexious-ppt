@@ -689,9 +689,9 @@ router.post('/generate-outline-stream', authMiddleware, async (req: AuthRequest,
 7. 请根据内容量和逻辑结构自主决定合适的页数，确保内容完整且不过于冗长
 8. 推荐版式（layout）必须是以下之一：
    - "text-only"：纯文字，适合概念阐述、总结归纳
-   - "text-image"：左文右图，适合图文并重的说明
-   - "image-text"：左图右文，适合以图为主的内容
-   - "full-image"：全幅图片背景+少量文字，适合视觉冲击力强的页面
+   - "mixed-media"：图文或素材混排，图片位置由页面内容自主决定
+   - "visual-focus"：视觉主导，图片或图形可作为主视觉但位置不固定
+   - "media-grid"：多素材展示，适合案例、产品、过程或对比内容
    - "title-center"：居中标题+要点，适合开场、过渡、总结
    - "two-column"：双栏布局，适合对比、并列内容
    根据每页内容特点选择最合适的版式，让排版丰富多样，避免所有页面使用同一种版式
@@ -868,7 +868,9 @@ router.get('/proxy-image', authMiddleware, async (req: AuthRequest, res: Respons
 
 router.post('/generate-image-stream', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { slideId, title, prompt, style, imageModelId } = req.body;
+    const { slideId, assetId, title, prompt, purpose, style, imageModelId } = req.body;
+    const safeAssetId = String(assetId || 'img-1').replace(/[^\w-]/g, '-').slice(0, 40) || 'img-1';
+    const imageId = `${slideId}-${safeAssetId}`;
 
     const defaultKey = await resolveGenerationApiKey(req.userId!, 'image', imageModelId);
     if (!defaultKey) {
@@ -894,16 +896,18 @@ router.post('/generate-image-stream', authMiddleware, async (req: AuthRequest, r
 
     try {
       const rawImageUrl = await generateImage(provider, apiKey, model, prompt, style, baseUrl);
-      const imageUrl = await persistDataImage(rawImageUrl, slideId);
+      const imageUrl = await persistDataImage(rawImageUrl, imageId);
 
       res.write(
         `data: ${JSON.stringify({
           status: 'complete',
           data: {
-            id: `${slideId}-image-1`,
+            id: imageId,
             slideId,
+            assetId: safeAssetId,
             title,
             prompt,
+            purpose,
             style,
             url: imageUrl,
             selected: true,
@@ -927,10 +931,12 @@ router.post('/generate-image-stream', authMiddleware, async (req: AuthRequest, r
           status: 'error',
           message: errorMessage,
           data: {
-            id: `${slideId}-image-1`,
+            id: imageId,
             slideId,
+            assetId: safeAssetId,
             title,
             prompt,
+            purpose,
             style,
             url: '',
             selected: true,

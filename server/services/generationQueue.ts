@@ -14,7 +14,6 @@ import {
   buildSpecLock,
   buildStrategistPrompt,
   buildSvgQualityRepairPrompt,
-  calculateImageSlot,
   cleanSvgOutput,
   ensureImageUsedInSvg,
   finalizeSvgQuality,
@@ -24,8 +23,8 @@ import {
 import { streamText } from './textModel.js';
 import { generateImage, persistDataImage } from '../routes/ai.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
-import type { DesignSpec, ImageSlot, SpecLock, SpecSlide, StrategistInput } from '../engine/index.js';
-import { buildSlideImagePrompt, inferImageCompositionIntent } from '../engine/imageComposition.js';
+import type { DesignSpec, SpecLock, SpecSlide, StrategistInput } from '../engine/index.js';
+import { buildSlideImagePrompt } from '../engine/imageComposition.js';
 import { exportWithNexiousPpt, type PptExportOptions, type PptExportPage } from '../engine/ppt-exporter.js';
 import { generatedExportsRoot } from '../utils/storage.js';
 import { deriveWorkflowTransition, workflowStepProgress, workflowStepStatus } from './workflowStateMachine.js';
@@ -127,15 +126,16 @@ interface ImageModelConfig {
 interface ServerImage {
   id: string;
   slideId: string;
+  assetId?: string;
   title: string;
   prompt: string;
+  purpose?: string;
   style: string;
   url: string;
   selected: boolean;
   attempt?: number;
   error?: boolean;
   errorMessage?: string;
-  imageSlot?: ImageSlot;
 }
 
 const jobs = new Map<string, QueuedJob>();
@@ -776,6 +776,16 @@ function normalizeStreamingSpecSlide(item: any, index: number): SpecSlide {
       : [],
     speakerNotes: String(item?.speakerNotes || ''),
     visualPrompt: String(item?.visualPrompt || ''),
+    imagePlan: Array.isArray(item?.imagePlan)
+      ? item.imagePlan
+          .map((plan: any, planIndex: number) => ({
+            id: String(plan?.id || `img-${planIndex + 1}`),
+            prompt: String(plan?.prompt || '').trim(),
+            purpose: plan?.purpose ? String(plan.purpose) : undefined,
+            style: plan?.style ? String(plan.style) : undefined,
+          }))
+          .filter((plan: any) => plan.prompt)
+      : undefined,
     layout: String(item?.layout || 'content') as SpecSlide['layout'],
     rhythm: item?.rhythm === 'anchor' || item?.rhythm === 'dense' || item?.rhythm === 'breathing'
       ? item.rhythm
@@ -1071,47 +1081,101 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   });
 }
 
-const IMAGE_LAYOUTS = new Set(['content-image', 'text-image', 'image-text', 'full-image']);
-const IMAGE_INTENT_PATTERN =
-  /(配图|图片|插图|图示|示意图|视觉|场景图|海报|照片|封面图|背景图|产品图|架构图|流程图|路线图|信息图|生成图|image|illustration|visual|photo|poster|diagram|infographic)/i;
+type SlideImagePlan = NonNullable<SpecSlide['imagePlan']>[number];
+
+function normalizeServerImagePlans(slide: SpecSlide): SlideImagePlan[] {
+  const rawPlans = Array.isArray(slide.imagePlan) ? slide.imagePlan : [];
+  const plans = rawPlans
+    .slice(0, 4)
+    .map((plan: any, index) => {
+      const prompt = String(plan?.prompt || '').trim();
+      if (!prompt) return null;
+      return {
+        id: String(plan?.id || `img-${index + 1}`).replace(/[^\w-]/g, '-').slice(0, 40) || `img-${index + 1}`,
+        prompt,
+        purpose: plan?.purpose ? String(plan.purpose).slice(0, 40) : undefined,
+        style: plan?.style ? String(plan.style).slice(0, 80) : undefined,
+      };
+    })
+    .filter(Boolean) as SlideImagePlan[];
+
+  if (plans.length) return plans;
+
+  const legacyVisualPrompt = String(slide.visualPrompt || '').trim();
+  if (!legacyVisualPrompt || Array.isArray(slide.imagePlan)) return [];
+  return [{ id: 'img-1', prompt: legacyVisualPrompt, purpose: 'supporting' }];
+}
 
 function slideNeedsImageServer(slide: SpecSlide) {
-  if (String(slide.visualPrompt || '').trim()) return true;
-  if (IMAGE_LAYOUTS.has(String(slide.layout || ''))) return true;
-
-  const text = [
-    slide.title,
-    ...(slide.bullets || []),
-    slide.speakerNotes,
-    slide.chartHint,
-  ].filter(Boolean).join(' ');
-
-  return IMAGE_INTENT_PATTERN.test(text);
+  return normalizeServerImagePlans(slide).length > 0;
 }
 
-function imagePromptForSlide(slide: SpecSlide, spec?: DesignSpec) {
-  return buildSlideImagePrompt(slide, spec ? calculateImageSlot(slide, spec) : undefined);
+function imagePromptForPlan(slide: SpecSlide, plan: SlideImagePlan) {
+  return [
+    plan.prompt,
+    `用于第 ${slide.pageNumber} 页「${slide.title}」的图片素材`,
+    plan.purpose ? `用途：${plan.purpose}` : '',
+    plan.style ? `风格：${plan.style}` : '',
+    '不要生成文字、水印、截图边框或 UI 外壳；最终由页面生成 AI 自主裁切、缩放、旋转和排版',
+  ].filter(Boolean).join('。');
 }
 
-function findReadyServerImage(images: any[], slideId: string) {
-  return images.find((item) => item.slideId === slideId && item.selected && item.url && !item.error);
+function findReadyServerImage(images: any[], slideId: string, assetId = 'img-1') {
+  return images.find((item) =>
+    item.slideId === slideId &&
+    (item.assetId || 'img-1') === assetId &&
+    item.selected &&
+    item.url &&
+    !item.error
+  );
 }
 
-function findMissingRequiredImageSlides(spec: DesignSpec, images: any[]) {
-  return spec.outline.filter((slide) => slideNeedsImageServer(slide) && !findReadyServerImage(images, slide.id));
+function findReadyServerImagesForSlide(images: any[], slide: SpecSlide) {
+  return normalizeServerImagePlans(slide)
+    .map((plan) => findReadyServerImage(images, slide.id, plan.id))
+    .filter(Boolean) as ServerImage[];
+}
+
+function findMissingRequiredImagePlans(spec: DesignSpec, images: any[]) {
+  return spec.outline.flatMap((slide) =>
+    normalizeServerImagePlans(slide)
+      .filter((plan) => !findReadyServerImage(images, slide.id, plan.id))
+      .map((plan) => ({ slide, plan }))
+  );
 }
 
 function sortImagesByOutline(images: any[], spec: DesignSpec) {
-  return images.slice().sort((a, b) => spec.outline.findIndex((s) => s.id === a.slideId) - spec.outline.findIndex((s) => s.id === b.slideId));
+  const slideIndex = new Map(spec.outline.map((slide, index) => [slide.id, index]));
+  return images.slice().sort((a, b) => {
+    const slideOrder = (slideIndex.get(a.slideId) ?? 9999) - (slideIndex.get(b.slideId) ?? 9999);
+    if (slideOrder !== 0) return slideOrder;
+    return String(a.assetId || a.id || '').localeCompare(String(b.assetId || b.id || ''));
+  });
 }
 
 function upsertServerImage(images: any[], image: any) {
-  const existingIndex = images.findIndex((item) => item.slideId === image.slideId);
+  const existingIndex = images.findIndex((item) =>
+    item.id === image.id ||
+    (item.slideId === image.slideId && (item.assetId || 'img-1') === (image.assetId || 'img-1'))
+  );
   if (existingIndex >= 0) {
     images[existingIndex] = image;
   } else {
     images.push(image);
   }
+}
+
+function toExecutorImageAssets(images: any[]) {
+  return images
+    .filter((image) => image?.url && image.selected !== false && !image.error)
+    .map((image) => ({
+      id: image.assetId || image.id,
+      url: image.url,
+      title: image.title,
+      prompt: image.prompt,
+      purpose: image.purpose,
+      style: image.style,
+    }));
 }
 
 function isFallbackSvgPage(svg?: string) {
@@ -1150,39 +1214,36 @@ async function loadImageModelConfig(job: GenerateQueuedJob): Promise<ImageModelC
 
 async function generateSlideImageForQueue(
   job: GenerateQueuedJob,
-  spec: DesignSpec,
   slide: SpecSlide,
+  plan: SlideImagePlan,
   config: ImageModelConfig,
   attempt: number
 ): Promise<ServerImage> {
   await assertJobActive(job);
-  const imageSlot = calculateImageSlot(slide, spec);
-  const prompt = imagePromptForSlide(slide, spec);
-  const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, job.payload.input.imageStyle, config.baseUrl, {
-    ...imageSlot,
-    layout: slide.layout,
-    intent: inferImageCompositionIntent(slide),
-  });
+  const prompt = imagePromptForPlan(slide, plan);
+  const style = plan.style || job.payload.input.imageStyle;
+  const rawImageUrl = await generateImage(config.provider, config.apiKey, config.model, prompt, style, config.baseUrl);
   await assertJobActive(job);
-  const url = await persistDataImage(rawImageUrl, slide.id);
+  const url = await persistDataImage(rawImageUrl, `${slide.id}-${plan.id}`);
 
   return {
-    id: `${slide.id}-image-1`,
+    id: `${slide.id}-${plan.id}`,
     slideId: slide.id,
-    title: slide.title,
+    assetId: plan.id,
+    title: `${slide.title} / ${plan.purpose || plan.id}`,
     prompt,
-    style: job.payload.input.imageStyle,
+    purpose: plan.purpose,
+    style,
     url,
     selected: true,
     attempt,
-    imageSlot,
   };
 }
 
 async function generateSlideImageWithAutoRetry(
   job: GenerateQueuedJob,
-  spec: DesignSpec,
   slide: SpecSlide,
+  plan: SlideImagePlan,
   config: ImageModelConfig,
   progress: number
 ): Promise<ServerImage> {
@@ -1194,32 +1255,35 @@ async function generateSlideImageWithAutoRetry(
       await updateJob(job, {
         phase: 'images',
         progress,
-        message: attempt === 1 ? `正在生成图片：${slide.title}` : `正在自动重试图片：${slide.title}`,
+        message: attempt === 1
+          ? `正在生成图片素材：${slide.title} / ${plan.purpose || plan.id}`
+          : `正在自动重试图片素材：${slide.title} / ${plan.purpose || plan.id}`,
       });
-      return await generateSlideImageForQueue(job, spec, slide, config, attempt);
+      return await generateSlideImageForQueue(job, slide, plan, config, attempt);
     } catch (error) {
       lastError = error;
       if (attempt < IMAGE_GENERATION_ATTEMPTS) {
         await updateJob(job, {
           phase: 'images',
           progress,
-          message: `图片生成失败，正在自动重试：${slide.title}`,
+          message: `图片素材生成失败，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
         });
       }
     }
   }
 
   return {
-    id: `${slide.id}-image-1`,
+    id: `${slide.id}-${plan.id}`,
     slideId: slide.id,
-    title: slide.title,
-    prompt: imagePromptForSlide(slide, spec),
-    style: job.payload.input.imageStyle,
+    assetId: plan.id,
+    title: `${slide.title} / ${plan.purpose || plan.id}`,
+    prompt: imagePromptForPlan(slide, plan),
+    purpose: plan.purpose,
+    style: plan.style || job.payload.input.imageStyle,
     url: '',
     selected: true,
     error: true,
     errorMessage: lastError instanceof Error ? lastError.message : '图片生成失败',
-    imageSlot: calculateImageSlot(slide, spec),
   };
 }
 
@@ -1232,46 +1296,45 @@ async function maybeGenerateImages(
 ) {
   const results: any[] = sortImagesByOutline(existingImages, spec);
   if (job.payload.includeImages === false) return results;
-  const slides = spec.outline
-    .filter(slideNeedsImageServer)
-    .filter((slide) => !findReadyServerImage(results, slide.id));
-  if (!slides.length) return results;
+  const tasks = findMissingRequiredImagePlans(spec, results);
+  if (!tasks.length) return results;
 
   const imageConfig = await loadImageModelConfig(job);
   let cursor = 0;
   let completed = 0;
 
   async function worker() {
-    while (cursor < slides.length) {
+    while (cursor < tasks.length) {
       await assertJobActive(job);
-      const slide = slides[cursor++];
-      const progress = 30 + Math.round((completed / Math.max(1, slides.length)) * 12);
-      const image = await generateSlideImageWithAutoRetry(job, spec, slide, imageConfig, progress);
+      const { slide, plan } = tasks[cursor++];
+      const progress = 30 + Math.round((completed / Math.max(1, tasks.length)) * 12);
+      const image = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, progress);
       await assertJobActive(job);
       upsertServerImage(results, image);
       completed += 1;
-      const nextProgress = 30 + Math.round((completed / Math.max(1, slides.length)) * 12);
+      const nextProgress = 30 + Math.round((completed / Math.max(1, tasks.length)) * 12);
       await updateJob(job, {
         phase: 'images',
         progress: Math.min(44, nextProgress),
         message: image.error
-          ? `图片未生成：${slide.title}`
-          : `图片完成：${slide.title}，${completed}/${slides.length}`,
+          ? `图片素材未生成：${slide.title} / ${plan.purpose || plan.id}`
+          : `图片素材完成：${slide.title} / ${plan.purpose || plan.id}，${completed}/${tasks.length}`,
         result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(results, spec), svgPages: sortServerSvgPages(existingPages) },
       });
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(IMAGE_CONCURRENCY, slides.length) }, () => worker()));
-  const missingSlides = findMissingRequiredImageSlides(spec, results);
-  if (missingSlides.length) {
+  await Promise.all(Array.from({ length: Math.min(IMAGE_CONCURRENCY, tasks.length) }, () => worker()));
+  const missingPlans = findMissingRequiredImagePlans(spec, results);
+  if (missingPlans.length) {
+    const missingText = missingPlans.map(({ slide, plan }) => `${slide.title}/${plan.purpose || plan.id}`).join('、');
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: `图片自动重试后仍未完成：${missingSlides.map((slide) => slide.title).join('、')}`,
+      message: `图片自动重试后仍未完成：${missingText}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(results, spec), svgPages: sortServerSvgPages(existingPages) },
     });
-    throw new Error(`图片自动重试后仍未完成：${missingSlides.map((slide) => slide.title).join('、')}。请手动重试图片后再继续。`);
+    throw new Error(`图片自动重试后仍未完成：${missingText}。请手动重试图片后再继续。`);
   }
   return sortImagesByOutline(results, spec);
 }
@@ -1279,42 +1342,43 @@ async function maybeGenerateImages(
 async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: DesignSpec, lock: SpecLock, images: any[]) {
   if (job.payload.includeImages === false) return;
 
-  let missingSlides = findMissingRequiredImageSlides(spec, images);
-  if (!missingSlides.length) return;
+  let missingPlans = findMissingRequiredImagePlans(spec, images);
+  if (!missingPlans.length) return;
 
   const imageConfig = await loadImageModelConfig(job);
-  for (const slide of missingSlides) {
+  for (const { slide, plan } of missingPlans) {
     await assertJobActive(job);
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: `第 ${slide.pageNumber} 页缺少可用图片，正在自动重试：${slide.title}`,
+      message: `第 ${slide.pageNumber} 页缺少可用图片素材，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
       result: { spec, lock, outline: spec.outline, images, svgPages: [] },
     });
-    const image = await generateSlideImageWithAutoRetry(job, spec, slide, imageConfig, 45);
+    const image = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, 45);
     await assertJobActive(job);
     upsertServerImage(images, image);
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: image.error ? `图片未生成：${slide.title}` : `图片完成：${slide.title}`,
+      message: image.error ? `图片素材未生成：${slide.title}` : `图片素材完成：${slide.title}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: [] },
     });
   }
 
-  missingSlides = findMissingRequiredImageSlides(spec, images);
-  if (missingSlides.length) {
+  missingPlans = findMissingRequiredImagePlans(spec, images);
+  if (missingPlans.length) {
+    const missingText = missingPlans.map(({ slide, plan }) => `${slide.title}/${plan.purpose || plan.id}`).join('、');
     await updateJob(job, {
       phase: 'images',
       progress: 45,
-      message: `图片自动重试后仍未完成：${missingSlides.map((slide) => slide.title).join('、')}`,
+      message: `图片自动重试后仍未完成：${missingText}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: [] },
     });
-    throw new Error(`图片自动重试后仍未完成：${missingSlides.map((slide) => slide.title).join('、')}。请手动重试图片后再继续。`);
+    throw new Error(`图片自动重试后仍未完成：${missingText}。请手动重试图片后再继续。`);
   }
 }
 
-async function ensureServerImageForLayout(
+async function ensureServerImagesForLayout(
   job: GenerateQueuedJob,
   spec: DesignSpec,
   lock: SpecLock,
@@ -1323,40 +1387,45 @@ async function ensureServerImageForLayout(
   pages: Array<{ pageNumber: number; svg: string; speakerNotes: string }>
 ) {
   if (job.payload.includeImages === false || !slideNeedsImageServer(slide)) {
-    return undefined;
+    return [];
   }
 
-  const existingImage = findReadyServerImage(images, slide.id);
-  if (existingImage) return existingImage;
+  const plans = normalizeServerImagePlans(slide);
+  const existingImages = findReadyServerImagesForSlide(images, slide);
+  if (existingImages.length >= plans.length) return existingImages;
 
   await assertJobActive(job);
   const imageConfig = await loadImageModelConfig(job);
-  await updateJob(job, {
-    phase: 'images',
-    progress: 45,
-    message: `第 ${slide.pageNumber} 页缺少可用图片，正在自动重试：${slide.title}`,
-    result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
-  });
+  const missingPlans = plans.filter((plan) => !findReadyServerImage(images, slide.id, plan.id));
+  for (const plan of missingPlans) {
+    await updateJob(job, {
+      phase: 'images',
+      progress: 45,
+      message: `第 ${slide.pageNumber} 页缺少可用图片素材，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
+      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
+    });
 
-  const retryImage = await generateSlideImageWithAutoRetry(job, spec, slide, imageConfig, 45);
-  await assertJobActive(job);
-  upsertServerImage(images, retryImage);
-  await updateJob(job, {
-    phase: 'images',
-    progress: 45,
-    message: retryImage.error ? `图片未生成：${slide.title}` : `图片完成：${slide.title}`,
-    result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
-  });
-  const readyImage = findReadyServerImage(images, slide.id);
-  if (readyImage) return readyImage;
+    const retryImage = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, 45);
+    await assertJobActive(job);
+    upsertServerImage(images, retryImage);
+    await updateJob(job, {
+      phase: 'images',
+      progress: 45,
+      message: retryImage.error ? `图片素材未生成：${slide.title}` : `图片素材完成：${slide.title}`,
+      result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
+    });
+  }
+
+  const readyImages = findReadyServerImagesForSlide(images, slide);
+  if (readyImages.length >= plans.length) return readyImages;
 
   await updateJob(job, {
     phase: 'images',
     progress: 45,
-    message: `第 ${slide.pageNumber} 页图片自动重试后仍未完成：${slide.title}`,
+    message: `第 ${slide.pageNumber} 页图片素材自动重试后仍未完成：${slide.title}`,
     result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
   });
-  throw new Error(`第 ${slide.pageNumber} 页需要图片，但图片自动重试后仍未生成：${slide.title}`);
+  throw new Error(`第 ${slide.pageNumber} 页需要图片素材，但图片自动重试后仍未生成：${slide.title}`);
 }
 
 async function generateSvgPages(
@@ -1390,9 +1459,9 @@ async function generateSvgPages(
         message: `正在生成第 ${slide.pageNumber} 页：${slide.title}`,
       });
 
-      const image = await ensureServerImageForLayout(job, spec, lock, slide, images, pages);
+      const slideImages = await ensureServerImagesForLayout(job, spec, lock, slide, images, pages);
       await assertJobActive(job);
-      const svg = await generatePageSvg(spec, lock, slide, image?.url, provider, apiKey, baseUrl, model);
+      const svg = await generatePageSvg(spec, lock, slide, slideImages, provider, apiKey, baseUrl, model);
       await assertJobActive(job);
       upsertServerSvgPage(pages, { pageNumber: slide.pageNumber, svg, speakerNotes: slide.speakerNotes || '' });
       completed += 1;
@@ -1413,7 +1482,7 @@ async function generatePageSvg(
   spec: DesignSpec,
   lock: SpecLock,
   slide: SpecSlide,
-  imageUrl: string | undefined,
+  slideImages: any[],
   provider: string,
   apiKey: string,
   baseUrl: string,
@@ -1443,12 +1512,12 @@ async function generatePageSvg(
     forbidden: (lock as any).forbidden || DEFAULT_FORBIDDEN,
   } as any;
 
-  const imageSlot = calculateImageSlot(slide, spec);
   const iconGuide = await getIconGuide(slimLock.iconStyle);
   const chartTemplateSvg = await getChartSvg(slimLock.pageCharts[pageKey] || slide.chartHint);
   const executorContext = { iconGuide, chartTemplateSvg };
   const systemPrompt = buildExecutorSystemPrompt(slimSpec, slimLock, executorContext);
-  const userPrompt = buildExecutorPagePrompt(slide, slimSpec, slimLock, imageUrl, imageSlot, executorContext);
+  const imageAssets = toExecutorImageAssets(slideImages);
+  const userPrompt = buildExecutorPagePrompt(slide, slimSpec, slimLock, imageAssets, undefined, executorContext);
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1457,18 +1526,18 @@ async function generatePageSvg(
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ]);
-      const rawSvg = ensureImageUsedInSvg(cleanSvgOutput(output), slide, spec, imageUrl);
+      const rawSvg = ensureImageUsedInSvg(cleanSvgOutput(output), slide, spec, imageAssets);
       if (!rawSvg || !rawSvg.includes('<svg') || !rawSvg.includes('</svg>')) {
         throw new Error('AI 返回的 SVG 内容不完整');
       }
-      let quality = finalizeSvgQuality(rawSvg, spec, slide, imageSlot, imageUrl);
+      let quality = finalizeSvgQuality(rawSvg, spec, slide, undefined, imageAssets);
       if (quality.blockingIssues.length) {
         const repairOutput = await streamText(provider, apiKey, baseUrl, model, [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, imageSlot, quality.blockingIssues, imageUrl) },
+          { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, imageAssets) },
         ]);
-        const repairedSvg = ensureImageUsedInSvg(cleanSvgOutput(repairOutput), slide, spec, imageUrl);
-        quality = finalizeSvgQuality(repairedSvg || quality.svg, spec, slide, imageSlot, imageUrl);
+        const repairedSvg = ensureImageUsedInSvg(cleanSvgOutput(repairOutput), slide, spec, imageAssets);
+        quality = finalizeSvgQuality(repairedSvg || quality.svg, spec, slide, undefined, imageAssets);
       }
       if (quality.blockingIssues.length && attempt < 3) {
         throw new Error(`页面质量检查未通过：${summarizeSvgQualityIssues(quality.blockingIssues, 3)}`);

@@ -123,6 +123,7 @@ onUnmounted(() => {
 .ui-select {
   position: relative;
   width: 100%;
+  border-width: 0 !important;
 }
 
 .ui-select--disabled {
