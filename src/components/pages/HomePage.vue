@@ -1,26 +1,21 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   ArrowRight,
   Bot,
-  Boxes,
   CheckCircle2,
-  ClipboardCheck,
   Download,
+  FileCheck2,
   FileText,
-  FolderKanban,
   Layers3,
+  MonitorPlay,
   PanelTop,
-  Play,
-  ScanLine,
   Sparkles,
   Upload,
-  Wand2,
-  Zap
+  Wand2
 } from 'lucide-vue-next';
 import GeneratedDeckPreview from '@/components/home/GeneratedDeckPreview.vue';
-import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import { useAuthStore } from '@/stores/authStore';
 
@@ -37,7 +32,7 @@ interface ShowcaseProject {
 const router = useRouter();
 const authStore = useAuthStore();
 
-const primaryActionText = computed(() => (authStore.token ? '进入工作台' : '免费开始'));
+const actionText = computed(() => (authStore.token ? '进入工作台' : '开始使用'));
 
 const showcaseProjects: ShowcaseProject[] = [
   {
@@ -75,63 +70,69 @@ const showcaseProjects: ShowcaseProject[] = [
   }
 ];
 
-const heroChecks = ['Input', 'Skill', 'Agent', 'PPT'];
-
-const productMetrics = [
-  { value: '01', label: 'INPUT', detail: '资料汇入' },
-  { value: '02', label: 'COMPOSE', detail: 'Agent 成稿' },
-  { value: '03', label: 'EXPORT', detail: 'PPT 交付' }
+const navItems = [
+  { label: '工作流', target: 'workflow' },
+  { label: '预览', target: 'preview' },
+  { label: '能力', target: 'features' },
 ];
 
 const workflowSteps = [
   {
-    label: '输入',
-    title: 'INPUT',
-    detail: '资料 / 主题 / 链接',
+    title: '输入资料',
+    label: 'INPUT',
+    detail: '上传文档、主题、链接或关键要点，先把素材放进统一上下文。',
     icon: Upload
   },
   {
-    label: '编排',
-    title: 'SKILL',
-    detail: '场景 / 风格 / 结构',
-    icon: Boxes
+    title: '选择 Skill',
+    label: 'SKILL',
+    detail: '按路演、课程、活动方案等场景匹配生成策略。',
+    icon: Sparkles
   },
   {
-    label: '生成',
-    title: 'AGENT',
-    detail: '大纲 / 页面 / 质检',
+    title: 'Agent 生成',
+    label: 'AGENT',
+    detail: '生成大纲、页面内容和版式初稿，保留可审阅节点。',
     icon: Bot
   },
   {
-    label: '交付',
-    title: 'PPTX',
-    detail: '预览 / 导出 / 编辑',
+    title: '预览编辑',
+    label: 'PREVIEW',
+    detail: '先看页面结果，再继续调整内容、结构和视觉表达。',
+    icon: PanelTop
+  },
+  {
+    title: '导出交付',
+    label: 'PPTX',
+    detail: '完成质检后导出可演示、可修改的 PPT 文件。',
     icon: Download
   }
 ];
 
-const featureCards = [
+const features = [
   {
-    title: 'Deck Pipeline',
-    detail: '资料到页面的生成轨道',
+    title: '结构先行',
+    text: '先生成大纲和章节关系，避免一开始就陷入页面细节。',
     icon: Layers3
   },
   {
-    title: 'Skill Engine',
-    detail: '场景策略即插即用',
+    title: 'Skill 驱动',
+    text: '把不同演示场景拆成可复用能力，让生成结果更贴近目的。',
     icon: Sparkles
   },
   {
-    title: 'Live Preview',
-    detail: '先看页面，再做判断',
-    icon: PanelTop
+    title: '真实预览',
+    text: '生成页面可以立即预览，方便判断方向、重试和继续编辑。',
+    icon: MonitorPlay
   },
   {
-    title: 'Workspace',
-    detail: '项目、模板、模型归档',
-    icon: FolderKanban
+    title: '交付闭环',
+    text: '从资料到 PPT 文件，覆盖生成、质检、导出和后续维护。',
+    icon: FileCheck2
   }
 ];
+
+const scenes = ['活动策划', '产品发布', '培训课件', '项目复盘', '商业路演', '知识科普'];
 
 function enterConsole() {
   void router.push(authStore.token ? '/my-ppt' : '/login');
@@ -144,154 +145,114 @@ function scrollToSection(id: string) {
 
 <template>
   <main class="home-page">
-    <header class="home-nav">
-      <button class="brand" type="button" aria-label="返回 Nexious PPT 首页" @click="scrollToSection('top')">
+    <header class="home-header">
+      <button class="brand" type="button" aria-label="返回首页" @click="scrollToSection('top')">
         <span class="brand__mark">
-          <Zap :size="17" aria-hidden="true" />
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect width="24" height="24" rx="6" fill="var(--color-accent)" />
+            <path d="M7 12L9.5 9.5L12 12L14.5 9.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M7 15L9.5 12.5L12 15L14.5 12.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.6" />
+          </svg>
         </span>
-        <span class="brand__copy">
+        <span>
           <strong>NEXIOUS PPT</strong>
           <small>AI Deck Agent</small>
         </span>
       </button>
 
-      <nav class="home-nav__links" aria-label="产品页导航">
-        <button type="button" @click="scrollToSection('workflow')">流程</button>
-        <button type="button" @click="scrollToSection('preview')">预览</button>
-        <button type="button" @click="scrollToSection('features')">能力</button>
+      <nav class="home-header__nav" aria-label="首页导航">
+        <button v-for="item in navItems" :key="item.target" type="button" @click="scrollToSection(item.target)">
+          {{ item.label }}
+        </button>
       </nav>
 
       <UiButton size="sm" variant="primary" @click="enterConsole">
-        {{ primaryActionText }}
+        {{ actionText }}
         <ArrowRight :size="15" aria-hidden="true" />
       </UiButton>
     </header>
 
     <section id="top" class="hero" aria-labelledby="home-title">
-      <div class="hero__copy">
-        <UiBadge tone="accent" size="md">
-          <ScanLine :size="13" aria-hidden="true" />
-          AI PPT 生产工作台
-        </UiBadge>
-
+      <div class="hero__content">
+        <span class="hero__badge">
+          <span class="hero__pulse" />
+          AI PPT Agent 在线
+        </span>
         <h1 id="home-title">Nexious PPT</h1>
         <p class="hero__lead">资料进场，演示成型。</p>
-
-        <div class="hero-signal" aria-label="生成状态">
-          <span>INPUT</span>
-          <i />
-          <span>SKILL</span>
-          <i />
-          <span>AGENT</span>
-          <i />
-          <span>PPTX</span>
-        </div>
+        <p class="hero__desc">
+          仿照产品官网的清晰叙事，把输入、Skill、Agent 生成、预览和导出组织成一条可理解的 PPT 生产通道。
+        </p>
 
         <div class="hero__actions">
           <UiButton size="lg" variant="primary" @click="enterConsole">
-            <Play :size="17" aria-hidden="true" />
-            {{ primaryActionText }}
-          </UiButton>
-          <UiButton size="lg" variant="secondary" @click="scrollToSection('preview')">
-            查看生成效果
+            {{ actionText }}
             <ArrowRight :size="17" aria-hidden="true" />
           </UiButton>
+          <UiButton size="lg" variant="secondary" @click="scrollToSection('preview')">
+            查看生成预览
+          </UiButton>
         </div>
-
-        <ul class="hero__checks" aria-label="产品亮点">
-          <li v-for="item in heroChecks" :key="item">
-            <CheckCircle2 :size="16" aria-hidden="true" />
-            {{ item }}
-          </li>
-        </ul>
       </div>
 
-      <aside class="hero-board" aria-label="Nexious PPT 产品预览">
-        <div class="hero-board__toolbar">
+      <div class="hero-preview" aria-label="产品预览">
+        <div class="hero-preview__toolbar">
           <span />
-          <strong>LIVE DECK OUTPUT</strong>
-          <small>04 slides</small>
+          <strong>Deck Output</strong>
+          <small>Ready</small>
         </div>
-
-        <div class="hero-board__stage">
-          <img src="/home-previews/iphone/01.svg" alt="产品发布演示稿封面预览" />
-          <img src="/home-previews/film/02.svg" alt="知识科普课件核心问题页预览" />
-          <img src="/home-previews/chess/04.svg" alt="活动策划流程安排页预览" />
+        <div class="hero-preview__canvas">
+          <img src="/home-previews/iphone/01.svg" alt="产品发布演示封面预览" />
+          <img src="/home-previews/film/02.svg" alt="知识科普课件页面预览" />
+          <img src="/home-previews/chess/04.svg" alt="活动策划流程页面预览" />
         </div>
-
-        <div class="hero-board__status">
-          <span>
-            <Wand2 :size="15" aria-hidden="true" />
-            Agent 正在生成页面
-          </span>
-          <b>Ready for export</b>
-        </div>
-      </aside>
+      </div>
     </section>
 
-    <section class="metrics-section" aria-label="产品生成路径概览">
-      <article v-for="item in productMetrics" :key="item.label" class="metric-card">
-        <span>{{ item.value }}</span>
-        <strong>{{ item.label }}</strong>
-        <p>{{ item.detail }}</p>
-      </article>
-    </section>
-
-    <section id="workflow" class="product-section workflow-section" aria-labelledby="workflow-title">
-      <div class="section-heading">
+    <section id="workflow" class="section-block" aria-labelledby="workflow-title">
+      <div class="section-heading section-heading--center">
         <span class="section-kicker">Workflow</span>
-        <h2 id="workflow-title">四段生成轨道</h2>
+        <h2 id="workflow-title">一条清楚的 PPT Agent 工作流</h2>
+        <p>让用户知道每一步在做什么，也知道 Skill 在生成策略里起什么作用。</p>
       </div>
 
-      <ol class="workflow-list">
+      <ol class="workflow-grid">
         <li v-for="(step, index) in workflowSteps" :key="step.title">
-          <span class="workflow-list__index">{{ String(index + 1).padStart(2, '0') }}</span>
-          <span class="workflow-list__icon">
+          <span class="workflow-grid__index">{{ String(index + 1).padStart(2, '0') }}</span>
+          <span class="workflow-grid__icon">
             <component :is="step.icon" :size="18" />
           </span>
           <small>{{ step.label }}</small>
           <strong>{{ step.title }}</strong>
-          <div class="workflow-list__bars" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </div>
           <p>{{ step.detail }}</p>
         </li>
       </ol>
     </section>
 
-    <section id="preview" class="product-section preview-section" aria-labelledby="preview-title">
+    <section id="preview" class="section-block" aria-labelledby="preview-title">
       <div class="section-heading section-heading--split">
         <div>
           <span class="section-kicker">Preview</span>
-          <h2 id="preview-title">真实成稿预览</h2>
+          <h2 id="preview-title">ppt预览</h2>
         </div>
-        <p>活动 / 产品 / 课程</p>
       </div>
 
       <GeneratedDeckPreview :projects="showcaseProjects" />
     </section>
 
-    <section id="features" class="product-section feature-section" aria-labelledby="features-title">
-      <div class="section-heading">
-        <span class="section-kicker">Product DNA</span>
-        <h2 id="features-title">不是聊天，是出稿系统</h2>
+    <section id="features" class="section-block" aria-labelledby="features-title">
+      <div class="section-heading section-heading--center">
+        <span class="section-kicker">Core</span>
+        <h2 id="features-title">PPT 的核心能力</h2>
       </div>
 
       <div class="feature-grid">
-        <article v-for="item in featureCards" :key="item.title" class="feature-card">
+        <article v-for="feature in features" :key="feature.title" class="feature-card">
           <span>
-            <component :is="item.icon" :size="18" />
+            <component :is="feature.icon" :size="18" />
           </span>
-          <strong>{{ item.title }}</strong>
-          <div class="feature-card__meter" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-            <i />
-          </div>
-          <small>{{ item.detail }}</small>
+          <strong>{{ feature.title }}</strong>
+          <p>{{ feature.text }}</p>
         </article>
       </div>
     </section>
@@ -300,7 +261,8 @@ function scrollToSection(id: string) {
 
 <style scoped>
 .home-page {
-  --home-max-width: 1240px;
+  --home-max: 1180px;
+
   height: 100dvh;
   overflow-x: hidden;
   overflow-y: auto;
@@ -309,16 +271,16 @@ function scrollToSection(id: string) {
   scroll-behavior: smooth;
 }
 
-.home-nav {
+.home-header {
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: 30;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-4);
-  width: min(100%, var(--home-max-width));
-  min-height: 64px;
+  gap: 18px;
+  width: min(100%, var(--home-max));
+  min-height: 68px;
   margin: 0 auto;
   padding: 0 24px;
   border-bottom: 1px solid var(--color-border);
@@ -326,254 +288,201 @@ function scrollToSection(id: string) {
 }
 
 .brand,
-.brand__mark,
-.home-nav__links,
-.hero__actions,
-.hero__checks li,
-.hero-signal,
-.hero-board__status span,
+.home-header__nav,
+.hero__badge,
 .section-kicker,
-.workflow-list__icon,
-.feature-card span,
-.proof-panel li {
+.workflow-grid__icon,
+.feature-card span {
   display: inline-flex;
   align-items: center;
 }
 
 .brand {
   gap: 10px;
-  min-height: 44px;
-  min-width: 0;
   color: var(--color-text);
   text-align: left;
 }
 
 .brand__mark {
-  justify-content: center;
+  display: grid;
   width: 36px;
   height: 36px;
-  border: 1px solid var(--color-accent);
-  border-radius: 8px;
+  place-items: center;
+  border-radius: 10px;
   background: var(--color-accent);
   color: var(--color-inverse);
 }
 
-.brand__copy {
-  display: grid;
-  gap: 1px;
-}
-
-.brand__copy strong {
-  font-size: 13px;
-  font-weight: 900;
-  letter-spacing: 0;
+.brand strong,
+.brand small {
+  display: block;
   line-height: 1;
 }
 
-.brand__copy small {
+.brand strong {
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.brand small {
+  margin-top: 4px;
   color: var(--color-subtle);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 800;
-  line-height: 1;
 }
 
-.home-nav__links {
+.home-header__nav {
   justify-content: center;
-  gap: 4px;
+  gap: 6px;
 }
 
-.home-nav__links button {
-  min-width: 52px;
-  min-height: 44px;
+.home-header__nav button {
+  min-height: 38px;
   border-radius: 8px;
   color: var(--color-muted);
   padding: 0 12px;
   font-size: 13px;
   font-weight: 800;
-  transition:
-    background var(--transition-fast),
-    color var(--transition-fast);
 }
 
-.home-nav__links button:hover,
-.home-nav__links button:focus-visible {
+.home-header__nav button:hover {
   background: var(--color-panel);
   color: var(--color-text);
 }
 
-.home-nav :deep(.ui-button--sm) {
-  min-height: 44px;
-  padding-right: 14px;
-  padding-left: 14px;
-}
-
 .hero,
-.metrics-section,
-.product-section,
-.proof-section,
+.section-block,
 .final-cta {
-  width: min(100%, var(--home-max-width));
+  width: min(100%, var(--home-max));
   margin: 0 auto;
   padding-right: 24px;
   padding-left: 24px;
 }
 
-.product-section{
-  margin-bottom: 15px;
-}
-
 .hero {
   display: grid;
-  grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
-  gap: clamp(28px, 5vw, 72px);
-  align-items: center;
-  min-height: calc(100svh - 64px);
-  padding-top: clamp(42px, 6vw, 78px);
-  padding-bottom: clamp(42px, 6vw, 78px);
+  justify-items: center;
+  padding-top: clamp(52px, 8vw, 92px);
+  text-align: center;
 }
 
-.hero__copy {
-  min-width: 0;
+.hero__content {
+  max-width: 860px;
+}
+
+.hero__badge {
+  gap: 9px;
+  min-height: 36px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, var(--color-border));
+  border-radius: var(--radius-full);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.hero__pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-success);
+  box-shadow: 0 0 0 4px var(--color-success-soft);
 }
 
 .hero h1 {
-  margin: 18px 0 0;
+  margin: 22px 0 0;
   color: var(--color-text);
-  font-size: clamp(58px, 9vw, 116px);
+  font-size: clamp(58px, 10vw, 112px);
   font-weight: 950;
   letter-spacing: 0;
-  line-height: 0.88;
+  line-height: 0.94;
 }
 
 .hero__lead {
-  max-width: 720px;
-  margin-top: 20px;
+  margin-top: 14px;
   color: var(--color-text);
-  font-size: clamp(24px, 3.4vw, 46px);
+  font-size: clamp(28px, 4.4vw, 54px);
   font-weight: 900;
-  letter-spacing: 0;
-  line-height: 1.12;
+  line-height: 1.08;
+}
+
+.hero__desc {
+  max-width: 680px;
+  margin: 22px auto 0;
+  color: var(--color-muted);
+  font-size: clamp(15px, 1.7vw, 18px);
+  line-height: 1.78;
 }
 
 .hero__actions {
+  display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 12px;
   margin-top: 30px;
 }
 
-.hero-signal {
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 28px;
-  color: var(--color-subtle);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.hero-signal span {
-  display: inline-grid;
-  min-height: 38px;
-  place-items: center;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface);
-  padding: 0 12px;
-  box-shadow: var(--shadow-card);
-}
-
-.hero-signal i {
-  width: clamp(26px, 4vw, 58px);
-  height: 2px;
-  border-radius: var(--radius-full);
-  background: var(--color-accent);
-}
-
-.hero__checks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 26px;
-}
-
-.hero__checks li {
-  gap: 8px;
-  min-height: 40px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface);
-  color: var(--color-text-secondary);
-  padding: 0 12px;
-  font-size: 13px;
-  font-weight: 800;
-  box-shadow: var(--shadow-card);
-}
-
-.hero__checks svg {
-  color: var(--color-success);
-}
-
-.hero-board {
+.hero-preview {
+  width: min(100%, 1080px);
+  margin-top: 48px;
   border: 1px solid var(--color-border-strong);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--color-surface);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
-.hero-board__toolbar {
+.hero-preview__toolbar {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  min-height: 52px;
-  padding: 0 16px;
+  min-height: 50px;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-panel);
+  padding: 0 16px;
 }
 
-.hero-board__toolbar span {
+.hero-preview__toolbar span {
   width: 10px;
   height: 10px;
   border-radius: var(--radius-full);
   background: var(--color-accent);
-  box-shadow: 16px 0 0 var(--color-warning), 32px 0 0 var(--color-success);
+  box-shadow:
+    16px 0 0 var(--color-warning),
+    32px 0 0 var(--color-success);
 }
 
-.hero-board__toolbar strong,
-.hero-board__toolbar small,
+.hero-preview__toolbar strong,
+.hero-preview__toolbar small,
 .section-kicker {
   font-family: var(--font-mono);
+  font-size: 12px;
   font-weight: 900;
-  letter-spacing: 0;
   text-transform: uppercase;
 }
 
-.hero-board__toolbar strong {
-  margin-left: 34px;
+.hero-preview__toolbar strong {
   color: var(--color-subtle);
-  font-size: 11px;
+  text-align: left;
 }
 
-.hero-board__toolbar small {
-  color: var(--color-muted);
-  font-size: 11px;
+.hero-preview__toolbar small {
+  color: var(--color-success);
 }
 
-.hero-board__stage {
-  position: relative;
+.hero-preview__canvas {
   display: grid;
-  grid-template-columns: 1fr 0.62fr;
-  grid-template-rows: auto auto;
+  grid-template-columns: 1fr 0.64fr;
+  grid-template-rows: repeat(2, auto);
   gap: 12px;
   padding: 16px;
-  background: var(--color-card);
 }
 
-.hero-board__stage img {
+.hero-preview__canvas img {
   width: 100%;
-  min-width: 0;
   aspect-ratio: 16 / 9;
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -582,91 +491,24 @@ function scrollToSection(id: string) {
   box-shadow: var(--shadow-card);
 }
 
-.hero-board__stage img:first-child {
+.hero-preview__canvas img:first-child {
   grid-row: span 2;
   align-self: center;
 }
 
-.hero-board__status {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 54px;
-  padding: 0 16px;
-  border-top: 1px solid var(--color-border);
-  color: var(--color-muted);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.hero-board__status span {
-  gap: 8px;
-}
-
-.hero-board__status svg {
-  color: var(--color-accent);
-}
-
-.hero-board__status b {
-  color: var(--color-success);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  text-transform: uppercase;
-}
-
-.metrics-section {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  padding-top: 10px;
-}
-
-.metric-card,
-.workflow-list li,
-.feature-card {
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface);
-  box-shadow: var(--shadow-card);
-}
-
-.metric-card {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 14px;
-  padding: 18px;
-}
-
-.metric-card span {
-  grid-row: span 2;
-  color: var(--color-accent);
-  font-family: var(--font-mono);
-  font-size: 28px;
-  font-weight: 900;
-  line-height: 1;
-}
-
-.metric-card strong {
-  color: var(--color-text);
-  font-size: 15px;
-  font-weight: 900;
-}
-
-.metric-card p {
-  color: var(--color-muted);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.product-section,
-.proof-section {
-  padding-top: clamp(64px, 9vw, 104px);
+.section-block {
+  padding-top: clamp(72px, 10vw, 118px);
 }
 
 .section-heading {
   max-width: 760px;
-  margin-bottom: 22px;
+  margin-bottom: 24px;
+}
+
+.section-heading--center {
+  margin-right: auto;
+  margin-left: auto;
+  text-align: center;
 }
 
 .section-heading--split {
@@ -680,132 +522,93 @@ function scrollToSection(id: string) {
 .section-kicker {
   gap: 8px;
   color: var(--color-accent);
-  font-size: 12px;
 }
 
-.section-heading h2,
-.proof-panel h2 {
-  margin-top: 8px;
+.section-heading h2 {
+  margin-top: 10px;
   color: var(--color-text);
-  font-size: clamp(30px, 4vw, 54px);
+  font-size: clamp(30px, 4.4vw, 56px);
   font-weight: 950;
-  letter-spacing: 0;
   line-height: 1.05;
 }
 
-.section-heading p,
-.proof-panel p {
-  margin-top: 10px;
+.section-heading p {
+  margin-top: 12px;
   color: var(--color-muted);
   font-size: 15px;
   line-height: 1.72;
 }
 
 .section-heading--split p {
-  max-width: 440px;
+  max-width: 430px;
   margin-top: 0;
 }
 
-.workflow-list {
+.workflow-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.workflow-list li {
+.workflow-grid li,
+.feature-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.workflow-grid li {
   display: grid;
-  min-height: 260px;
-  padding: 18px;
-  transition:
-    border-color var(--transition-fast),
-    box-shadow var(--transition-fast),
-    transform var(--transition-fast);
+  align-content: start;
+  min-height: 240px;
+  padding: 16px;
 }
 
-.workflow-list li:hover,
-.feature-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--color-border-strong);
-  box-shadow: var(--shadow-panel);
-}
-
-.workflow-list__index {
+.workflow-grid__index {
   color: var(--color-subtle);
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 900;
 }
 
-.workflow-list__icon,
+.workflow-grid__icon,
 .feature-card span {
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  margin-top: 18px;
-  border: 1px solid var(--color-border);
+  width: 38px;
+  height: 38px;
+  margin-top: 16px;
   border-radius: 8px;
   background: var(--color-accent-soft);
   color: var(--color-accent);
 }
 
-.workflow-list small {
+.workflow-grid small {
   margin-top: 16px;
   color: var(--color-accent);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 900;
-  text-transform: uppercase;
 }
 
-.workflow-list strong,
+.workflow-grid strong,
 .feature-card strong {
   margin-top: 8px;
   color: var(--color-text);
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 900;
-  line-height: 1.28;
+  line-height: 1.25;
 }
 
-.workflow-list p,
-.feature-card small {
+.workflow-grid p,
+.feature-card p {
   margin-top: 10px;
   color: var(--color-muted);
   font-size: 13px;
-  line-height: 1.66;
-}
-
-.workflow-list__bars,
-.feature-card__meter {
-  display: grid;
-  gap: 6px;
-  margin-top: 14px;
-}
-
-.workflow-list__bars i,
-.feature-card__meter i {
-  display: block;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: var(--color-border);
-}
-
-.workflow-list__bars i:first-child,
-.feature-card__meter i:first-child,
-.feature-card__meter i:nth-child(2) {
-  background: var(--color-accent);
-}
-
-.workflow-list__bars i:nth-child(2) {
-  width: 72%;
-  background: var(--color-border-strong);
-}
-
-.workflow-list__bars i:nth-child(3) {
-  width: 44%;
-}
-
-.feature-card__meter {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  line-height: 1.65;
 }
 
 .feature-grid {
@@ -816,45 +619,25 @@ function scrollToSection(id: string) {
 
 .feature-card {
   display: grid;
-  min-height: 212px;
+  min-height: 210px;
   padding: 18px;
-  transition:
-    border-color var(--transition-fast),
-    box-shadow var(--transition-fast),
-    transform var(--transition-fast);
 }
 
-.proof-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(320px, 1fr);
-  gap: clamp(24px, 5vw, 64px);
-  align-items: center;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 8px;
-  background: var(--color-surface);
-  padding: clamp(22px, 4vw, 42px);
-  box-shadow: var(--shadow-panel);
-}
-
-.proof-panel ul {
-  display: grid;
+.scene-list {
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
-.proof-panel li {
-  gap: 12px;
-  min-height: 54px;
+.scene-list span {
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  background: var(--color-card);
+  background: var(--color-surface);
   color: var(--color-text-secondary);
-  padding: 0 14px;
+  padding: 12px 14px;
   font-size: 14px;
   font-weight: 850;
-}
-
-.proof-panel svg {
-  color: var(--color-accent);
+  box-shadow: var(--shadow-card);
 }
 
 .final-cta {
@@ -862,64 +645,37 @@ function scrollToSection(id: string) {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding-top: clamp(70px, 9vw, 112px);
+  padding-top: clamp(76px, 10vw, 120px);
   padding-bottom: 82px;
 }
 
 .final-cta strong {
   display: block;
-  max-width: 760px;
-  margin-top: 8px;
+  margin-top: 10px;
   color: var(--color-text);
-  font-size: clamp(30px, 4vw, 54px);
+  font-size: clamp(28px, 4vw, 52px);
   font-weight: 950;
-  letter-spacing: 0;
-  line-height: 1.05;
+  line-height: 1.06;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .home-page {
-    scroll-behavior: auto;
-  }
-
-  .workflow-list li,
-  .feature-card {
-    transition: none;
-  }
-
-  .workflow-list li:hover,
-  .feature-card:hover {
-    transform: none;
-  }
+.section-block{
+  margin-bottom: 15px;
 }
 
 @media (max-width: 1040px) {
-  .hero {
-    grid-template-columns: 1fr;
-    min-height: auto;
-  }
-
-  .workflow-list,
+  .workflow-grid,
   .feature-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .proof-panel {
-    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 820px) {
-  .home-nav {
+  .home-header {
     grid-template-columns: auto auto;
   }
 
-  .home-nav__links {
+  .home-header__nav {
     display: none;
-  }
-
-  .metrics-section {
-    grid-template-columns: 1fr;
   }
 
   .section-heading--split,
@@ -928,75 +684,51 @@ function scrollToSection(id: string) {
     flex-direction: column;
   }
 
-  .section-heading--split p {
-    max-width: 680px;
+  .hero-preview__canvas {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-preview__canvas img:first-child {
+    grid-row: auto;
   }
 }
 
 @media (max-width: 640px) {
-  .home-nav,
+  .home-header,
   .hero,
-  .metrics-section,
-  .product-section,
-  .proof-section,
+  .section-block,
   .final-cta {
     padding-right: 16px;
     padding-left: 16px;
   }
 
-  .brand__copy small {
+  .brand small,
+  .hero-preview__toolbar small {
     display: none;
   }
 
-  .hero {
-    padding-top: 38px;
-  }
-
   .hero h1 {
-    font-size: clamp(54px, 18vw, 76px);
+    font-size: clamp(52px, 18vw, 78px);
   }
 
   .hero__lead {
-    font-size: clamp(24px, 8vw, 34px);
+    font-size: clamp(26px, 9vw, 38px);
   }
 
   .hero__actions {
     align-items: stretch;
-    display: flex;
     flex-direction: column;
-    width: 100%;
   }
 
-  .hero__actions :deep(.ui-button) {
-    width: 100%;
-  }
-
-  .hero-board__stage,
-  .workflow-list,
+  .workflow-grid,
   .feature-grid {
     grid-template-columns: 1fr;
   }
 
-  .hero-board__stage img:first-child {
-    grid-row: auto;
-  }
-
-  .hero-board__toolbar {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .hero-board__toolbar small,
-  .hero-board__status b {
-    display: none;
-  }
-
-  .workflow-list li,
+  .workflow-grid li,
   .feature-card {
     min-height: auto;
   }
-
-  .proof-panel {
-    padding: 18px;
-  }
 }
 </style>
+

@@ -61,7 +61,7 @@ function selectSlide(index: number) {
 }
 
 onMounted(() => {
-  timer = window.setInterval(nextSlide, 3200);
+  timer = window.setInterval(nextSlide, 5600);
 });
 
 onBeforeUnmount(() => {
@@ -217,7 +217,8 @@ onBeforeUnmount(() => {
   object-fit: contain;
   background: #ffffff;
   box-shadow: var(--shadow-sm);
-  animation: revealSlide 260ms ease both;
+  animation: revealSlide 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: center;
 }
 
 .showcase__arrow {
@@ -272,11 +273,13 @@ onBeforeUnmount(() => {
 @keyframes revealSlide {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    filter: blur(6px);
+    transform: translateY(10px) scale(0.985);
   }
 
   to {
     opacity: 1;
+    filter: blur(0);
     transform: translateY(0);
   }
 }

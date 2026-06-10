@@ -85,8 +85,12 @@ ensure_python_runtime() {
     run_sudo apt-get update
     run_sudo apt-get install -y \
       build-essential \
+      ca-certificates \
       pkg-config \
       pandoc \
+      fontconfig \
+      fonts-noto-cjk \
+      fonts-noto-color-emoji \
       python3 \
       python3-dev \
       python3-pip \
@@ -103,8 +107,12 @@ ensure_python_runtime() {
       libxslt1-dev \
       zlib1g-dev \
       libjpeg-dev \
+      libmagic1 \
+      libglib2.0-0 \
+      libgl1 \
       libopenjp2-7 \
       libopenjp2-7-dev \
+      poppler-utils \
       shared-mime-info
   fi
 
@@ -120,13 +128,14 @@ ensure_python_runtime() {
   "${venv_dir}/bin/python" -m pip install -r "${app_dir}/server/requirements.txt"
 
   export PYTHON_BIN="${venv_dir}/bin/python"
+  export PATH="${venv_dir}/bin:${PATH}"
 }
 
 start_pm2() {
   if pm2 describe "${PM2_APP_NAME}" >/dev/null 2>&1; then
-    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" PYTHON_BIN="${PYTHON_BIN}" pm2 reload ecosystem.config.cjs --update-env
+    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" PYTHON_BIN="${PYTHON_BIN}" PATH="${PATH}" pm2 reload ecosystem.config.cjs --update-env
   else
-    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" PYTHON_BIN="${PYTHON_BIN}" pm2 start ecosystem.config.cjs --update-env
+    PM2_APP_NAME="${PM2_APP_NAME}" PORT="${APP_PORT}" STORAGE_ROOT="${STORAGE_ROOT}" PYTHON_BIN="${PYTHON_BIN}" PATH="${PATH}" pm2 start ecosystem.config.cjs --update-env
   fi
   pm2 save
   pm2 status
