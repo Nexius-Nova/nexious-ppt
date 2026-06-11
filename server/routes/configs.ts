@@ -154,6 +154,12 @@ router.post('/reset', async (req: AuthRequest, res: Response) => {
           { value: 'zoom', label: '重点聚焦' },
           { value: 'dissolve', label: '溶解显现' },
           { value: 'wheel', label: '轮盘展开' },
+          { value: 'cinematic', label: '电影感' },
+          { value: 'dramatic', label: '高能登场' },
+          { value: 'kinetic', label: '动感节奏' },
+          { value: 'spotlight', label: '聚光强调' },
+          { value: 'cascade', label: '层叠展开' },
+          { value: 'surprise', label: '惊喜混剪' },
           { value: 'mixed', label: '混合动效' },
           { value: 'random', label: '随机动效' }
         ],

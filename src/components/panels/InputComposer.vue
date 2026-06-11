@@ -222,7 +222,7 @@ const autoOptionByKey: Record<ConfigOptionKey, { label: string; value: string; d
   imageStyle: { label: 'AI 自动', value: 'auto', description: '由页面内容决定图像方向' },
   skillIntensity: { label: 'AI 自动', value: '0', description: '由 AI 判断是否增强' },
   animationEnabled: { label: 'AI 自动', value: 'auto', description: '输入提到动画时自动启用 PPTX 动画' },
-  animationEffect: { label: 'AI 自动', value: 'auto', description: '启用动画后自动选择适合页面元素的入场效果' }
+  animationEffect: { label: 'AI 自动', value: 'auto', description: 'AI 按每页内容自主规划入场、节奏和转场' }
 };
 
 function getParameterOptions(key: ConfigOptionKey): Array<{ label: string; value: string; description?: string }> {

@@ -253,6 +253,12 @@ const cloneConfigOptions = (): ConfigOptionGroups => ({
     { value: 'zoom', label: '重点聚焦' },
     { value: 'dissolve', label: '溶解显现' },
     { value: 'wheel', label: '轮盘展开' },
+    { value: 'cinematic', label: '电影感' },
+    { value: 'dramatic', label: '高能登场' },
+    { value: 'kinetic', label: '动感节奏' },
+    { value: 'spotlight', label: '聚光强调' },
+    { value: 'cascade', label: '层叠展开' },
+    { value: 'surprise', label: '惊喜混剪' },
     { value: 'mixed', label: '混合动效' },
     { value: 'random', label: '随机动效' }
   ]
@@ -263,14 +269,24 @@ function normalizeConfigOptions(options?: Partial<ConfigOptionGroups> | null): C
   if (!options) return fallback;
 
   return {
-    slideCount: options.slideCount?.length ? options.slideCount.map(option => ({ ...option })) : fallback.slideCount,
-    summaryLength: options.summaryLength?.length ? options.summaryLength.map(option => ({ ...option })) : fallback.summaryLength,
-    tone: options.tone?.length ? options.tone.map(option => ({ ...option })) : fallback.tone,
-    imageStyle: options.imageStyle?.length ? options.imageStyle.map(option => ({ ...option })) : fallback.imageStyle,
-    skillIntensity: options.skillIntensity?.length ? options.skillIntensity.map(option => ({ ...option })) : fallback.skillIntensity,
-    animationEnabled: options.animationEnabled?.length ? options.animationEnabled.map(option => ({ ...option })) : fallback.animationEnabled,
-    animationEffect: options.animationEffect?.length ? options.animationEffect.map(option => ({ ...option })) : fallback.animationEffect,
+    slideCount: mergeConfigOptions(options.slideCount, fallback.slideCount),
+    summaryLength: mergeConfigOptions(options.summaryLength, fallback.summaryLength),
+    tone: mergeConfigOptions(options.tone, fallback.tone),
+    imageStyle: mergeConfigOptions(options.imageStyle, fallback.imageStyle),
+    skillIntensity: mergeConfigOptions(options.skillIntensity, fallback.skillIntensity),
+    animationEnabled: mergeConfigOptions(options.animationEnabled, fallback.animationEnabled),
+    animationEffect: mergeConfigOptions(options.animationEffect, fallback.animationEffect),
   };
+}
+
+function mergeConfigOptions(
+  configured: ConfigOptionGroups[ConfigOptionKey] | undefined,
+  fallback: ConfigOptionGroups[ConfigOptionKey]
+): ConfigOptionGroups[ConfigOptionKey] {
+  const merged = new Map<string, ConfigOptionGroups[ConfigOptionKey][number]>();
+  fallback.forEach((option) => merged.set(option.value, { ...option }));
+  configured?.forEach((option) => merged.set(option.value, { ...option }));
+  return Array.from(merged.values());
 }
 
 function parseConfigOptions(rawOptions: unknown) {
@@ -338,7 +354,7 @@ const MAX_UPLOAD_FILE_BYTES = 18 * 1024 * 1024;
 const SUPPORTED_INPUT_FILE_PATTERN = /\.(txt|md|markdown|csv|json|log|html|htm|xml|docx|xlsx|xlsm|pptx|pdf|png|jpe?g|webp|gif|doc|xls|ppt)$/i;
 const SKILL_CONTEXT_START = '【Skill 处理结果（自动生成，可重新运行刷新）】';
 const SKILL_CONTEXT_END = '【Skill 处理结果结束】';
-const ANIMATION_INTENT_PATTERN = /(动画|动效|动态|转场|入场|出场|飞入|淡入|缩放|擦除|逐步出现|逐个出现|放映效果|animation|animate|transition|entrance|motion|fade|wipe|zoom)/i;
+const ANIMATION_INTENT_PATTERN = /(动画|动效|动态|转场|入场|出场|飞入|淡入|缩放|擦除|逐步出现|逐个出现|放映效果|酷炫|炫酷|惊艳|电影感|高能|动感|视觉冲击|奇妙|animation|animate|transition|entrance|motion|fade|wipe|zoom|cinematic|kinetic|dramatic)/i;
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'，。；、)）\]]+/gi;
 const normalizeProjectText = (value: unknown) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const stripFileExtension = (fileName: string) => fileName.replace(/\.[^.]+$/, '');
@@ -549,6 +565,7 @@ export const useAgentStore = defineStore('agent', () => {
     configOptions.value = cloneConfigOptions();
   }
   const subscribedQueueJobIds = new Set<string>();
+  const queuePollTimers = new Map<string, ReturnType<typeof window.setInterval>>();
   const lastQueueLogKey = ref('');
 
   type RunContext = { token: number; projectId: string | null };
@@ -695,17 +712,15 @@ export const useAgentStore = defineStore('agent', () => {
     if (project) {
       const currentState = normalizeProjectState(project.state);
       if (job.projectState) {
+        const currentViewingStep = activePptId.value === projectId ? activeStep.value : currentState.lastActiveStep;
         const serverState = normalizeProjectState(job.projectState as Partial<PptProjectState>);
         project.state = {
-          ...serverState,
-          activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateFromSnapshot(job),
-          workflowActive: Boolean(serverState.workflowActive),
-          paused: Boolean(serverState.paused),
-          workflowContext: serverState.workflowContext || workflowContextFromQueueSnapshot(serverState, projectId, job),
+          ...stateWithLiveQueueJob(serverState, projectId, job),
+          lastActiveStep: currentViewingStep || serverState.lastActiveStep,
         };
         project.updatedAt = Date.now();
         if (activePptId.value === projectId) {
-          restoreProjectState(project.state);
+          restoreProjectState(project.state, { preserveActiveStep: true });
         }
         syncActiveRunRefsFromProject();
         return;
@@ -879,17 +894,16 @@ export const useAgentStore = defineStore('agent', () => {
     const project = pptProjects.value.find(item => item.id === projectId);
     if (!project) return;
     if (job.projectState) {
+      const currentViewingStep = activePptId.value === projectId ? activeStep.value : normalizeProjectState(project.state).lastActiveStep;
       const serverState = normalizeProjectState(job.projectState as Partial<PptProjectState>);
       project.state = {
-        ...serverState,
-        activeQueueJob: isTerminalQueueStatus(job.status) ? null : queueJobStateFromSnapshot(job),
-        workflowActive: Boolean(serverState.workflowActive),
-        paused: Boolean(serverState.paused),
-        workflowContext: serverState.workflowContext || workflowContextFromQueueSnapshot(serverState, projectId, job),
+        ...stateWithLiveQueueJob(serverState, projectId, job),
+        lastActiveStep: currentViewingStep || serverState.lastActiveStep,
       };
       project.updatedAt = Date.now();
       if (activePptId.value === projectId) {
-        restoreProjectState(project.state);
+        restoreProjectState(project.state, { preserveActiveStep: true });
+        syncActiveRunRefsFromProject();
       }
       return;
     }
@@ -915,24 +929,34 @@ export const useAgentStore = defineStore('agent', () => {
       workflowContext: workflowContextFromQueueSnapshot(nextState, projectId, job),
     };
     project.updatedAt = Date.now();
+    if (activePptId.value === projectId) {
+      if (job.result || isTerminalQueueStatus(job.status)) {
+        restoreProjectState(project.state, { preserveActiveStep: true });
+      } else {
+        applyQueueHeartbeatToActiveState(job);
+      }
+      syncActiveRunRefsFromProject();
+    }
   }
 
   function applyQueueJobToActiveProject(job: QueueJobSnapshot) {
     pushQueueJobLog(job);
     if (job.projectState) {
-      restoreProjectState(normalizeProjectState(job.projectState as Partial<PptProjectState>));
+      restoreProjectState(stateWithLiveQueueJob(
+        normalizeProjectState(job.projectState as Partial<PptProjectState>),
+        job.projectId || activePptId.value || '',
+        job
+      ), { preserveActiveStep: true });
       return;
     }
     if (job.status === 'cancelled') return;
     const displayStep = displayStepForQueueJob(job);
     if (displayStep === 'outline') {
-      activeStep.value = 'outline';
       setStepStatus('outline', 'running', Math.min(99, job.progress));
       if (job.phase === 'outline' && job.result) {
         applyQueuedOutlineProgress(job.result, job.progress);
       }
     } else if (displayStep === 'images') {
-      activeStep.value = 'images';
       setStepStatus('outline', 'done', 100);
       setStepStatus('images', 'running', Math.min(99, job.progress));
       if (job.phase === 'images' && job.result) {
@@ -943,7 +967,6 @@ export const useAgentStore = defineStore('agent', () => {
         }
       }
     } else if (displayStep === 'layout') {
-      activeStep.value = 'layout';
       setStepStatus('outline', 'done', 100);
       setStepStatus('images', 'done', 100);
       setStepStatus('layout', 'running', Math.min(99, job.progress));
@@ -959,12 +982,13 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function pushQueueJobLog(job: QueueJobSnapshot) {
-    const message = job.message || `任务进度：${job.phase}`;
+    const message = job.logMessage || job.message || `任务进度：${job.phase}`;
     const key = [
       job.id || '',
       job.phase || '',
       job.status || '',
       job.progress ?? '',
+      job.logMessage || '',
       message,
     ].join('|');
     if (lastQueueLogKey.value === key) return;
@@ -972,8 +996,42 @@ export const useAgentStore = defineStore('agent', () => {
     pushLog(message);
   }
 
+  function stopProjectQueuePolling(queueJobId: string) {
+    const timer = queuePollTimers.get(queueJobId);
+    if (!timer) return;
+    window.clearInterval(timer);
+    queuePollTimers.delete(queueJobId);
+  }
+
+  function startProjectQueuePolling(projectId: string, queueJobId: string) {
+    if (!projectId || !queueJobId || queuePollTimers.has(queueJobId)) return;
+
+    const poll = async () => {
+      try {
+        const response = await aiApi.getQueueJob(queueJobId);
+        if (!response.success || !response.data) return;
+        const job = response.data;
+        upsertProjectRunningJob(projectId, job);
+        applyQueueJobToProjectState(projectId, job);
+        if (activePptId.value === projectId) {
+          applyQueueJobToActiveProject(job);
+        }
+        if (isTerminalQueueStatus(job.status)) {
+          stopProjectQueuePolling(queueJobId);
+        }
+      } catch (error) {
+        console.warn('轮询队列任务状态失败', error);
+      }
+    };
+
+    queuePollTimers.set(queueJobId, window.setInterval(poll, 1500));
+    void poll();
+  }
+
   function subscribeProjectQueueJob(projectId: string, queueJobId: string) {
-    if (!projectId || !queueJobId || subscribedQueueJobIds.has(queueJobId)) return;
+    if (!projectId || !queueJobId) return;
+    startProjectQueuePolling(projectId, queueJobId);
+    if (subscribedQueueJobIds.has(queueJobId)) return;
     subscribedQueueJobIds.add(queueJobId);
     void aiApi.waitForQueueJob(queueJobId, (job) => {
       upsertProjectRunningJob(projectId, job);
@@ -983,6 +1041,7 @@ export const useAgentStore = defineStore('agent', () => {
       }
     }).then(async (finalJob) => {
       applyQueueJobToProjectState(projectId, finalJob);
+      stopProjectQueuePolling(queueJobId);
       clearProjectRunningJob(projectId);
       if (activePptId.value === projectId) {
         if (finalJob.status === 'cancelled') {
@@ -1000,9 +1059,6 @@ export const useAgentStore = defineStore('agent', () => {
       }
     }).catch((error) => {
       const errMsg = error instanceof Error ? error.message : '任务订阅中断';
-      if (errMsg !== '任务等待超时') {
-        clearProjectRunningJob(projectId);
-      }
       if (activePptId.value === projectId) {
         pushLog(`后台任务状态同步失败：${errMsg}`);
       }
@@ -1035,6 +1091,16 @@ export const useAgentStore = defineStore('agent', () => {
       }
     } catch (error) {
       console.warn('刷新队列任务状态失败', error);
+    }
+  }
+
+  function resumeProjectQueueSubscriptions() {
+    for (const project of pptProjects.value) {
+      const queueJobId = normalizeActiveQueueJob(project.state?.activeQueueJob)?.queueJobId
+        || runningProjectJobs.value[project.id]?.queueJobId;
+      if (!queueJobId) continue;
+      subscribeProjectQueueJob(project.id, queueJobId);
+      void refreshProjectQueueSnapshot(project.id);
     }
   }
 
@@ -1267,6 +1333,62 @@ export const useAgentStore = defineStore('agent', () => {
           })).filter((item) => item.name || item.chars > 0)
         : [],
     };
+  }
+
+  function stateWithLiveQueueJob(
+    state: PptProjectState,
+    projectId: string,
+    job: QueueJobSnapshot
+  ): PptProjectState {
+    const liveQueueJob = isTerminalQueueStatus(job.status) ? null : queueJobStateFromSnapshot(job);
+    const displayStep = displayStepForQueueJob(job, state.lastActiveStep || 'outline');
+    const liveSteps = state.steps.map((step): WorkflowStep => {
+      if (isTerminalQueueStatus(job.status)) return step;
+      if (displayStep === 'outline') {
+        if (step.id === 'outline') return { ...step, status: 'running' as const, progress: Math.min(99, Math.max(step.progress || 0, job.progress || 0)) };
+        return step;
+      }
+      if (displayStep === 'images') {
+        if (step.id === 'outline') return { ...step, status: 'done' as const, progress: 100 };
+        if (step.id === 'images') return { ...step, status: 'running' as const, progress: Math.min(99, Math.max(step.progress || 0, job.progress || 0)) };
+        return step;
+      }
+      if (displayStep === 'layout') {
+        if (step.id === 'outline' || step.id === 'images') return { ...step, status: 'done' as const, progress: 100 };
+        if (step.id === 'layout') return { ...step, status: 'running' as const, progress: Math.min(99, Math.max(step.progress || 0, job.progress || 0)) };
+        return step;
+      }
+      return step;
+    });
+
+    return {
+      ...state,
+      steps: liveSteps,
+      activeQueueJob: liveQueueJob,
+      workflowActive: isTerminalQueueStatus(job.status) ? false : true,
+      paused: job.status === 'cancelled' ? true : Boolean(state.paused),
+      lastActiveStep: isTerminalQueueStatus(job.status) ? state.lastActiveStep : displayStep,
+      workflowContext: workflowContextFromQueueSnapshot(state, projectId, job),
+    };
+  }
+
+  function applyQueueHeartbeatToActiveState(job: QueueJobSnapshot) {
+    if (isTerminalQueueStatus(job.status)) return;
+    const displayStep = displayStepForQueueJob(job);
+    if (displayStep === 'outline') {
+      setStepStatus('outline', 'running', Math.min(99, job.progress));
+      return;
+    }
+    if (displayStep === 'images') {
+      setStepStatus('outline', 'done', 100);
+      setStepStatus('images', 'running', Math.min(99, job.progress));
+      return;
+    }
+    if (displayStep === 'layout') {
+      setStepStatus('outline', 'done', 100);
+      setStepStatus('images', 'done', 100);
+      setStepStatus('layout', 'running', Math.min(99, job.progress));
+    }
   }
 
   function persistCurrentSelectionToActiveProject() {
@@ -1537,8 +1659,9 @@ export const useAgentStore = defineStore('agent', () => {
     };
   }
 
-  function restoreProjectState(state: PptProjectState) {
+  function restoreProjectState(state: PptProjectState, options: { preserveActiveStep?: boolean } = {}) {
     const normalizedState = normalizeProjectState(state);
+    const previousActiveStep = activeStep.value;
     input.value = { ...normalizedState.input, files: [...normalizedState.input.files] };
     uploadedFileContents.value = normalizedState.uploadedFileContents?.map((file) => ({ ...file })) || [];
     processedInputContent.value = normalizedState.processedInputContent || '';
@@ -1603,8 +1726,18 @@ export const useAgentStore = defineStore('agent', () => {
     pauseRequested.value = false;
     resumeStage.value = normalizedState.resumeStage || normalizedState.lastActiveStep || null;
     executorCursor.value = completedLeadingLayoutPages(layoutPageCount());
-    if (normalizedState.lastActiveStep && workflowSteps.some(step => step.id === normalizedState.lastActiveStep)) {
+    if (
+      !options.preserveActiveStep &&
+      normalizedState.lastActiveStep &&
+      workflowSteps.some(step => step.id === normalizedState.lastActiveStep)
+    ) {
       activeStep.value = normalizedState.lastActiveStep;
+    } else if (
+      options.preserveActiveStep &&
+      previousActiveStep &&
+      workflowSteps.some(step => step.id === previousActiveStep)
+    ) {
+      activeStep.value = previousActiveStep;
     }
 
     if (normalizedState.activityLog && normalizedState.activityLog.length > 0) {
@@ -2725,7 +2858,13 @@ export const useAgentStore = defineStore('agent', () => {
   function isConstraintSkill(skill: SkillDefinition) {
     const category = normalizeInputSkillCategory(skill.category);
     if (['页面类型判断', '图表表格标记', '公式图片时间线标记'].includes(category)) return true;
-    if (skill.capabilities?.includes('generation-constraint') || skill.capabilities?.includes('outline-mark')) return true;
+    if (
+      skill.capabilities?.includes('generation-constraint')
+      || skill.capabilities?.includes('outline-mark')
+      || skill.capabilities?.includes('chart-design')
+      || skill.capabilities?.includes('svg-layout')
+      || skill.capabilities?.includes('page-generation')
+    ) return true;
     const text = `${skill.name} ${skill.description} ${skill.category || ''}`.toLowerCase();
     return /constraint|config|rule|outline|chart|table|formula|timeline|约束|配置|规则|提示词|大纲|页面类型|图表|表格|公式|时间线/.test(text);
   }
@@ -2856,6 +2995,11 @@ export const useAgentStore = defineStore('agent', () => {
 
   function isGenerationReferenceSkill(skill: SkillDefinition) {
     const category = normalizeInputSkillCategory(skill.category);
+    if (
+      skill.capabilities?.includes('chart-design')
+      || skill.capabilities?.includes('svg-layout')
+      || skill.capabilities?.includes('page-generation')
+    ) return true;
     if ([
       '生成约束',
       '页面类型判断',
@@ -2891,61 +3035,22 @@ export const useAgentStore = defineStore('agent', () => {
     ].filter(Boolean).join('\n');
   }
 
-  function skillSelectionReason(skill: SkillDefinition, category: string, autoSelected: boolean) {
+  function skillSelectionReason(skill: SkillDefinition) {
     if (skill.enabled) return '用户已选择';
-    if (!autoSelected) return '';
-    if (category === 'Web 搜索') return '根据输入中的联网/搜索意图自动选择';
-    if (category === '文件解析' || category === '图片识别') return '根据上传文件自动选择';
-    if (['行业资料分析', '学术论文解析', '财报分析', '企业知识库检索'].includes(category)) return '根据资料整理需求自动选择';
-    if (['页面类型判断', '图表表格标记', '公式图片时间线标记'].includes(category)) return '根据大纲和页面类型需求自动选择';
-    if (category === '文件解析') return '根据上传文件自动选择';
-    if (category === '主题提炼') return '根据主题自动提炼需求自动选择';
-    if (category === '生成约束') return '根据提示词、模板或配置自动选择';
-    return '系统自动选择';
+    return '';
   }
 
-  function autoSelectSkillsByCategory(
+  function selectedSkillsByCategory(
     category: string,
-    options: {
-      userText: string;
-      files: string[];
-      hasSkillContext: boolean;
-      hasGenerationControls: boolean;
-    }
   ) {
     const categorySkills = runnableSkills.value
       .filter((skill) => Number.isFinite(Number(skill.id)))
       .filter((skill) => normalizeInputSkillCategory(skill.category) === category);
     const selected = categorySkills.filter((skill) => skill.enabled);
-    const unselected = categorySkills.filter((skill) => !skill.enabled);
 
-    let shouldAutoSelect = false;
-    if (category === 'Web 搜索') shouldAutoSelect = wantsWebSearch(options.userText);
-    if (category === '文件解析' || category === '图片识别') shouldAutoSelect = wantsFileParsing(options.files);
-    if (['行业资料分析', '学术论文解析', '财报分析', '企业知识库检索'].includes(category)) {
-      shouldAutoSelect = Boolean(options.userText || options.files.length || options.hasSkillContext);
-    }
-    if (['页面类型判断', '图表表格标记', '公式图片时间线标记'].includes(category)) {
-      shouldAutoSelect = Boolean(options.userText || options.files.length || options.hasSkillContext || options.hasGenerationControls);
-    }
-    if (category === '资料收集') shouldAutoSelect = wantsWebSearch(options.userText);
-    if (category === '文件解析') shouldAutoSelect = wantsFileParsing(options.files);
-    if (category === '主题提炼') shouldAutoSelect = Boolean(options.userText || options.files.length || options.hasSkillContext);
-    if (category === '生成约束') shouldAutoSelect = options.hasGenerationControls;
-
-    const autoSelected = shouldAutoSelect
-      ? unselected.filter((skill) => {
-          if (category === 'Web 搜索' || category === '资料收集') return isSearchSkill(skill);
-          if (category === '文件解析' || category === '图片识别') return isFileParseSkill(skill);
-          if (['行业资料分析', '学术论文解析', '财报分析', '企业知识库检索', '主题提炼'].includes(category)) return isTopicSkill(skill);
-          if (['页面类型判断', '图表表格标记', '公式图片时间线标记', '生成约束'].includes(category)) return isConstraintSkill(skill);
-          return true;
-        }).slice(0, category === 'Web 搜索' || category === '资料收集' ? 2 : 1)
-      : [];
-
-    return [...selected, ...autoSelected].map((skill) => ({
+    return selected.map((skill) => ({
       skill,
-      reason: skillSelectionReason(skill, category, autoSelected.some((item) => item.id === skill.id)),
+      reason: skillSelectionReason(skill),
     }));
   }
 
@@ -3328,27 +3433,27 @@ export const useAgentStore = defineStore('agent', () => {
     };
     const searchIntent = wantsWebSearch(selectionOptions.userText);
     const collectSkills = uniqueSkillPlans([
-      ...autoSelectSkillsByCategory('Web 搜索', selectionOptions),
-      ...autoSelectSkillsByCategory('资料收集', selectionOptions),
+      ...selectedSkillsByCategory('Web 搜索'),
+      ...selectedSkillsByCategory('资料收集'),
     ]);
     const fileParseSkills = files.length
       ? uniqueSkillPlans([
-          ...autoSelectSkillsByCategory('文件解析', selectionOptions),
-          ...autoSelectSkillsByCategory('图片识别', selectionOptions),
+          ...selectedSkillsByCategory('文件解析'),
+          ...selectedSkillsByCategory('图片识别'),
         ])
       : [];
     const topicSkills = uniqueSkillPlans([
-      ...autoSelectSkillsByCategory('行业资料分析', selectionOptions),
-      ...autoSelectSkillsByCategory('学术论文解析', selectionOptions),
-      ...autoSelectSkillsByCategory('财报分析', selectionOptions),
-      ...autoSelectSkillsByCategory('企业知识库检索', selectionOptions),
-      ...autoSelectSkillsByCategory('主题提炼', selectionOptions),
+      ...selectedSkillsByCategory('行业资料分析'),
+      ...selectedSkillsByCategory('学术论文解析'),
+      ...selectedSkillsByCategory('财报分析'),
+      ...selectedSkillsByCategory('企业知识库检索'),
+      ...selectedSkillsByCategory('主题提炼'),
     ]);
     const constraintSkills = uniqueSkillPlans([
-      ...autoSelectSkillsByCategory('页面类型判断', selectionOptions),
-      ...autoSelectSkillsByCategory('图表表格标记', selectionOptions),
-      ...autoSelectSkillsByCategory('公式图片时间线标记', selectionOptions),
-      ...autoSelectSkillsByCategory('生成约束', selectionOptions),
+      ...selectedSkillsByCategory('页面类型判断'),
+      ...selectedSkillsByCategory('图表表格标记'),
+      ...selectedSkillsByCategory('公式图片时间线标记'),
+      ...selectedSkillsByCategory('生成约束'),
     ]);
     const skillContextChunks: string[] = [];
     const inputUrls = extractInputUrls(userContent);
@@ -3358,7 +3463,7 @@ export const useAgentStore = defineStore('agent', () => {
         status: 'running',
         progress: 45,
         detail: collectSkills.length
-          ? `自动选择 ${collectSkills.length} 个资料收集 Skill`
+          ? `已选择 ${collectSkills.length} 个资料收集 Skill`
           : inputUrls.length
             ? `检测到 ${inputUrls.length} 个网页链接，正在解析`
             : files.length
@@ -3367,7 +3472,7 @@ export const useAgentStore = defineStore('agent', () => {
         logs: collectSkills.length
           ? collectSkills.map((item) => `${item.skill.name}：${item.reason}`).join('\n')
           : searchIntent
-            ? '检测到联网/搜索意图，但当前没有可用的资料收集 Skill。'
+            ? '检测到联网/搜索意图，但用户未选择资料收集 Skill，本次仅使用内置资料整理。'
             : '',
       });
 
@@ -3424,7 +3529,7 @@ export const useAgentStore = defineStore('agent', () => {
         }
       } else {
         if (searchIntent) {
-          pushLog('检测到联网/搜索意图，但没有可用的资料收集 Skill，本次将使用现有输入资料继续。');
+          pushLog('检测到联网/搜索意图，但用户未选择资料收集 Skill，本次将使用内置功能和现有输入资料继续。');
         }
         await new Promise((resolve) => window.setTimeout(resolve, 120));
       }
@@ -3437,7 +3542,7 @@ export const useAgentStore = defineStore('agent', () => {
           : collectSkills.length
             ? `${collectSkills.length} 个资料收集 Skill 已完成`
             : searchIntent
-              ? '未找到可用资料收集 Skill，已使用现有资料继续'
+              ? '未选择资料收集 Skill，已使用内置功能继续'
             : content
               ? `${content.length} 字资料已进入上下文`
               : `${files.length} 个文件已记录`,
@@ -3451,7 +3556,7 @@ export const useAgentStore = defineStore('agent', () => {
         setInputProcessStep('file-parse', {
           status: 'running',
           progress: 45,
-          detail: `自动选择 ${fileParseSkills.length} 个文件解析 Skill`,
+          detail: `已选择 ${fileParseSkills.length} 个文件解析 Skill`,
           logs: [
             `待解析文件：${files.join('、')}`,
             ...fileParseSkills.map((item) => `${item.skill.name}：${item.reason}`),
@@ -3531,7 +3636,7 @@ export const useAgentStore = defineStore('agent', () => {
       setInputProcessStep('topic', {
         status: 'running',
         progress: 60,
-        detail: topicSkills.length ? `自动选择 ${topicSkills.length} 个主题提炼 Skill` : '正在提炼主题、受众和表达目标',
+        detail: topicSkills.length ? `已选择 ${topicSkills.length} 个主题提炼 Skill` : '正在提炼主题、受众和表达目标',
         logs: topicSkills.length
           ? topicSkills.map((item) => `${item.skill.name}：${item.reason}`).join('\n')
           : '',
@@ -3584,7 +3689,7 @@ export const useAgentStore = defineStore('agent', () => {
       setInputProcessStep('constraints', {
         status: 'running',
         progress: 70,
-        detail: constraintSkills.length ? `自动选择 ${constraintSkills.length} 个生成约束 Skill` : '正在整理提示词、参考模板和配置参数',
+        detail: constraintSkills.length ? `已选择 ${constraintSkills.length} 个生成约束 Skill` : '正在整理提示词、参考模板和配置参数',
         logs: constraintSkills.length
           ? constraintSkills.map((item) => `${item.skill.name}：${item.reason}`).join('\n')
           : '',
@@ -3900,6 +4005,7 @@ export const useAgentStore = defineStore('agent', () => {
 
     activePptId.value = id;
     restoreProjectState(project.state);
+    resumeProjectQueueSubscriptions();
     void refreshProjectQueueSnapshot(id);
   }
 
@@ -4908,7 +5014,7 @@ export const useAgentStore = defineStore('agent', () => {
       iconStyle: spec.iconStyle,
       imageUsage: spec.imageUsage,
       outline: [],
-      skillExtensions: [],
+      skillExtensions: spec.skillExtensions || [],
     };
     const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
     const slimLock = {
@@ -4920,7 +5026,7 @@ export const useAgentStore = defineStore('agent', () => {
       pageRhythm: { [pageKey]: lock.pageRhythm[pageKey] },
       pageLayouts: { [pageKey]: lock.pageLayouts[pageKey] },
       pageCharts: lock.pageCharts[pageKey] ? { [pageKey]: lock.pageCharts[pageKey] } : {},
-      skillExtensions: [],
+      skillExtensions: lock.skillExtensions || spec.skillExtensions || [],
       forbidden: (lock as any).forbidden || [
         '<style>',
         'class',
@@ -5846,8 +5952,9 @@ export const useAgentStore = defineStore('agent', () => {
               updatedAt: new Date(project.updated_at).getTime(),
               state: projectState || makeDefaultProjectState(),
             };
-          });
+        });
         pptProjects.value = mergePptProjects([...remoteProjects, ...pptProjects.value], activePptId.value);
+        resumeProjectQueueSubscriptions();
       }
     } catch (error) {
       console.error('加载 PPT 项目失败:', error);
@@ -6002,6 +6109,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (activePpt.value?.state) {
       restoreProjectState(activePpt.value.state);
     }
+    resumeProjectQueueSubscriptions();
     isDataLoaded.value = true;
     if (restored) {
       pushLog('已恢复上次保存的工作流数据。');
@@ -6114,6 +6222,7 @@ export const useAgentStore = defineStore('agent', () => {
     fetchPrompts,
     fetchSkills,
     fetchTemplates,
+    resumeProjectQueueSubscriptions,
     applyGalleryTemplate,
     clearGalleryTemplate,
     initializeData,

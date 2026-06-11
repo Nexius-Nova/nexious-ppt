@@ -139,22 +139,28 @@ export async function writeAnimationConfig(
   for (const page of pages) {
     const slide = spec.outline.find((item) => item.pageNumber === page.pageNumber) || spec.outline[page.pageNumber - 1];
     const stem = `${String(page.pageNumber).padStart(2, '0')}_${sanitizeName(slide?.title || `slide_${page.pageNumber}`)}`;
-    const pageTransitionEffect = chooseSlideTransitionEffect(slide, transitionEffect, page.pageNumber);
+    const slideEffect = chooseSlideAnimationMode(slide, effect, page.pageNumber);
+    const slideDuration = chooseSlideDuration(slideEffect, duration, slide);
+    const slideStagger = chooseSlideStagger(slideEffect, stagger, slide);
+    const transitionMode = transitionEffect === 'auto' && (effect === 'auto' || isExpressiveAnimationPreset(effect))
+      ? slideEffect
+      : transitionEffect;
+    const pageTransitionEffect = chooseSlideTransitionEffect(slide, transitionMode, page.pageNumber);
     const groups = extractTopLevelGroups(page.svg)
       .filter((id) => !isStaticGroup(id))
       .slice(0, 12)
       .reduce<Record<string, any>>((acc, id, index) => {
         acc[id] = {
           order: index + 1,
-          effect: chooseGroupEffect(id, effect, index),
-          duration,
-          stagger,
+          effect: chooseGroupEffect(id, slideEffect, index, slide),
+          duration: slideDuration,
+          delay: index === 0 ? 0 : slideStagger,
         };
         return acc;
       }, {});
     slides[stem] = {
       transition: { effect: pageTransitionEffect, duration: transitionDuration },
-      animation: { effect, duration, stagger, trigger },
+      animation: { effect: slideEffect, duration: slideDuration, stagger: slideStagger, trigger },
       groups,
     };
   }
@@ -305,16 +311,117 @@ function isStaticGroup(id: string) {
   return /background|bg|decor|chrome|header|footer|watermark|page-number|pagenum/i.test(id);
 }
 
-function chooseGroupEffect(groupId: string, fallback: string, index: number) {
-  if (/title|heading|headline/i.test(groupId)) return fallback === 'random' ? 'fade' : fallback;
-  if (/chart|bar|timeline|matrix|table|process|flow/i.test(groupId)) return fallback === 'auto' || fallback === 'mixed' ? 'wipe' : fallback;
-  if (/image|visual|hero/i.test(groupId)) return fallback === 'auto' || fallback === 'mixed' ? 'zoom' : fallback;
-  if (fallback === 'auto' || fallback === 'mixed') return ['fade', 'wipe', 'fly', 'zoom'][index % 4];
-  return fallback;
+function chooseGroupEffect(
+  groupId: string,
+  slideMode: string,
+  index: number,
+  slide?: DesignSpec['outline'][number]
+) {
+  const text = animationText(slide);
+  const group = groupId.toLowerCase();
+  if (slideMode === 'auto') slideMode = chooseSlideAnimationMode(slide, 'auto', index + 1);
+  if (isExpressiveAnimationPreset(slideMode)) return slideMode;
+  if (/title|heading|headline/i.test(groupId)) {
+    if (/冲击|高能|dramatic|震撼/i.test(text)) return 'zoom';
+    if (/奇妙|惊喜|混剪|surprise/i.test(text)) return index % 2 === 0 ? 'wheel' : 'fade';
+    return slideMode === 'random' ? 'fade' : slideMode;
+  }
+  if (/chart|bar|timeline|matrix|table|process|flow/i.test(groupId)) {
+    if (/层叠|逐步|步骤|流程|cascade|process/i.test(text)) return 'cascade';
+    return slideMode === 'mixed' ? 'wipe' : slideMode;
+  }
+  if (/image|visual|hero|figure|kpi/i.test(groupId)) {
+    if (/电影|cinematic|视觉|画面|主视觉/i.test(text)) return 'cinematic';
+    if (/聚焦|重点|spotlight/i.test(text)) return 'spotlight';
+    return slideMode === 'mixed' ? 'zoom' : slideMode;
+  }
+  if (slideMode === 'mixed') return ['fade', 'wipe', 'fly', 'zoom'][index % 4];
+  if (slideMode === 'random') return 'random';
+  if (group.includes('callout') || group.includes('takeaway')) return 'spotlight';
+  return slideMode;
+}
+
+function isExpressiveAnimationPreset(value: string) {
+  return ['cinematic', 'dramatic', 'kinetic', 'spotlight', 'cascade', 'surprise'].includes(value);
+}
+
+function chooseSlideAnimationMode(
+  slide: DesignSpec['outline'][number] | undefined,
+  requested: string,
+  pageNumber: number
+) {
+  if (requested && requested !== 'auto') return requested;
+  const text = animationText(slide);
+  const layout = String(slide?.layout || '').toLowerCase();
+  const rhythm = String(slide?.rhythm || '').toLowerCase();
+  if (/惊喜|奇妙|混剪|意外|surprise|magic|wow/i.test(text)) return 'surprise';
+  if (/电影|镜头|大片|cinematic|叙事|场景/i.test(text)) return 'cinematic';
+  if (/高能|震撼|冲击|爆发|dramatic|launch/i.test(text)) return 'dramatic';
+  if (/动感|快速|节奏|kinetic|活力|速度/i.test(text)) return 'kinetic';
+  if (/聚焦|重点|强调|spotlight|高亮|关键/i.test(text)) return 'spotlight';
+  if (/层叠|逐层|步骤|流程|递进|cascade|process/i.test(text)) return 'cascade';
+  if (layout.includes('cover') || layout.includes('visual')) return pageNumber % 2 === 0 ? 'cinematic' : 'spotlight';
+  if (layout.includes('chart') || layout.includes('table') || rhythm === 'dense') return 'cascade';
+  if (layout.includes('chapter')) return 'dramatic';
+  return ['spotlight', 'cascade', 'cinematic', 'kinetic'][Math.max(0, pageNumber - 1) % 4];
+}
+
+function chooseSlideDuration(
+  mode: string,
+  fallback: number,
+  slide?: DesignSpec['outline'][number]
+) {
+  const base: Record<string, number> = {
+    cinematic: 0.82,
+    dramatic: 0.76,
+    kinetic: 0.46,
+    spotlight: 0.72,
+    cascade: 0.58,
+    surprise: 0.64,
+  };
+  const rhythm = String(slide?.rhythm || '').toLowerCase();
+  const value = base[mode] || fallback;
+  return rhythm === 'dense' ? Math.min(value, 0.56) : value;
+}
+
+function chooseSlideStagger(
+  mode: string,
+  fallback: number,
+  slide?: DesignSpec['outline'][number]
+) {
+  const base: Record<string, number> = {
+    cinematic: 0.18,
+    dramatic: 0.16,
+    kinetic: 0.1,
+    spotlight: 0.22,
+    cascade: 0.26,
+    surprise: 0.12,
+  };
+  const rhythm = String(slide?.rhythm || '').toLowerCase();
+  const value = base[mode] ?? fallback;
+  return rhythm === 'dense' ? Math.min(value, 0.14) : value;
+}
+
+function animationText(slide?: DesignSpec['outline'][number]) {
+  return [
+    slide?.title,
+    slide?.layout,
+    slide?.rhythm,
+    slide?.chartHint,
+    slide?.visualPrompt,
+    slide?.animationDescription,
+    ...(slide?.bullets || []),
+  ].filter(Boolean).join('\n');
 }
 
 function chooseSlideTransitionEffect(slide: DesignSpec['outline'][number] | undefined, fallback: string, pageNumber: number) {
   if (fallback === 'random') return 'random';
+  if (fallback === 'cinematic') return ['fade', 'push', 'cover'][(pageNumber - 1) % 3];
+  if (fallback === 'dramatic') return ['cover', 'split', 'strips', 'push'][(pageNumber - 1) % 4];
+  if (fallback === 'kinetic') return ['push', 'wipe', 'strips'][(pageNumber - 1) % 3];
+  if (fallback === 'spotlight') return pageNumber % 3 === 0 ? 'cover' : 'fade';
+  if (fallback === 'cascade') return ['wipe', 'split', 'fade'][(pageNumber - 1) % 3];
+  if (fallback === 'surprise') return ['random', 'strips', 'cover', 'split'][(pageNumber - 1) % 4];
   if (fallback !== 'auto') return fallback;
   const layout = String(slide?.layout || '').toLowerCase();
   const rhythm = String(slide?.rhythm || '').toLowerCase();
@@ -328,7 +435,7 @@ function chooseSlideTransitionEffect(slide: DesignSpec['outline'][number] | unde
 
 function normalizeAnimationEffect(value: unknown, spec: DesignSpec) {
   const effect = String(value || '').trim();
-  const allowed = new Set(['appear', 'fade', 'fly', 'cut', 'zoom', 'wipe', 'split', 'blinds', 'checkerboard', 'dissolve', 'random_bars', 'peek', 'wheel', 'box', 'circle', 'diamond', 'plus', 'strips', 'wedge', 'stretch', 'expand', 'swivel', 'auto', 'mixed', 'random']);
+  const allowed = new Set(['appear', 'fade', 'fly', 'cut', 'zoom', 'wipe', 'split', 'blinds', 'checkerboard', 'dissolve', 'random_bars', 'peek', 'wheel', 'box', 'circle', 'diamond', 'plus', 'strips', 'wedge', 'stretch', 'expand', 'swivel', 'auto', 'mixed', 'random', 'cinematic', 'dramatic', 'kinetic', 'spotlight', 'cascade', 'surprise']);
   if (allowed.has(effect)) return effect;
   const densePages = spec.outline.filter((slide) => slide.rhythm === 'dense').length;
   return densePages >= Math.max(2, spec.outline.length / 2) ? 'mixed' : 'fade';
@@ -336,7 +443,7 @@ function normalizeAnimationEffect(value: unknown, spec: DesignSpec) {
 
 function normalizeTransitionEffect(value: unknown) {
   const effect = String(value || '').trim();
-  return ['fade', 'push', 'wipe', 'split', 'strips', 'cover', 'auto', 'random'].includes(effect) ? effect : 'auto';
+  return ['fade', 'push', 'wipe', 'split', 'strips', 'cover', 'auto', 'random', 'cinematic', 'dramatic', 'kinetic', 'spotlight', 'cascade', 'surprise'].includes(effect) ? effect : 'auto';
 }
 
 function extractFormulaCandidates(text: string) {

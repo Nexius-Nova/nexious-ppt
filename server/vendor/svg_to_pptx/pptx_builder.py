@@ -211,7 +211,7 @@ def _build_sequence_targets(
     for seq_idx, (_has_order, _order, _original_idx, _svg_id, group_cfg) in enumerate(ordered):
         shape_id = int(group_cfg['_shape_id'])
         raw_effect = group_cfg.get('effect')
-        if raw_effect in ('auto', 'mixed', 'random'):
+        if raw_effect in ('auto', 'mixed', 'random', 'cinematic', 'dramatic', 'kinetic', 'spotlight', 'cascade', 'surprise'):
             effect = pick_animation_effect(
                 str(raw_effect), seq_idx, mixed_animation_offset, group_id=_svg_id,
             )
@@ -229,7 +229,7 @@ def _build_sequence_targets(
     mixed_count = 0
     if animation == 'mixed':
         mixed_count = sum(1 for _target in seq_targets[1:])
-    elif animation == 'auto':
+    elif animation == 'auto' or animation in ('cinematic', 'dramatic', 'kinetic', 'spotlight', 'cascade', 'surprise'):
         # 'auto' accumulates a cross-slide offset so the image pool and the
         # unmatched-id fallback rotate as the deck advances. Single-effect
         # semantic matches (title→fade, chart→wipe etc.) are unaffected

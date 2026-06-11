@@ -12,10 +12,11 @@ from xml.etree import ElementTree as ET
 from .drawingml_utils import SVG_NS
 
 try:
-    from pptx_animations import ANIMATIONS, TRANSITIONS
+    from pptx_animations import ANIMATIONS, TRANSITIONS, PRESET_ANIMATION_POOLS
 except ImportError:
     ANIMATIONS = {}
     TRANSITIONS = {}
+    PRESET_ANIMATION_POOLS = {}
 
 
 _NON_VISUAL_TAGS = frozenset(('defs', 'title', 'desc', 'metadata', 'style'))
@@ -116,7 +117,7 @@ def load_animation_config(project_path: Path, config_path: str | None = None) ->
     if not path.exists():
         return None
 
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, 'r', encoding='utf-8-sig') as f:
         data = json.load(f)
     if not isinstance(data, dict):
         raise ValueError(f'Animation config must be a JSON object: {path}')
@@ -126,7 +127,7 @@ def load_animation_config(project_path: Path, config_path: str | None = None) ->
 
 
 def _valid_animation_effect(effect: str) -> bool:
-    return effect == 'none' or effect in ANIMATIONS or effect in ('auto', 'mixed', 'random')
+    return effect == 'none' or effect in ANIMATIONS or effect in ('auto', 'mixed', 'random') or effect in PRESET_ANIMATION_POOLS
 
 
 def _valid_transition_effect(effect: str) -> bool:

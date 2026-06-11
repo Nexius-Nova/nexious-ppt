@@ -3,12 +3,13 @@ import path from 'path';
 import { mkdir, writeFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import net from 'net';
-import { getDefaultApiKey } from '../models/apiKey.js';
+import { getApiKeyByIdForUserAndType, getDefaultApiKey, type ApiKey } from '../models/apiKey.js';
 import { decrypt } from '../utils/crypto.js';
 import { resolveGenerationApiKey } from '../services/modelSelection.js';
 import { authMiddleware, AuthRequest } from './auth.js';
 import { buildOpenAIEndpoint, normalizeOpenAIBaseUrl } from '../utils/openaiUrl.js';
 import { generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
+import { endStream, guardStreamResponse, writeSseData, writeStream } from '../utils/sse.js';
 import { assertImageUploadSafe, normalizeContentType } from '../utils/uploadSecurity.js';
 import { buildImageSlotPrompt, type ImageSlotHint } from '../engine/imageComposition.js';
 
@@ -450,14 +451,14 @@ async function streamOpenAI(
       if (line.startsWith('data: ')) {
         const data = line.slice(6);
         if (data === '[DONE]') {
-          res.write(`data: [DONE]\n\n`);
+          writeSseData(res, '[DONE]');
           continue;
         }
         try {
           const parsed = JSON.parse(data);
           const content = parsed.choices?.[0]?.delta?.content;
           if (content) {
-            res.write(`data: ${JSON.stringify({ content })}\n\n`);
+            writeSseData(res, { content });
           }
         } catch {
           // ignore parse errors
@@ -520,7 +521,7 @@ async function streamAnthropic(
         try {
           const parsed = JSON.parse(data);
           if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-            res.write(`data: ${JSON.stringify({ content: parsed.delta.text })}\n\n`);
+            writeSseData(res, { content: parsed.delta.text });
           }
         } catch {
           // ignore parse errors
@@ -528,7 +529,7 @@ async function streamAnthropic(
       }
     }
   }
-  res.write(`data: [DONE]\n\n`);
+  writeSseData(res, '[DONE]');
 }
 
 async function streamGoogleAI(
@@ -589,7 +590,7 @@ async function streamGoogleAI(
           const parsed = JSON.parse(data);
           const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) {
-            res.write(`data: ${JSON.stringify({ content: text })}\n\n`);
+            writeSseData(res, { content: text });
           }
         } catch {
           // ignore parse errors
@@ -597,7 +598,7 @@ async function streamGoogleAI(
       }
     }
   }
-  res.write(`data: [DONE]\n\n`);
+  writeSseData(res, '[DONE]');
 }
 
 const TEXT_PROVIDER_BASE_URLS: Record<string, string> = {
@@ -612,6 +613,22 @@ const TEXT_PROVIDER_BASE_URLS: Record<string, string> = {
   groq: 'https://api.groq.com/openai/v1',
   perplexity: 'https://api.perplexity.ai',
 };
+
+function parseModelId(value: unknown) {
+  if (value === undefined || value === null || value === '') return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+async function resolveTestApiKey(
+  userId: number,
+  type: 'text' | 'image',
+  modelId: unknown
+): Promise<ApiKey | null> {
+  const parsedId = parseModelId(modelId);
+  if (!parsedId) return getDefaultApiKey(userId, type);
+  return getApiKeyByIdForUserAndType(userId, parsedId, type, true);
+}
 
 async function streamTextModel(
   provider: string,
@@ -714,12 +731,13 @@ ${promptContent ? `\n额外提示词指导：\n${promptContent}\n` : ''}
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    guardStreamResponse(res);
 
-    res.write(`data: ${JSON.stringify({ status: 'start', message: '开始生成大纲...' })}\n\n`);
+    writeSseData(res, { status: 'start', message: '开始生成大纲...' });
 
     let fullContent = '';
 
-    const originalWrite = res.write.bind(res);
+    const originalWrite = (chunk: any) => writeStream(res, chunk.toString());
     (res as any).write = (chunk: any) => {
       const str = chunk.toString();
       if (str.startsWith('data: ') && !str.includes('[DONE]') && !str.includes('status')) {
@@ -759,14 +777,12 @@ ${promptContent ? `\n额外提示词指导：\n${promptContent}\n` : ''}
       layout: item.layout || undefined,
     }));
 
-    res.write(`data: ${JSON.stringify({ status: 'complete', data: outline })}\n\n`);
-    res.end();
+    writeSseData(res, { status: 'complete', data: outline });
+    endStream(res);
   } catch (error) {
     console.error('生成大纲错误:', error);
-    res.write(
-      `data: ${JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : '生成大纲失败' })}\n\n`
-    );
-    res.end();
+    writeSseData(res, { status: 'error', message: error instanceof Error ? error.message : '生成大纲失败' });
+    endStream(res);
   }
 });
 
@@ -889,31 +905,28 @@ router.post('/generate-image-stream', authMiddleware, async (req: AuthRequest, r
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    guardStreamResponse(res);
 
-    res.write(
-      `data: ${JSON.stringify({ status: 'start', message: `正在为"${title}"生成图片...` })}\n\n`
-    );
+    writeSseData(res, { status: 'start', message: `正在为"${title}"生成图片...` });
 
     try {
       const rawImageUrl = await generateImage(provider, apiKey, model, prompt, style, baseUrl);
       const imageUrl = await persistDataImage(rawImageUrl, imageId);
 
-      res.write(
-        `data: ${JSON.stringify({
-          status: 'complete',
-          data: {
-            id: imageId,
-            slideId,
-            assetId: safeAssetId,
-            title,
-            prompt,
-            purpose,
-            style,
-            url: imageUrl,
-            selected: true,
-          },
-        })}\n\n`
-      );
+      writeSseData(res, {
+        status: 'complete',
+        data: {
+          id: imageId,
+          slideId,
+          assetId: safeAssetId,
+          title,
+          prompt,
+          purpose,
+          style,
+          url: imageUrl,
+          selected: true,
+        },
+      });
     } catch (error) {
       console.error(`生成图片失败: ${slideId}`, error);
 
@@ -926,33 +939,29 @@ router.post('/generate-image-stream', authMiddleware, async (req: AuthRequest, r
         errorMessage = '图像模型没有返回可用图片，已继续生成页面。';
       }
 
-      res.write(
-        `data: ${JSON.stringify({
-          status: 'error',
-          message: errorMessage,
-          data: {
-            id: imageId,
-            slideId,
-            assetId: safeAssetId,
-            title,
-            prompt,
-            purpose,
-            style,
-            url: '',
-            selected: true,
-            error: true,
-          },
-        })}\n\n`
-      );
+      writeSseData(res, {
+        status: 'error',
+        message: errorMessage,
+        data: {
+          id: imageId,
+          slideId,
+          assetId: safeAssetId,
+          title,
+          prompt,
+          purpose,
+          style,
+          url: '',
+          selected: true,
+          error: true,
+        },
+      });
     }
 
-    res.end();
+    endStream(res);
   } catch (error) {
     console.error('生成图片错误:', error);
-    res.write(
-      `data: ${JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : '生成图片失败' })}\n\n`
-    );
-    res.end();
+    writeSseData(res, { status: 'error', message: error instanceof Error ? error.message : '生成图片失败' });
+    endStream(res);
   }
 });
 
@@ -1001,12 +1010,13 @@ router.post('/chat-stream', authMiddleware, async (req: AuthRequest, res: Respon
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    guardStreamResponse(res);
 
-    res.write(`data: ${JSON.stringify({ status: 'start', message: 'AI 思考中...' })}\n\n`);
+    writeSseData(res, { status: 'start', message: 'AI 思考中...' });
 
     let fullContent = '';
 
-    const originalWrite = res.write.bind(res);
+    const originalWrite = (chunk: any) => writeStream(res, chunk.toString());
     (res as any).write = (chunk: any) => {
       const str = chunk.toString();
       if (str.startsWith('data: ') && !str.includes('[DONE]') && !str.includes('status')) {
@@ -1024,31 +1034,29 @@ router.post('/chat-stream', authMiddleware, async (req: AuthRequest, res: Respon
 
     await streamTextModel(provider, apiKey, baseUrl, model, messages, res);
 
-    res.write(`data: ${JSON.stringify({ status: 'complete', data: { fullContent } })}\n\n`);
-    res.end();
+    writeSseData(res, { status: 'complete', data: { fullContent } });
+    endStream(res);
   } catch (error) {
     console.error('Chat stream error:', error);
-    res.write(
-      `data: ${JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : 'AI 对话失败' })}\n\n`
-    );
-    res.end();
+    writeSseData(res, { status: 'error', message: error instanceof Error ? error.message : 'AI 对话失败' });
+    endStream(res);
   }
 });
 
 router.post('/test-text-model', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const defaultKey = await getDefaultApiKey(req.userId!, 'text');
-    if (!defaultKey) {
+    const targetKey = await resolveTestApiKey(req.userId!, 'text', req.body?.modelId);
+    if (!targetKey) {
       return res.json({
         success: false,
         message: '未配置文本模型，请先在设置中添加 API Key',
       });
     }
 
-    const apiKey = decrypt(defaultKey.api_key);
-    const provider = defaultKey.provider;
-    const baseUrl = defaultKey.base_url || '';
-    const model = defaultKey.model || 'gpt-4o';
+    const apiKey = decrypt(targetKey.api_key);
+    const provider = targetKey.provider;
+    const baseUrl = targetKey.base_url || '';
+    const model = targetKey.model || 'gpt-4o';
 
     const testMessages: Message[] = [{ role: 'user', content: '你好，请回复"测试成功"' }];
 
@@ -1146,18 +1154,18 @@ router.post('/test-text-model', authMiddleware, async (req: AuthRequest, res: Re
 
 router.post('/test-image-model', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const defaultKey = await getDefaultApiKey(req.userId!, 'image');
-    if (!defaultKey) {
+    const targetKey = await resolveTestApiKey(req.userId!, 'image', req.body?.modelId);
+    if (!targetKey) {
       return res.json({
         success: false,
         message: '未配置图像模型，请先在设置中添加 API Key',
       });
     }
 
-    const apiKey = decrypt(defaultKey.api_key);
-    const provider = defaultKey.provider;
-    const baseUrl = defaultKey.base_url || '';
-    const model = defaultKey.model || 'dall-e-3';
+    const apiKey = decrypt(targetKey.api_key);
+    const provider = targetKey.provider;
+    const baseUrl = targetKey.base_url || '';
+    const model = targetKey.model || 'dall-e-3';
 
     const effectiveProvider = resolveProvider(provider, model);
     const config = IMAGE_PROVIDERS[effectiveProvider] || IMAGE_PROVIDERS.openai;
@@ -1251,8 +1259,9 @@ router.post('/run-skill', authMiddleware, async (req: AuthRequest, res: Response
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    guardStreamResponse(res);
 
-    res.write(`data: ${JSON.stringify({ status: 'start', message: `正在执行 Skill: ${skillName}...` })}\n\n`);
+    writeSseData(res, { status: 'start', message: `正在执行 Skill: ${skillName}...` });
 
     let systemPrompt = '';
     let userPrompt = '';
@@ -1310,7 +1319,7 @@ router.post('/run-skill', authMiddleware, async (req: AuthRequest, res: Response
 
     let fullContent = '';
 
-    const originalWrite = res.write.bind(res);
+    const originalWrite = (chunk: any) => writeStream(res, chunk.toString());
     (res as any).write = (chunk: any) => {
       const str = chunk.toString();
       if (str.startsWith('data: ') && !str.includes('[DONE]') && !str.includes('status')) {
@@ -1340,14 +1349,12 @@ router.post('/run-skill', authMiddleware, async (req: AuthRequest, res: Response
       result = { rawContent: fullContent };
     }
 
-    res.write(`data: ${JSON.stringify({ status: 'complete', data: { skillId, skillName, result } })}\n\n`);
-    res.end();
+    writeSseData(res, { status: 'complete', data: { skillId, skillName, result } });
+    endStream(res);
   } catch (error) {
     console.error('Skill 执行错误:', error);
-    res.write(
-      `data: ${JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : 'Skill 执行失败' })}\n\n`
-    );
-    res.end();
+    writeSseData(res, { status: 'error', message: error instanceof Error ? error.message : 'Skill 执行失败' });
+    endStream(res);
   }
 });
 

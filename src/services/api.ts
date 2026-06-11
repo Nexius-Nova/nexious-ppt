@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+﻿const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 import type { DesignSpec, SpecSlide, SpecLock, SkillExtension, TemplateAsset, TemplateAssetSettings } from '../types/agent';
 import { translateErrorMessage } from '../utils/errorMessages';
@@ -149,7 +149,7 @@ class ApiClient {
       }
       const message = translateErrorMessage(
         { message: data?.message || data?.error, status: response.status, code: data?.code },
-        '登录状态已失效，请重新登录'
+        '鐧诲綍鐘舵€佸凡澶辨晥锛岃閲嶆柊鐧诲綍'
       );
       if (shouldNotifyUnauthorized(response.status, data?.code) && typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('api:unauthorized', { detail: message }));
@@ -185,7 +185,7 @@ class ApiClient {
           if (!response.ok || !data?.success || !data?.data?.token || !data?.data?.refreshToken) {
             const message = translateErrorMessage(
               { message: data?.message || data?.error, status: response.status, code: data?.code },
-              '登录状态已失效，请重新登录'
+              '鐧诲綍鐘舵€佸凡澶辨晥锛岃閲嶆柊鐧诲綍'
             );
             this.clearAuthTokens();
             if (typeof window !== 'undefined') {
@@ -201,7 +201,6 @@ class ApiClient {
         })
         .catch((error) => {
           const message = translateErrorMessage(error, '登录状态刷新失败，请重新登录');
-          this.clearAuthTokens();
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('api:unauthorized', { detail: message }));
           }
@@ -257,11 +256,11 @@ class ApiClient {
         }
         const message = translateErrorMessage(
           { message: data.message || data.error, status: response.status, code: data.code },
-          '请求失败，请稍后重试'
+          '璇锋眰澶辫触锛岃绋嶅悗閲嶈瘯'
         );
         if (useAuth && shouldNotifyUnauthorized(response.status, data.code) && typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('api:unauthorized', {
-            detail: message || '登录状态已失效，请重新登录'
+            detail: message || '鐧诲綍鐘舵€佸凡澶辨晥锛岃閲嶆柊鐧诲綍'
           }));
         }
 
@@ -281,7 +280,7 @@ class ApiClient {
       const isAbortError = error instanceof DOMException && error.name === 'AbortError';
       const message = translateErrorMessage(
         isAbortError ? { message: 'Request timeout', code: 'REQUEST_TIMEOUT' } : error,
-        isAbortError ? '请求超时，请稍后重试' : '网络连接失败，请检查网络或服务是否可用'
+        isAbortError ? '璇锋眰瓒呮椂锛岃绋嶅悗閲嶈瘯' : '缃戠粶杩炴帴澶辫触锛岃妫€鏌ョ綉缁滄垨鏈嶅姟鏄惁鍙敤'
       );
       return {
         success: false,
@@ -369,11 +368,11 @@ class ApiClient {
         }
         const message = translateErrorMessage(
           { message: errorData.message || errorData.error, status: response.status, code: errorData.code },
-          '请求失败，请稍后重试'
+          '璇锋眰澶辫触锛岃绋嶅悗閲嶈瘯'
         );
         if (useAuth && shouldNotifyUnauthorized(response.status, errorData.code) && typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('api:unauthorized', {
-            detail: message || '登录状态已失效，请重新登录'
+            detail: message || '鐧诲綍鐘舵€佸凡澶辨晥锛岃閲嶆柊鐧诲綍'
           }));
         }
 
@@ -421,7 +420,7 @@ class ApiClient {
     } catch (error) {
       const translatedError = error instanceof Error
         ? new Error(translateErrorMessage(error, error.message))
-        : new Error(translateErrorMessage(error, '未知错误，请稍后重试'));
+        : new Error(translateErrorMessage(error, '鏈煡閿欒锛岃绋嶅悗閲嶈瘯'));
       if (onError) {
         onError(translatedError);
       }
@@ -549,7 +548,7 @@ export const authApi = {
     if (!response.ok) {
       return {
         success: false,
-        message: data.message || '头像上传失败',
+        message: data.message || '澶村儚涓婁紶澶辫触',
         status: response.status,
       } as ApiResponse<User>;
     }
@@ -690,6 +689,7 @@ export interface QueueJobSnapshot {
   phase: string;
   progress: number;
   message?: string;
+  logMessage?: string;
   errorMessage?: string;
   result?: any;
   projectState?: any;
@@ -698,10 +698,14 @@ export interface QueueJobSnapshot {
   completedAt?: number;
 }
 
+function isTerminalQueueJob(job: QueueJobSnapshot | null): job is QueueJobSnapshot {
+  return Boolean(job && ['completed', 'failed', 'cancelled'].includes(job.status));
+}
+
 export interface PptxExportOptions {
   animation?: {
     enabled?: boolean;
-    effect?: 'none' | 'appear' | 'fade' | 'fly' | 'cut' | 'zoom' | 'wipe' | 'split' | 'blinds' | 'checkerboard' | 'dissolve' | 'random_bars' | 'peek' | 'wheel' | 'box' | 'circle' | 'diamond' | 'plus' | 'strips' | 'wedge' | 'stretch' | 'expand' | 'swivel' | 'auto' | 'mixed' | 'random';
+    effect?: 'none' | 'appear' | 'fade' | 'fly' | 'cut' | 'zoom' | 'wipe' | 'split' | 'blinds' | 'checkerboard' | 'dissolve' | 'random_bars' | 'peek' | 'wheel' | 'box' | 'circle' | 'diamond' | 'plus' | 'strips' | 'wedge' | 'stretch' | 'expand' | 'swivel' | 'auto' | 'mixed' | 'random' | 'cinematic' | 'dramatic' | 'kinetic' | 'spotlight' | 'cascade' | 'surprise';
     duration?: number;
     stagger?: number;
     trigger?: 'after-previous' | 'with-previous' | 'on-click';
@@ -845,9 +849,11 @@ export const aiApi = {
   persistGeneratedImage: (data: { slideId: string; imageUrl: string }) =>
     api.post<{ url: string }>('/api/ai/persist-generated-image', data),
 
-  testTextModel: () => api.post<{ success: boolean; message: string }>('/api/ai/test-text-model'),
+  testTextModel: (modelId?: string | number | null) =>
+    api.post<{ success: boolean; message: string }>('/api/ai/test-text-model', { modelId }),
 
-  testImageModel: () => api.post<{ success: boolean; message: string }>('/api/ai/test-image-model'),
+  testImageModel: (modelId?: string | number | null) =>
+    api.post<{ success: boolean; message: string }>('/api/ai/test-image-model', { modelId }),
 
   runSkillStream: async (
     data: {
@@ -1011,7 +1017,7 @@ export const aiApi = {
   ): Promise<void> => {
     const response = await api.fetchWithAuth(`${API_BASE_URL}/api/generate/jobs/${id}/events`);
     if (!response.ok) {
-      throw new Error('任务订阅失败');
+      throw new Error('浠诲姟璁㈤槄澶辫触');
     }
     const reader = response.body?.getReader();
     if (!reader) throw new Error('任务订阅不可用');
@@ -1039,7 +1045,7 @@ export const aiApi = {
         }
       }
     } catch (error) {
-      onError?.(error instanceof Error ? error : new Error('任务订阅中断'));
+      onError?.(error instanceof Error ? error : new Error('浠诲姟璁㈤槄涓柇'));
       throw error;
     }
   },
@@ -1051,31 +1057,42 @@ export const aiApi = {
   ): Promise<QueueJobSnapshot> => {
     const startedAt = Date.now();
     let lastJob: QueueJobSnapshot | null = null;
-    try {
-      await aiApi.subscribeQueueJob(id, (job) => {
-        lastJob = job;
-        onJob(job);
-      });
-    } catch (error) {
-      // Fall back to polling below when SSE is interrupted.
-    }
+    let lastPublishedKey = '';
+    let sseDone = false;
+    let sseError: Error | null = null;
 
-    while (!lastJob || !['completed', 'failed', 'cancelled'].includes(lastJob.status)) {
+    const publishJob = (job: QueueJobSnapshot) => {
+      lastJob = job;
+      const key = [job.id, job.status, job.phase, job.progress, job.updatedAt || 0, job.message || '', job.logMessage || '', job.errorMessage || ''].join('|');
+      if (key === lastPublishedKey) return;
+      lastPublishedKey = key;
+      onJob(job);
+    };
+
+    void aiApi.subscribeQueueJob(id, publishJob).catch((error) => {
+      sseError = error instanceof Error ? error : new Error('任务订阅中断');
+    }).finally(() => {
+      sseDone = true;
+    });
+
+    while (!isTerminalQueueJob(lastJob)) {
       if (Date.now() - startedAt > timeoutMs) throw new Error('任务等待超时');
       await new Promise(resolve => window.setTimeout(resolve, 1500));
       const response = await aiApi.getQueueJob(id);
-      if (!response.success || !response.data) throw new Error(response.message || '获取任务状态失败');
-      lastJob = response.data;
-      onJob(lastJob);
+      if (!response.success || !response.data) {
+        if (sseDone && sseError) throw sseError;
+        throw new Error(response.message || '获取任务状态失败');
+      }
+      publishJob(response.data);
     }
 
-    if (lastJob.status === 'failed') throw new Error(lastJob.errorMessage || '任务执行失败');
-    return lastJob;
+    const finalJob = lastJob as QueueJobSnapshot;
+    if (finalJob.status === 'failed') throw new Error(finalJob.errorMessage || '任务执行失败');
+    return finalJob;
   },
-
   downloadExportJob: async (id: string): Promise<string> => {
     const response = await api.fetchWithAuth(`${API_BASE_URL}/api/generate/jobs/${id}/download`);
-    if (!response.ok) throw new Error('导出文件下载失败');
+    if (!response.ok) throw new Error('瀵煎嚭鏂囦欢涓嬭浇澶辫触');
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1107,7 +1124,7 @@ export const aiApi = {
       },
       body: JSON.stringify({ pages, spec, lock, exportOptions }),
     });
-    if (!response.ok) throw new Error('导出失败');
+    if (!response.ok) throw new Error('瀵煎嚭澶辫触');
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1400,7 +1417,7 @@ export const skillApi = {
 
 export const templateApi = {
   getAll: (category?: string) => {
-    const params = category && category !== '全部' ? `?category=${encodeURIComponent(category)}` : '';
+    const params = category && category !== '鍏ㄩ儴' ? `?category=${encodeURIComponent(category)}` : '';
     return api.get<Template[]>(`/api/templates${params}`);
   },
 
@@ -1509,3 +1526,5 @@ export const generationJobApi = {
 
   cancel: (id: number) => api.post(`/api/generation-jobs/${id}/cancel`)
 };
+
+

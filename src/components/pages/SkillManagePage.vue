@@ -84,8 +84,9 @@ const filteredSkills = computed(() =>
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 );
 
-async function fetchSkills() {
-  loading.value = true;
+async function fetchSkills(options: { silent?: boolean } = {}) {
+  const silent = Boolean(options.silent);
+  if (!silent) loading.value = true;
   try {
     const response = await skillApi.getAll();
     if (response.success && response.data) {
@@ -103,13 +104,15 @@ async function fetchSkills() {
       emit('changed');
     } else {
       loadError.value = translateErrorMessage(response.message, '获取 Skill 列表失败');
-      toastStore.error('加载失败', loadError.value);
+      if (!silent) toastStore.error('加载失败', loadError.value);
+      stopStatusPolling();
     }
   } catch (error) {
     loadError.value = translateErrorMessage(error, '获取 Skill 列表失败');
-    toastStore.error('加载失败', loadError.value);
+    if (!silent) toastStore.error('加载失败', loadError.value);
+    stopStatusPolling();
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
   }
 }
 
@@ -124,7 +127,7 @@ function needsStatusPolling() {
 function startStatusPolling() {
   if (statusPollTimer) return;
   statusPollTimer = setInterval(async () => {
-    await fetchSkills();
+    await fetchSkills({ silent: true });
     if (!needsStatusPolling()) stopStatusPolling();
   }, 2500);
 }
@@ -488,7 +491,7 @@ onBeforeUnmount(stopStatusPolling);
     <UiEmpty
       v-else-if="skills.length === 0"
       title="还没有 Skill"
-      description="上传一个 Skill 包后，输入阶段会按用户资料和文件自动选择可用 Skill。"
+      description="上传一个 Skill 包后，可在工作流中手动选择需要参与本次生成的 Skill。"
     />
 
     <div v-else class="skill-workflow">
@@ -764,12 +767,8 @@ onBeforeUnmount(stopStatusPolling);
   gap: 18px;
   padding: 20px;
   width: 100%;
-  height: 100%;
-  min-height: 0;
-  max-height: calc(100dvh - 56px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  min-height: 100%;
+  overflow: visible;
 }
 
 .page-header {
@@ -854,7 +853,8 @@ onBeforeUnmount(stopStatusPolling);
 .skill-workflow {
   display: grid;
   gap: 12px;
-  min-height: 0;
+  align-content: start;
+  min-width: 0;
 }
 
 .skill-filter {
@@ -904,18 +904,22 @@ onBeforeUnmount(stopStatusPolling);
 .skill-list {
   display: grid;
   gap: 8px;
-  min-height: 0;
+  align-content: start;
+  width: 100%;
+  min-width: 0;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 10px;
   background: var(--color-surface);
+  overflow: visible;
 }
 
 .skill-card {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) auto minmax(220px, 280px) auto;
+  grid-template-columns: minmax(260px, 1fr) auto minmax(240px, 360px) auto;
   align-items: center;
   gap: 12px;
+  width: 100%;
   min-width: 0;
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -1419,10 +1423,6 @@ onBeforeUnmount(stopStatusPolling);
 }
 
 @media (max-width: 860px) {
-  .skill-page {
-    max-height: calc(100svh - 52px);
-  }
-
   .skill-card {
     grid-template-columns: 1fr;
     align-items: stretch;

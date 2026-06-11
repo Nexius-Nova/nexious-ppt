@@ -114,9 +114,30 @@ function normalizeJson(value: unknown, fallback: unknown) {
   return value;
 }
 
+function sanitizeVisibleLog(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  return value
+    .replace(/(["'`])([A-Za-z]:[\\/][^"'`\n\r<>|]+)\1/g, '$1<local-path>$1')
+    .replace(/\b[A-Za-z]:[\\/][^\s"'`<>|]+/g, '<local-path>')
+    .replace(/(["'`])((?:\/home\/|\/Users\/|\/root\/|\/var\/|\/tmp\/|\/opt\/|\/srv\/)[^"'`\n\r]+)\1/g, '$1<local-path>$1')
+    .replace(/(?:\/home\/|\/Users\/|\/root\/|\/var\/|\/tmp\/|\/opt\/|\/srv\/)[^\s"'`<>]+/g, '<local-path>');
+}
+
+function sanitizeVisibleObject(value: unknown): unknown {
+  if (typeof value === 'string') return sanitizeVisibleLog(value);
+  if (Array.isArray(value)) return value.map(sanitizeVisibleObject);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, sanitizeVisibleObject(item)])
+    );
+  }
+  return value;
+}
+
 function normalizeSkill(row: any) {
   return {
     ...row,
+    package_path: row.package_path ? '<skill-package>' : null,
     is_enabled: Boolean(row.is_enabled),
     parameters: normalizeJson(row.parameters, {}),
     manifest: normalizeJson(row.manifest, null),
@@ -125,6 +146,8 @@ function normalizeSkill(row: any) {
     output_contract: normalizeJson(row.output_contract, null),
     test_sample: normalizeJson(row.test_sample, null),
     sandbox_policy: normalizeJson(row.sandbox_policy, null),
+    install_log: sanitizeVisibleLog(row.install_log),
+    test_log: sanitizeVisibleLog(row.test_log),
   };
 }
 
@@ -143,7 +166,9 @@ function normalizeRun(row: any) {
   return {
     ...row,
     input: normalizeJson(row.input, {}),
-    output: normalizeJson(row.output, row.output || null),
+    output: sanitizeVisibleObject(normalizeJson(row.output, row.output || null)),
+    logs: sanitizeVisibleLog(row.logs),
+    error_message: sanitizeVisibleLog(row.error_message),
   };
 }
 

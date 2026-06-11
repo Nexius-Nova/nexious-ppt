@@ -33,6 +33,12 @@ import type { ImageModelConfig, TextModelConfig } from '@/types/agent';
 
 type ModelType = 'text' | 'image';
 type ManagedModel = TextModelConfig | ImageModelConfig;
+type ModelTestStatus = 'testing' | 'success' | 'failed';
+type ModelTestState = {
+  status: ModelTestStatus;
+  message: string;
+  testedAt?: number;
+};
 
 const apiKeyStore = useApiKeyStore();
 const toastStore = useToastStore();
@@ -64,6 +70,7 @@ const formData = ref({
 });
 const showApiKey = ref(false);
 const testingModel = ref<string | null>(null);
+const modelTestStates = ref<Record<string, ModelTestState>>({});
 
 const currentModels = computed<ManagedModel[]>(() => activeTab.value === 'text' ? textModels.value : imageModels.value);
 const currentActiveModel = computed<ManagedModel | undefined>(() => activeTab.value === 'text' ? activeTextModel.value : activeImageModel.value);
@@ -90,6 +97,30 @@ const modelHealthItems = computed(() => [
     icon: CheckCircle2
   }
 ]);
+
+function getModelStatusKey(model: ManagedModel, type: ModelType) {
+  return `${type}:${model.id}`;
+}
+
+function getModelTestState(model: ManagedModel, type: ModelType) {
+  return modelTestStates.value[getModelStatusKey(model, type)];
+}
+
+function getModelTestTone(model: ManagedModel, type: ModelType) {
+  const state = getModelTestState(model, type);
+  if (state?.status === 'testing') return 'info';
+  if (state?.status === 'success') return 'success';
+  if (state?.status === 'failed') return 'danger';
+  return 'neutral';
+}
+
+function getModelTestLabel(model: ManagedModel, type: ModelType) {
+  const state = getModelTestState(model, type);
+  if (state?.status === 'testing') return '测试中';
+  if (state?.status === 'success') return '测试通过';
+  if (state?.status === 'failed') return '测试失败';
+  return '未测试';
+}
 
 onMounted(() => {
   apiKeyStore.fetchApiKeys();
@@ -205,27 +236,46 @@ async function setActiveModel(model: ManagedModel) {
 }
 
 async function testModel(model: ManagedModel, type: ModelType) {
-  testingModel.value = model.id;
-  try {
-    if (type === 'text') {
-      const originalActive = activeTextModel.value?.id;
-      await apiKeyStore.setActiveTextModel(model.id);
-      const response = await aiApi.testTextModel();
-      if (originalActive) await apiKeyStore.setActiveTextModel(originalActive);
-      response.success
-        ? toastStore.success('测试成功', response.message || '连接成功')
-        : toastStore.error('测试失败', response.message || '未知错误');
-    } else {
-      const originalActive = activeImageModel.value?.id;
-      await apiKeyStore.setActiveImageModel(model.id);
-      const response = await aiApi.testImageModel();
-      if (originalActive) await apiKeyStore.setActiveImageModel(originalActive);
-      response.success
-        ? toastStore.success('测试成功', response.message || '连接成功')
-        : toastStore.error('测试失败', response.message || '未知错误');
+  if (testingModel.value) return;
+
+  const statusKey = getModelStatusKey(model, type);
+  testingModel.value = statusKey;
+  modelTestStates.value = {
+    ...modelTestStates.value,
+    [statusKey]: {
+      status: 'testing',
+      message: '正在测试模型连接'
     }
+  };
+  try {
+    const response = type === 'text'
+      ? await aiApi.testTextModel(model.id)
+      : await aiApi.testImageModel(model.id);
+    const message = response.message || (response.success ? '连接成功' : '未知错误');
+
+    modelTestStates.value = {
+      ...modelTestStates.value,
+      [statusKey]: {
+        status: response.success ? 'success' : 'failed',
+        message,
+        testedAt: Date.now()
+      }
+    };
+
+    response.success
+      ? toastStore.success('测试成功', message)
+      : toastStore.error('测试失败', message);
   } catch (error) {
-    toastStore.error('测试失败', error instanceof Error ? error.message : '未知错误');
+    const message = error instanceof Error ? error.message : '未知错误';
+    modelTestStates.value = {
+      ...modelTestStates.value,
+      [statusKey]: {
+        status: 'failed',
+        message,
+        testedAt: Date.now()
+      }
+    };
+    toastStore.error('测试失败', message);
   } finally {
     testingModel.value = null;
   }
@@ -360,10 +410,25 @@ function getProviderLabel(model: ManagedModel) {
             </div>
 
             <div class="model-card__state">
-              <UiBadge :tone="model.hasKey ? 'success' : 'warning'" size="sm">
-                {{ model.hasKey ? '密钥已保存' : '缺少密钥' }}
-              </UiBadge>
-              <span>更新于 {{ formatDate(model.updatedAt) }}</span>
+              <div class="model-card__badges">
+                <UiBadge :tone="model.hasKey ? 'success' : 'warning'" size="sm">
+                  {{ model.hasKey ? '密钥已保存' : '缺少密钥' }}
+                </UiBadge>
+                <UiBadge
+                  class="model-card__test-badge"
+                  :tone="getModelTestTone(model, activeTab)"
+                  size="sm"
+                  :title="getModelTestState(model, activeTab)?.message || '尚未执行连接测试'"
+                >
+                  <Loader2
+                    v-if="getModelTestState(model, activeTab)?.status === 'testing'"
+                    :size="11"
+                    class="animate-spin"
+                  />
+                  {{ getModelTestLabel(model, activeTab) }}
+                </UiBadge>
+              </div>
+              <span class="model-card__updated-at">更新于 {{ formatDate(model.updatedAt) }}</span>
             </div>
 
             <div class="model-card__actions">
@@ -378,10 +443,10 @@ function getProviderLabel(model: ManagedModel) {
               <button
                 class="icon-button icon-button--test"
                 title="测试连接"
-                :disabled="testingModel === model.id"
+                :disabled="Boolean(testingModel)"
                 @click="testModel(model, activeTab)"
               >
-                <Loader2 v-if="testingModel === model.id" :size="14" class="animate-spin" />
+                <Loader2 v-if="testingModel === getModelStatusKey(model, activeTab)" :size="14" class="animate-spin" />
                 <Zap v-else :size="14" />
               </button>
               <button class="icon-button" title="编辑" @click="openEditModal(model, activeTab)">
@@ -793,12 +858,29 @@ function getProviderLabel(model: ManagedModel) {
 }
 
 .model-card__state {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   justify-items: end;
-  gap: 6px;
-  min-width: 110px;
+  gap: 8px;
+  min-width: 210px;
   color: var(--color-subtle);
   font-size: 11px;
+  text-align: right;
+}
+
+.model-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 260px;
+}
+
+.model-card__updated-at {
+  display: block;
+  min-width: max-content;
+  line-height: 1.35;
 }
 
 .model-card__actions {
@@ -1032,8 +1114,15 @@ function getProviderLabel(model: ManagedModel) {
   }
 
   .model-card__state {
+    align-items: flex-start;
     justify-items: start;
     min-width: 0;
+    text-align: left;
+  }
+
+  .model-card__badges {
+    justify-content: flex-start;
+    max-width: 100%;
   }
 
   .model-card__actions {

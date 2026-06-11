@@ -8,7 +8,16 @@ import { generatedSkillsRoot } from '../utils/storage.js';
 export type SkillRuntime = 'prompt-only' | 'python' | 'node';
 export type SkillInstallStatus = 'not_required' | 'pending' | 'installing' | 'ready' | 'failed';
 export type SkillTestStatus = 'not_tested' | 'testing' | 'passed' | 'failed' | 'skipped';
-export type SkillCapability = 'web-search' | 'file-parse' | 'content-refine' | 'image-tool' | 'topic-extract' | 'generation-constraint';
+export type SkillCapability =
+  | 'web-search'
+  | 'file-parse'
+  | 'content-refine'
+  | 'image-tool'
+  | 'topic-extract'
+  | 'generation-constraint'
+  | 'chart-design'
+  | 'svg-layout'
+  | 'page-generation';
 
 interface SkillManifest {
   name?: string;
@@ -23,6 +32,7 @@ interface SkillManifest {
   testSample?: Record<string, unknown>;
   sandbox?: Record<string, unknown>;
   parameters?: Record<string, unknown>;
+  autoFixes?: SkillPackageAutoFix[];
 }
 
 interface PackageAnalysis {
@@ -47,6 +57,11 @@ interface PackageAnalysis {
     inferredDependencies?: string[];
   };
   files: Array<{ relativePath: string; data: Buffer }>;
+}
+
+interface SkillPackageAutoFix {
+  file: string;
+  reason: string;
 }
 
 interface CommandSkillAdapter {
@@ -193,6 +208,77 @@ function readTextForSecurityScan(data: Buffer) {
   const sample = data.subarray(0, Math.min(data.byteLength, TEXT_SCAN_BYTES));
   if (sample.includes(0)) return '';
   return sample.toString('utf8');
+}
+
+function repairSkillSecurityFalsePositiveText(content: string, relativePath: string) {
+  let next = content;
+  const fixes: string[] = [];
+  const lowerPath = relativePath.toLowerCase();
+  const isMarkdownLike = /\.(md|txt|rst)$/i.test(lowerPath);
+  const isPython = /\.py$/i.test(lowerPath);
+
+  if (isMarkdownLike || isPython) {
+    const before = next;
+    next = next.replace(/\bsudo\s+(apt|apt-get|dnf|yum|apk|brew)\s+/gi, '$1 ');
+    if (next !== before) {
+      fixes.push(isPython ? '移除提示文本中的 sudo 前缀' : '移除文档示例中的 sudo 前缀');
+    }
+  }
+
+  if (isMarkdownLike) {
+    const before = next;
+    next = next
+      .replace(/(['"`])\.\.\/scripts\1/g, '$1scripts$1')
+      .replace(/(['"`])\.\.\\scripts\1/g, '$1scripts$1')
+      .replace(/\.\.\/scripts/g, 'scripts')
+      .replace(/\.\.\\scripts/g, 'scripts');
+    if (next !== before) {
+      fixes.push('改写文档示例中的父目录脚本路径');
+    }
+  }
+
+  return { content: next, fixes };
+}
+
+function annotateSkillPackageAutoFixes(analysis: PackageAnalysis, fixes: SkillPackageAutoFix[]): PackageAnalysis {
+  if (!fixes.length) return analysis;
+  return {
+    ...analysis,
+    parameters: {
+      ...analysis.parameters,
+      autoFixes: fixes,
+    },
+    manifest: {
+      ...analysis.manifest,
+      autoFixes: fixes,
+    },
+  };
+}
+
+function autoRepairSkillPackageAnalysis(analysis: PackageAnalysis): PackageAnalysis {
+  const repairedFiles = new Map<string, Buffer>();
+  const fixes: SkillPackageAutoFix[] = [];
+  let changed = false;
+
+  for (const file of analysis.files) {
+    repairedFiles.set(file.relativePath, file.data);
+    const relativePath = file.relativePath.replace(/\\/g, '/');
+    if (!isTextScannablePath(relativePath)) continue;
+    if (file.data.byteLength > TEXT_SCAN_BYTES) continue;
+    const content = readTextForSecurityScan(file.data);
+    if (!content) continue;
+    const repair = repairSkillSecurityFalsePositiveText(content, relativePath);
+    if (!repair.fixes.length || repair.content === content) continue;
+    repairedFiles.set(file.relativePath, Buffer.from(repair.content, 'utf8'));
+    changed = true;
+    for (const reason of repair.fixes) {
+      fixes.push({ file: relativePath, reason });
+    }
+  }
+
+  if (!changed) return analysis;
+  const repairedAnalysis = normalizePackage(repairedFiles, analysis.name);
+  return annotateSkillPackageAutoFixes(repairedAnalysis, fixes);
 }
 
 function hasSuspiciousPackageJsonDependency(value: unknown) {
@@ -437,6 +523,9 @@ function normalizeSkillCapability(value: unknown): SkillCapability | null {
   if (['image-tool', 'image', 'vision'].includes(raw)) return 'image-tool';
   if (['topic-extract', 'topic', 'title'].includes(raw)) return 'topic-extract';
   if (['generation-constraint', 'constraint', 'config', 'prompt'].includes(raw)) return 'generation-constraint';
+  if (['chart-design', 'chart', 'charts', 'data-chart', 'data-visualization', 'dataviz'].includes(raw)) return 'chart-design';
+  if (['svg-layout', 'svg', 'layout', 'page-layout', 'visual-layout'].includes(raw)) return 'svg-layout';
+  if (['page-generation', 'page', 'slide-generation', 'executor', 'svg-generation'].includes(raw)) return 'page-generation';
   return null;
 }
 
@@ -468,6 +557,9 @@ function inferSkillCapabilities(manifest: SkillManifest, instruction: string, fi
   if (/file|parse|docx|pdf|pptx|xlsx|markdown|文件|解析|读取/.test(text)) capabilities.add('file-parse');
   if (/topic|title|summary|summar|主题|标题|提炼|摘要/.test(text)) capabilities.add('topic-extract');
   if (/constraint|config|prompt|template|rule|约束|配置|提示词|模板/.test(text)) capabilities.add('generation-constraint');
+  if (/chart|table|dataviz|data[-\s]?visuali[sz]ation|图表|表格|数据可视化/.test(text)) capabilities.add('chart-design');
+  if (/svg|layout|composition|grid|页面布局|版式|布局|构图/.test(text)) capabilities.add('svg-layout');
+  if (/page[-\s]?generation|slide[-\s]?generation|executor|svg[-\s]?generation|页面生成|幻灯片生成|单页生成|svg生成/.test(text)) capabilities.add('page-generation');
   if (/image|vision|picture|图片|图像|视觉/.test(text)) capabilities.add('image-tool');
   if (/refine|rewrite|polish|content|润色|改写|优化/.test(text)) capabilities.add('content-refine');
   return Array.from(capabilities);
@@ -664,7 +756,7 @@ async function analyzePackage(filename: string, dataBase64: string): Promise<Pac
       throw new Error('SKILL.md 内容无效，请上传文本格式的 Skill 说明文件。');
     }
     files.set('SKILL.md', buffer);
-    return normalizePackage(files, filename);
+    return autoRepairSkillPackageAnalysis(normalizePackage(files, filename));
   }
 
   if (!lowerName.endsWith('.zip') && !lowerName.endsWith('.skill')) {
@@ -690,7 +782,7 @@ async function analyzePackage(filename: string, dataBase64: string): Promise<Pac
   }
 
   if (!files.size) throw new Error('Skill package contains no usable files.');
-  return normalizePackage(files, filename);
+  return autoRepairSkillPackageAnalysis(normalizePackage(files, filename));
 }
 
 async function analyzePackageDirectory(packagePath: string): Promise<PackageAnalysis> {
@@ -899,6 +991,14 @@ function detectPackageAdaptationPlan(analysis: PackageAnalysis) {
   const instruction = String(analysis.parameters.instruction || '');
   const commandAdapter = !analysis.entry ? detectSkillCommandAdapter(instruction) : null;
   const plan: string[] = [];
+  const autoFixes = Array.isArray(analysis.parameters.autoFixes)
+    ? analysis.parameters.autoFixes as SkillPackageAutoFix[]
+    : [];
+
+  if (autoFixes.length) {
+    const files = Array.from(new Set(autoFixes.map((fix) => fix.file))).slice(0, 4);
+    plan.push(`已自动修复 ${autoFixes.length} 处包内安全检查误报：${files.join('、')}${autoFixes.length > files.length ? ' 等' : ''}`);
+  }
 
   if (commandAdapter) {
     plan.push(...commandAdapter.plan);
@@ -1103,6 +1203,35 @@ function pipExecutable(packagePath: string) {
 function compactRunText(value: string, maxLength = 900) {
   const normalized = value.trim().replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sanitizeLogPaths(value: string, packagePath?: string) {
+  if (!value) return '';
+  let next = value.replace(/\r\n/g, '\n');
+  const normalizedPackagePath = packagePath ? path.resolve(packagePath) : '';
+
+  if (normalizedPackagePath) {
+    const variants = Array.from(new Set([
+      normalizedPackagePath,
+      normalizedPackagePath.replace(/\\/g, '/'),
+      normalizedPackagePath.replace(/\//g, '\\'),
+    ])).filter(Boolean);
+
+    for (const variant of variants) {
+      next = next.replace(new RegExp(`${escapeRegExp(variant)}(?:[\\/])?`, 'gi'), '<skill-package>/');
+    }
+  }
+
+  return next
+    .replace(/(["'`])([A-Za-z]:[\\/][^"'`\n\r<>|]+)\1/g, '$1<local-path>$1')
+    .replace(/\b[A-Za-z]:[\\/][^\s"'`<>|]+/g, '<local-path>')
+    .replace(/(["'`])((?:\/home\/|\/Users\/|\/root\/|\/var\/|\/tmp\/|\/opt\/|\/srv\/)[^"'`\n\r]+)\1/g, '$1<local-path>$1')
+    .replace(/(?:\/home\/|\/Users\/|\/root\/|\/var\/|\/tmp\/|\/opt\/|\/srv\/)[^\s"'`<>]+/g, '<local-path>')
+    .replace(/<skill-package>[\\/]/g, '<skill-package>/');
 }
 
 function schemaTypeOf(value: unknown) {
@@ -1328,20 +1457,22 @@ async function fileExists(filePath: string) {
 }
 
 async function updateSkillInstallStatus(skillId: number, status: SkillInstallStatus, log: string, installed = false) {
+  const safeLog = sanitizeLogPaths(log).slice(-12000);
   await query(
     `UPDATE skills
      SET install_status = ?, install_log = ?, last_installed_at = ${installed ? 'CURRENT_TIMESTAMP' : 'last_installed_at'}
      WHERE id = ?`,
-    [status, log.slice(-12000), skillId]
+    [status, safeLog, skillId]
   );
 }
 
 async function updateSkillTestStatus(skillId: number, status: SkillTestStatus, log: string) {
+  const safeLog = sanitizeLogPaths(log).slice(-12000);
   await query(
     `UPDATE skills
      SET test_status = ?, test_log = ?, last_tested_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
-    [status, log.slice(-12000), skillId]
+    [status, safeLog, skillId]
   );
 }
 
@@ -1796,11 +1927,11 @@ export async function initializeSkillEnvironment(skillId: number, userId?: numbe
           analysis.testSample ? JSON.stringify(analysis.testSample) : null,
           JSON.stringify(analysis.sandboxPolicy),
           JSON.stringify(nextParameters),
-          [
+          sanitizeLogPaths([
             '正在自动适配 Skill 包到输入阶段工作流...',
             ...adaptationLogs,
             adaptationLogs.length ? '自动适配完成，准备初始化依赖。' : '未发现需要生成的新执行入口，准备初始化依赖。',
-          ].join('\n'),
+          ].join('\n'), packagePath),
           skillId,
         ]
       );
@@ -1895,9 +2026,16 @@ export async function createSkillFromPackage(userId: number, filename: string, d
     : false;
   const initialStatus: SkillInstallStatus = analysis.runtime === 'prompt-only' && !commandAdaptable ? 'not_required' : 'pending';
   const initialType = initialStatus === 'not_required' ? 'prompt-only' : 'package';
-  const initialLog = initialStatus === 'not_required'
+  const autoFixes = Array.isArray(analysis.parameters.autoFixes)
+    ? analysis.parameters.autoFixes as SkillPackageAutoFix[]
+    : [];
+  const autoFixLog = autoFixes.length
+    ? `已自动修复包内安全检查误报：\n${autoFixes.map((fix) => `- ${fix.file}：${fix.reason}`).join('\n')}\n\n`
+    : '';
+  const baseInitialLog = initialStatus === 'not_required'
     ? '未识别到可执行入口，将作为提示词型 Skill 使用；无需依赖初始化。'
     : 'Skill 包已保存，等待自动适配、初始化依赖并执行健康测试。';
+  const initialLog = autoFixLog + baseInitialLog;
   const result = await query<any>(
     `INSERT INTO skills
       (user_id, name, description, icon, category, parameters, is_enabled, type, runtime, entry, manifest, capabilities, input_contract, output_contract, test_sample, sandbox_policy, dependency_file, install_status, install_log, test_status, test_log)
@@ -2138,6 +2276,10 @@ export async function runSkillPackage(
     const outputText = result.stdout.trim();
     const stderrText = result.stderr.trim();
     const validation = validateSkillRunOutput(skill, payload, outputText, stderrText);
+    const safeStderrText = sanitizeLogPaths(stderrText, packagePath);
+    const safeValidationMessage = sanitizeLogPaths(validation.message, packagePath);
+    const safeReadableArgs = sanitizeLogPaths(readableArgs, packagePath);
+    const safeArgs = args.slice(1).map((item) => sanitizeLogPaths(item, packagePath));
 
     if (!validation.ok) {
       await query(
@@ -2148,18 +2290,18 @@ export async function runSkillPackage(
           JSON.stringify({
             mode: runtime,
             entry,
-            args: args.slice(1),
+            args: safeArgs,
             text: outputText,
-            stderr: stderrText,
+            stderr: safeStderrText,
             ok: false,
-            summary: validation.message,
+            summary: safeValidationMessage,
           }),
-          validation.message,
+          safeValidationMessage,
           [
-            `执行入口：${entry}${readableArgs ? ` ${readableArgs}` : ''}`,
-            stderrText,
+            `执行入口：${entry}${safeReadableArgs ? ` ${safeReadableArgs}` : ''}`,
+            safeStderrText,
             outputText ? `stdout：${compactRunText(outputText, 1200)}` : '未返回 stdout 内容。',
-          ].filter(Boolean).join('\n'),
+          ].filter(Boolean).map((item) => sanitizeLogPaths(item, packagePath)).join('\n'),
           runId,
         ]
       );
@@ -2181,18 +2323,18 @@ export async function runSkillPackage(
           JSON.stringify({
             mode: runtime,
             entry,
-            args: args.slice(1),
+            args: safeArgs,
             text: outputText,
-            stderr: stderrText,
+            stderr: safeStderrText,
             ok: false,
-            summary: message,
+            summary: sanitizeLogPaths(message, packagePath),
           }),
-          message,
+          sanitizeLogPaths(message, packagePath),
           [
-            `执行入口：${entry}${readableArgs ? ` ${readableArgs}` : ''}`,
-            stderrText,
+            `执行入口：${entry}${safeReadableArgs ? ` ${safeReadableArgs}` : ''}`,
+            safeStderrText,
             outputText ? `stdout：${compactRunText(outputText, 1200)}` : '未返回 stdout 内容。',
-          ].filter(Boolean).join('\n'),
+          ].filter(Boolean).map((item) => sanitizeLogPaths(item, packagePath)).join('\n'),
           runId,
         ]
       );
@@ -2207,22 +2349,22 @@ export async function runSkillPackage(
         JSON.stringify({
           mode: runtime,
           entry,
-          args: args.slice(1),
+          args: safeArgs,
           text: outputText,
-          stderr: stderrText,
+          stderr: safeStderrText,
           ok: true,
           summary: outputText ? outputText.slice(0, 500) : 'Skill 执行完成，但没有返回正文。',
         }),
         [
-          `执行入口：${entry}${readableArgs ? ` ${readableArgs}` : ''}`,
-          stderrText,
+          `执行入口：${entry}${safeReadableArgs ? ` ${safeReadableArgs}` : ''}`,
+          safeStderrText,
           outputText ? `输出 ${outputText.length} 个字符。` : '未返回 stdout 内容。',
-        ].filter(Boolean).join('\n'),
+        ].filter(Boolean).map((item) => sanitizeLogPaths(item, packagePath)).join('\n'),
         runId,
       ]
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Skill run failed.';
+    const message = sanitizeLogPaths(error instanceof Error ? error.message : 'Skill run failed.', packagePath);
     await query(
       `UPDATE skill_runs
        SET status = 'failed', progress = 100, error_message = ?, logs = ?, completed_at = CURRENT_TIMESTAMP

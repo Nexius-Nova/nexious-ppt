@@ -64,7 +64,7 @@ def main() -> None:
     animation_choices = (
         ['none'] + (list(_ANIMATIONS.keys()) if _ANIMATIONS
                     else ['fade', 'fly', 'zoom', 'appear'])
-        + ['auto', 'mixed', 'random']
+        + ['auto', 'mixed', 'random', 'cinematic', 'dramatic', 'kinetic', 'spotlight', 'cascade', 'surprise']
     )
 
     parser = argparse.ArgumentParser(
@@ -194,7 +194,9 @@ Recorded narration:
                              'only). Pick a single effect, "auto" (default; map '
                              'effect from group id — image-like ids cycle a richer '
                              'pool for visual variation, fallback cycles fade/wipe/'
-                             'fly/zoom), "mixed" (legacy 16-effect pool), "random", '
+                             'fly/zoom), expressive presets ("cinematic", "dramatic", '
+                             '"kinetic", "spotlight", "cascade", "surprise"), '
+                             '"mixed" (legacy 16-effect pool), "random", '
                              'or "none" to disable.')
     parser.add_argument('--animation-duration', type=non_negative_float, default=None,
                         help='Per-element entrance duration in seconds (default: 0.4)')

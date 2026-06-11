@@ -151,13 +151,11 @@ const suggestionChips = computed(() => {
   const prompt = prompts.value.find((item) => item.id === selectedPromptId.value);
   const firstPrompt = prompt || prompts.value[0];
   const firstTemplate = selectedTemplate.value || templates.value[0];
-  const firstSkill = skills.value.find((skill) => skill.enabled) || skills.value[0];
   const imageTarget = images.value.find((image) => image.error || !image.url) || images.value[0];
   const pageTarget = slideOptions.value.find((slide) => svgPages.value.some((page) => page.pageNumber === slide.pageNumber)) || slideOptions.value[0];
 
   if (firstPrompt) chips.push({ label: '调整提示词', text: `帮我使用提示词「${firstPrompt.title}」` });
   if (firstTemplate) chips.push({ label: '调整模板', text: `帮我使用参考模板「${firstTemplate.name}」` });
-  if (firstSkill) chips.push({ label: '启用 Skill', text: `帮我启用 Skill「${firstSkill.name}」` });
   chips.push({ label: '调整参数', text: '帮我把生成参数调整得更适合当前 PPT' });
   if (imageTarget) chips.push({ label: '重试图片', text: `帮我重试图片：${imageTarget.title}` });
   if (pageTarget) chips.push({ label: '修改页面', text: `帮我修改第 ${pageTarget.pageNumber} 页的 SVG 页面内容` });
@@ -217,7 +215,7 @@ watch(
 function addWelcomeMessage() {
   messages.value.push({
     role: 'assistant',
-    content: `你好，我是这个 PPT 的桌面助手。现在可以帮你切换模板和提示词、启用 Skill、调整参数，也能重试图片或单页 SVG、保存、暂停/继续、切换版本。删除图片或页面前我会先确认。`
+    content: `你好，我是这个 PPT 的桌面助手。现在可以帮你切换模板和提示词、调整参数，也能重试图片或单页 SVG、保存、暂停/继续、切换版本。Skill 只会在你明确选择后参与生成。删除图片或页面前我会先确认。`
   });
 }
 

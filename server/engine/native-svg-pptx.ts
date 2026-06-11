@@ -49,7 +49,13 @@ export type NativeSvgPptxAnimationEffect =
   | 'swivel'
   | 'auto'
   | 'mixed'
-  | 'random';
+  | 'random'
+  | 'cinematic'
+  | 'dramatic'
+  | 'kinetic'
+  | 'spotlight'
+  | 'cascade'
+  | 'surprise';
 
 export type NativeSvgPptxTransitionEffect =
   | 'none'
@@ -204,6 +210,12 @@ function isAnimationEffect(value: unknown): value is NativeSvgPptxAnimationEffec
     'auto',
     'mixed',
     'random',
+    'cinematic',
+    'dramatic',
+    'kinetic',
+    'spotlight',
+    'cascade',
+    'surprise',
   ].includes(String(value));
 }
 

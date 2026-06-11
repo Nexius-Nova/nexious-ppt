@@ -230,14 +230,15 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   <UiCard title="大纲" subtitle="调整页面顺序、要点、讲稿和图片需求。修改后会影响后续页面生成。">
     <template v-if="showRunAction !== false" #actions>
       <UiButton size="sm" variant="secondary" :disabled="isRunning" @click="$emit('run')">
-        <RefreshCw :size="13" :class="{ 'animate-spin': isRunning }" />
+        <span v-if="isRunning" class="outline-spinner outline-spinner--button" aria-hidden="true" />
+        <RefreshCw v-else :size="13" />
         {{ isRunning ? '生成中...' : outline.length ? '重新生成大纲' : '生成大纲' }}
       </UiButton>
     </template>
 
     <div v-if="isRunning" class="streaming-container">
       <div class="streaming-header">
-        <Loader2 :size="16" class="animate-spin" />
+        <span class="outline-spinner" aria-hidden="true" />
         <span>{{ outline.length ? `已生成 ${outline.length} 页` : '正在生成大纲...' }}</span>
       </div>
       <p class="streaming-hint">AI 返回内容会实时整理成下面的大纲卡片。</p>
@@ -449,6 +450,7 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   border-radius: var(--radius-md);
   background: var(--color-accent-soft);
   margin-bottom: 10px;
+  contain: paint;
 }
 
 .streaming-header {
@@ -458,6 +460,33 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
   color: var(--color-accent);
   font-size: 13px;
   font-weight: 500;
+}
+
+.outline-spinner {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  transform: translateZ(0);
+}
+
+.outline-spinner::before {
+  content: "";
+  width: 100%;
+  height: 100%;
+  border: 2px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-top-color: currentColor;
+  border-radius: 999px;
+  transform: translateZ(0);
+  will-change: transform;
+  animation: outline-spinner-rotate 0.9s linear infinite;
+}
+
+.outline-spinner--button {
+  width: 13px;
+  height: 13px;
 }
 
 .streaming-hint {
@@ -926,7 +955,15 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 }
 
 .animate-spin {
+  transform: translateZ(0);
+  will-change: transform;
   animation: spin 1s linear infinite;
+}
+
+@keyframes outline-spinner-rotate {
+  to {
+    transform: translateZ(0) rotate(360deg);
+  }
 }
 
 /* ---- Copilot ---- */

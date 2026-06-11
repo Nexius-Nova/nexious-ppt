@@ -240,10 +240,10 @@ async function testTextModel() {
   testingTextModel.value = true;
   try {
     const response = await aiApi.testTextModel();
-    if (response.success && response.data?.success) {
-      toastStore.success('测试成功', response.data.message);
+    if (response.success) {
+      toastStore.success('测试成功', response.message || '连接成功');
     } else {
-      toastStore.error('测试失败', response.data?.message || '未知错误');
+      toastStore.error('测试失败', response.message || '未知错误');
     }
   } catch (error) {
     toastStore.error('测试失败', error instanceof Error ? error.message : '未知错误');
@@ -261,10 +261,10 @@ async function testImageModel() {
   testingImageModel.value = true;
   try {
     const response = await aiApi.testImageModel();
-    if (response.success && response.data?.success) {
-      toastStore.success('测试成功', response.data.message);
+    if (response.success) {
+      toastStore.success('测试成功', response.message || '连接成功');
     } else {
-      toastStore.error('测试失败', response.data?.message || '未知错误');
+      toastStore.error('测试失败', response.message || '未知错误');
     }
   } catch (error) {
     toastStore.error('测试失败', error instanceof Error ? error.message : '未知错误');

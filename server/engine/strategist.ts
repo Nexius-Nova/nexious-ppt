@@ -98,7 +98,7 @@ function wantsAnimationOutline(input: StrategistInput) {
   const enabled = String(input.animationEnabled || 'auto').toLowerCase();
   if (enabled === 'enabled' || enabled === 'true' || enabled === 'yes') return true;
   if (enabled === 'disabled' || enabled === 'false' || enabled === 'none') return false;
-  return /(动画|动效|转场|入场|飞入|淡入|缩放|放映效果|animation|motion|transition)/i.test(`${input.topic || ''}\n${input.content || ''}`);
+  return /(动画|动效|转场|入场|飞入|淡入|缩放|放映效果|酷炫|炫酷|惊艳|电影感|高能|动感|视觉冲击|奇妙|animation|motion|transition|cinematic|kinetic|dramatic)/i.test(`${input.topic || ''}\n${input.content || ''}`);
 }
 
 function buildAnimationGuide(input: StrategistInput) {
@@ -106,15 +106,26 @@ function buildAnimationGuide(input: StrategistInput) {
     return 'Animation planning: animation is not enabled. Set every outline item "animationDescription" to an empty string.';
   }
   const effect = String(input.animationEffect || 'auto');
+  const presetGuides: Record<string, string> = {
+    cinematic: '- Preset tone: cinematic. Use polished scene changes, title-first reveals, subtle zooms on hero visuals, and smooth emphasis at the end.',
+    dramatic: '- Preset tone: dramatic. Build suspense with bold focal reveals, punchy chart/card entrances, and stronger page transitions for key turns.',
+    kinetic: '- Preset tone: kinetic. Use quick staggered sequences, directional motion, and lively but readable pacing.',
+    spotlight: '- Preset tone: spotlight. Keep motion premium and focused: fade/zoom the key message, then reveal supporting details quietly.',
+    cascade: '- Preset tone: cascade. Reveal layers, steps, cards, or chart components in a clear top-to-bottom or left-to-right build.',
+    surprise: '- Preset tone: surprise. Use playful variety and unexpected reveals, but keep each slide understandable and avoid overloading dense pages.'
+  };
   return [
     'Animation planning:',
     '- The user/project needs an animated PPT. Every outline item must include "animationDescription".',
-    '- Describe the intended entrance sequence for this page in Chinese, including which elements appear first and how the page transition should feel.',
+    '- Describe the intended entrance sequence for this page in Chinese, including which elements appear first, where the emphasis lands, and how the page transition should feel.',
+    '- Do not lock every page to the same effect. Vary pacing and motion according to the page purpose, layout density, chart/image usage, and narrative moment.',
+    '- Prefer describing intent and rhythm over naming one fixed animation effect; the exporter will translate the description into PowerPoint-native effects.',
     '- Keep it practical for PowerPoint export: title, key message, chart/image/card groups, and final emphasis. Do not request unsupported complex filters.',
     effect === 'auto'
       ? '- Animation effect is auto: choose suitable effects per page independently, without being constrained by templates or prompts.'
       : `- Preferred animation effect: ${effect}. Use it when suitable, but keep page readability first.`,
-  ].join('\n');
+    presetGuides[effect] || '',
+  ].filter(Boolean).join('\n');
 }
 
 function fallbackAnimationDescription(item: any, input: StrategistInput, pageNumber: number, layout: SpecSlide['layout']) {

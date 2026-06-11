@@ -39,6 +39,7 @@ def main() -> int:
         "blinds", "checkerboard", "dissolve", "random_bars", "peek",
         "wheel", "box", "circle", "diamond", "plus", "strips", "wedge",
         "stretch", "expand", "swivel", "auto", "mixed", "random",
+        "cinematic", "dramatic", "kinetic", "spotlight", "cascade", "surprise",
     ]
     transition_choices = ["none", "fade", "push", "wipe", "split", "strips", "cover", "auto", "random"]
 

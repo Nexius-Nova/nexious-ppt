@@ -28,6 +28,7 @@ import type { DesignSpec, SpecLock, SpecSlide, StrategistInput } from '../engine
 import { buildSlideImagePrompt } from '../engine/imageComposition.js';
 import { exportWithNexiousPpt, type PptExportOptions, type PptExportPage } from '../engine/ppt-exporter.js';
 import { generatedExportsRoot, generatedImagesRoot, publicBaseUrl } from '../utils/storage.js';
+import { endStream, guardStreamResponse, writeSseData, writeStream } from '../utils/sse.js';
 import { deriveWorkflowTransition, workflowStepProgress, workflowStepStatus } from './workflowStateMachine.js';
 import {
   getChartCatalog,
@@ -49,6 +50,7 @@ export interface QueuedJobSnapshot {
   phase: string;
   progress: number;
   message?: string;
+  logMessage?: string;
   errorMessage?: string;
   result?: any;
   projectState?: any;
@@ -86,6 +88,7 @@ interface QueuedJobBase {
   phase: string;
   progress: number;
   message?: string;
+  logMessage?: string;
   errorMessage?: string;
   result?: any;
   cancelRequested?: boolean;
@@ -952,17 +955,22 @@ function publishJob(job: QueuedJob) {
   const set = subscribers.get(job.id);
   if (set) {
     for (const res of set) {
-      res.write(payload);
+      if (!writeStream(res, payload)) {
+        set.delete(res);
+      }
     }
+    if (set.size === 0) subscribers.delete(job.id);
   }
 }
 
 async function updateJob(
   job: QueuedJob,
-  patch: Partial<Pick<QueuedJob, 'status' | 'phase' | 'progress' | 'message' | 'errorMessage' | 'result' | 'completedAt'>>
+  patch: Partial<Pick<QueuedJob, 'status' | 'phase' | 'progress' | 'message' | 'logMessage' | 'errorMessage' | 'result' | 'completedAt'>>
 ) {
   if (job.status === 'cancelled' && patch.status !== 'cancelled') return;
+  const hasLogMessagePatch = Object.prototype.hasOwnProperty.call(patch, 'logMessage');
   Object.assign(job, patch, { updatedAt: Date.now() });
+  if (!hasLogMessagePatch) job.logMessage = undefined;
   if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
     job.completedAt = job.completedAt || Date.now();
   }
@@ -978,6 +986,7 @@ async function updateJob(
         queueJobId: job.id,
         kind: job.kind,
         message: job.message,
+        logMessage: job.logMessage,
         result: job.result,
       },
     }).catch((error) => console.warn('更新队列任务状态失败:', error));
@@ -1275,7 +1284,7 @@ async function runGenerateJob(job: GenerateQueuedJob) {
   let existingSvgPages: ServerSvgPage[] = [];
 
   if (resumeStage === 'outline') {
-    await updateJob(job, { phase: 'outline', progress: 8, message: '正在生成大纲' });
+    await updateJob(job, { phase: 'outline', progress: 8, message: '正在生成大纲', logMessage: '正在生成大纲' });
     await assertJobActive(job);
     const chartCatalog = await getChartCatalog();
     const { system, user } = buildStrategistPrompt(input, { chartCatalog });
@@ -1313,6 +1322,9 @@ async function runGenerateJob(job: GenerateQueuedJob) {
         message: partialOutline.length
           ? `正在生成大纲：已输出 ${partialOutline.length} 页`
           : '正在生成大纲',
+        logMessage: partialOutline.length
+          ? `正在生成大纲：已输出 ${partialOutline.length} 页`
+          : '正在生成大纲',
         result: { outline: partialOutline, images: [], svgPages: [] },
       });
     };
@@ -1332,6 +1344,7 @@ async function runGenerateJob(job: GenerateQueuedJob) {
       phase: 'outline',
       progress: 28,
       message: `大纲生成完成，共 ${spec.outline.length} 页`,
+      logMessage: `大纲生成完成，共 ${spec.outline.length} 页`,
       result: { spec, lock, outline: spec.outline, images: [], svgPages: [] },
     });
     await assertJobActive(job);
@@ -1547,9 +1560,12 @@ async function generateSlideImageWithAutoRetry(
   slide: SpecSlide,
   plan: SlideImagePlan,
   config: ImageModelConfig,
-  progress: number
+  progress: number,
+  context?: { index?: number; total?: number }
 ): Promise<ServerImage> {
   let lastError: unknown = null;
+  const imageLabel = `${slide.title} / ${plan.purpose || plan.id}`;
+  const countText = context?.index && context.total ? `（${context.index}/${context.total}）` : '';
 
   for (let attempt = 1; attempt <= IMAGE_GENERATION_ATTEMPTS; attempt += 1) {
     try {
@@ -1558,8 +1574,11 @@ async function generateSlideImageWithAutoRetry(
         phase: 'images',
         progress,
         message: attempt === 1
-          ? `正在为"${slide.title}"生成图片...`
-          : `正在为"${slide.title}"重试生成图片...`,
+          ? `正在生成第 ${slide.pageNumber} 页图片：${imageLabel}`
+          : `正在重试第 ${slide.pageNumber} 页图片：${imageLabel}`,
+        logMessage: attempt === 1
+          ? `正在生成图片素材：第 ${slide.pageNumber} 页 ${imageLabel}${countText}`
+          : `正在重试图片素材：第 ${slide.pageNumber} 页 ${imageLabel}${countText}`,
       });
       return await generateSlideImageForQueue(job, slide, plan, config, attempt);
     } catch (error) {
@@ -1568,7 +1587,8 @@ async function generateSlideImageWithAutoRetry(
         await updateJob(job, {
           phase: 'images',
           progress,
-          message: `图片生成失败，正在为"${slide.title}"自动重试...`,
+          message: `图片生成失败，正在重试第 ${slide.pageNumber} 页图片：${imageLabel}`,
+          logMessage: `图片生成失败，准备自动重试：第 ${slide.pageNumber} 页 ${imageLabel}${countText}`,
         });
       }
     }
@@ -1608,9 +1628,13 @@ async function maybeGenerateImages(
   async function worker() {
     while (cursor < tasks.length) {
       await assertJobActive(job);
-      const { slide, plan } = tasks[cursor++];
+      const taskIndex = cursor++;
+      const { slide, plan } = tasks[taskIndex];
       const progress = 30 + Math.round((completed / Math.max(1, tasks.length)) * 12);
-      const image = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, progress);
+      const image = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, progress, {
+        index: taskIndex + 1,
+        total: tasks.length,
+      });
       await assertJobActive(job);
       upsertServerImage(results, image);
       completed += 1;
@@ -1621,6 +1645,9 @@ async function maybeGenerateImages(
         message: image.error
           ? `图片生成失败："${slide.title}"（${completed}/${tasks.length}）`
           : `图片生成完成："${slide.title}"（${completed}/${tasks.length}）`,
+        logMessage: image.error
+          ? `图片素材生成失败：第 ${slide.pageNumber} 页 ${slide.title} / ${plan.purpose || plan.id}（${completed}/${tasks.length}）`
+          : `图片素材生成完成：第 ${slide.pageNumber} 页 ${slide.title} / ${plan.purpose || plan.id}（${completed}/${tasks.length}）`,
         result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(results, spec), svgPages: sortServerSvgPages(existingPages) },
       });
     }
@@ -1655,6 +1682,7 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
       phase: 'images',
       progress: 45,
       message: `第 ${slide.pageNumber} 页缺少可用图片，正在为"${slide.title}"自动重试...`,
+      logMessage: `第 ${slide.pageNumber} 页缺少图片素材，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
       result: { spec, lock, outline: spec.outline, images, svgPages: sortServerSvgPages(pages) },
     });
     const image = await generateSlideImageWithAutoRetry(job, slide, plan, imageConfig, 45);
@@ -1665,6 +1693,9 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
       phase: 'images',
       progress: 45,
       message: image.error ? `图片生成失败："${slide.title}"` : `图片生成完成："${slide.title}"`,
+      logMessage: image.error
+        ? `图片素材生成失败：第 ${slide.pageNumber} 页 ${slide.title} / ${plan.purpose || plan.id}`
+        : `图片素材生成完成：第 ${slide.pageNumber} 页 ${slide.title} / ${plan.purpose || plan.id}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
     });
   }
@@ -1706,6 +1737,7 @@ async function ensureServerImagesForLayout(
       phase: 'images',
       progress: 45,
       message: `第 ${slide.pageNumber} 页缺少可用图片，正在为"${slide.title}"自动重试...`,
+      logMessage: `第 ${slide.pageNumber} 页缺少图片素材，正在自动重试：${slide.title} / ${plan.purpose || plan.id}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
     });
 
@@ -1717,6 +1749,9 @@ async function ensureServerImagesForLayout(
       phase: 'images',
       progress: 45,
       message: retryImage.error ? `图片生成失败："${slide.title}"` : `图片生成完成："${slide.title}"`,
+      logMessage: retryImage.error
+        ? `图片素材生成失败：第 ${slide.pageNumber} 页 ${slide.title} / ${plan.purpose || plan.id}`
+        : `图片素材生成完成：第 ${slide.pageNumber} 页 ${slide.title} / ${plan.purpose || plan.id}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
     });
   }
@@ -1791,12 +1826,15 @@ async function generateSvgPages(
   async function worker() {
     while (cursor < slidesToGenerate.length) {
       await assertJobActive(job);
-      const task = slidesToGenerate[cursor++];
+      const taskIndex = cursor++;
+      const task = slidesToGenerate[taskIndex];
       const { slide, signature } = task;
+      const pageCountText = `（${taskIndex + 1}/${slidesToGenerate.length}）`;
       await updateJob(job, {
         phase: 'layout',
         progress: 50 + Math.round((completed / Math.max(1, spec.outline.length)) * 45),
         message: `正在生成第 ${slide.pageNumber} 页：${slide.title}`,
+        logMessage: `正在生成第 ${slide.pageNumber} 页：${slide.title}${pageCountText}`,
       });
 
       const slideImages = await ensureServerImagesForLayout(job, spec, lock, slide, images, pages);
@@ -1819,6 +1857,7 @@ async function generateSvgPages(
         phase: 'layout',
         progress: 50 + Math.round((completed / Math.max(1, spec.outline.length)) * 45),
         message: `第 ${slide.pageNumber} 页生成完成：${slide.title}`,
+        logMessage: `第 ${slide.pageNumber} 页生成完成：${slide.title}（${completed}/${spec.outline.length}）`,
         result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
       });
     }
@@ -1847,7 +1886,7 @@ async function generatePageSvg(
     iconStyle: spec.iconStyle,
     imageUsage: spec.imageUsage,
     outline: [],
-    skillExtensions: [],
+    skillExtensions: spec.skillExtensions || [],
   } as any;
   const slimLock = {
     colors: lock.colors,
@@ -1858,7 +1897,7 @@ async function generatePageSvg(
     pageRhythm: { [pageKey]: lock.pageRhythm[pageKey] },
     pageLayouts: { [pageKey]: lock.pageLayouts[pageKey] },
     pageCharts: lock.pageCharts[pageKey] ? { [pageKey]: lock.pageCharts[pageKey] } : {},
-    skillExtensions: [],
+    skillExtensions: lock.skillExtensions || spec.skillExtensions || [],
     forbidden: (lock as any).forbidden || DEFAULT_FORBIDDEN,
   } as any;
 
@@ -2162,10 +2201,11 @@ export async function subscribeQueuedJob(id: string, userId: number, res: Respon
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+    guardStreamResponse(res);
+    writeSseData(res, snapshot);
 
     if (snapshot.status === 'completed' || snapshot.status === 'failed' || snapshot.status === 'cancelled') {
-      res.end();
+      endStream(res);
       return true;
     }
 
@@ -2186,12 +2226,15 @@ export async function subscribeQueuedJob(id: string, userId: number, res: Respon
       return true;
     }
     subscriber.on('message', (_channel, payload) => {
-      res.write(`data: ${payload}\n\n`);
+      if (!writeSseData(res, payload)) {
+        subscriber.disconnect();
+        return;
+      }
       try {
         const next = JSON.parse(payload) as QueuedJobSnapshot;
         if (next.status === 'completed' || next.status === 'failed' || next.status === 'cancelled') {
           subscriber.disconnect();
-          res.end();
+          endStream(res);
         }
       } catch {
         // ignore malformed Redis queue events
@@ -2208,7 +2251,8 @@ export async function subscribeQueuedJob(id: string, userId: number, res: Respon
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
-  res.write(`data: ${JSON.stringify(snapshotJob(job))}\n\n`);
+  guardStreamResponse(res);
+  writeSseData(res, snapshotJob(job));
 
   const set = subscribers.get(id) || new Set<Response>();
   set.add(res);

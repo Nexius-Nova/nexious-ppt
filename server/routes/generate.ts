@@ -32,6 +32,7 @@ import {
   getChartSvg,
   getIconGuide,
 } from '../services/pptEnhancements.js';
+import { endStream, guardStreamResponse, writeSseData } from '../utils/sse.js';
 
 const router = Router();
 
@@ -128,6 +129,12 @@ function normalizeAnimationEffect(value: unknown): NativeSvgPptxAnimationEffect 
     'auto',
     'mixed',
     'random',
+    'cinematic',
+    'dramatic',
+    'kinetic',
+    'spotlight',
+    'cascade',
+    'surprise',
   ];
   return allowed.includes(effect as NativeSvgPptxAnimationEffect) ? effect as NativeSvgPptxAnimationEffect : 'auto';
 }
@@ -279,8 +286,9 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    guardStreamResponse(res);
 
-    res.write(`data: ${JSON.stringify({ status: 'start', phase: 'strategist', message: 'Strategist 正在分析内容...' })}\n\n`);
+    writeSseData(res, { status: 'start', phase: 'strategist', message: 'Strategist 正在分析内容...' });
 
     const streamedSlideIds = new Set<string>();
     const fullContent = await streamText(provider, apiKey, baseUrl, model, messages, res, {
@@ -290,7 +298,7 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
           const key = slide.id || String(slide.pageNumber);
           if (streamedSlideIds.has(key)) continue;
           streamedSlideIds.add(key);
-          res.write(`data: ${JSON.stringify({ status: 'outline-slide', phase: 'strategist', data: slide })}\n\n`);
+          writeSseData(res, { status: 'outline-slide', phase: 'strategist', data: slide });
         }
       },
     });
@@ -298,12 +306,12 @@ router.post('/strategist', authMiddleware, async (req: AuthRequest, res: Respons
     const spec = parseStrategistOutput(fullContent, input);
     const lock = buildSpecLock(spec);
 
-    res.write(`data: ${JSON.stringify({ status: 'complete', phase: 'strategist', data: { spec, lock } })}\n\n`);
-    res.end();
+    writeSseData(res, { status: 'complete', phase: 'strategist', data: { spec, lock } });
+    endStream(res);
   } catch (error) {
     console.error('Strategist error:', error);
-    res.write(`data: ${JSON.stringify({ status: 'error', phase: 'strategist', message: error instanceof Error ? error.message : '策略分析失败' })}\n\n`);
-    res.end();
+    writeSseData(res, { status: 'error', phase: 'strategist', message: error instanceof Error ? error.message : '策略分析失败' });
+    endStream(res);
   }
 });
 
@@ -377,15 +385,16 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    guardStreamResponse(res);
 
-    res.write(`data: ${JSON.stringify({ status: 'start', phase: 'executor', pageNumber: slide.pageNumber, message: `正在生成第${slide.pageNumber}页...` })}\n\n`);
+    writeSseData(res, { status: 'start', phase: 'executor', pageNumber: slide.pageNumber, message: `正在生成第${slide.pageNumber}页...` });
 
     const fullContent = await streamText(provider, apiKey, baseUrl, model, messages, res);
 
     let svg = ensureImageUsedInSvg(cleanSvgOutput(fullContent), slide, spec, safeImageAssets);
     let quality = finalizeSvgQuality(svg, spec, slide, undefined, safeImageAssets);
     if (quality.blockingIssues.length) {
-      res.write(`data: ${JSON.stringify({ status: 'quality-check', phase: 'executor', pageNumber: slide.pageNumber, message: '正在修复页面布局质量问题' })}\n\n`);
+      writeSseData(res, { status: 'quality-check', phase: 'executor', pageNumber: slide.pageNumber, message: '正在修复页面布局质量问题' });
       const repairContent = await streamText(provider, apiKey, baseUrl, model, [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, safeImageAssets) },
@@ -395,12 +404,12 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
     }
     svg = quality.svg;
 
-    res.write(`data: ${JSON.stringify({ status: 'complete', phase: 'executor', pageNumber: slide.pageNumber, data: { svg } })}\n\n`);
-    res.end();
+    writeSseData(res, { status: 'complete', phase: 'executor', pageNumber: slide.pageNumber, data: { svg } });
+    endStream(res);
   } catch (error) {
     console.error('Executor error:', error);
-    res.write(`data: ${JSON.stringify({ status: 'error', phase: 'executor', message: error instanceof Error ? error.message : '页面生成失败' })}\n\n`);
-    res.end();
+    writeSseData(res, { status: 'error', phase: 'executor', message: error instanceof Error ? error.message : '页面生成失败' });
+    endStream(res);
   }
 });
 

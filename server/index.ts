@@ -22,11 +22,25 @@ import generationJobRoutes from './routes/generationJobs.js';
 import inputFileRoutes from './routes/inputFiles.js';
 import { shutdownRedisQueue } from './services/generationQueue.js';
 import { generatedAvatarsRoot, generatedImagesRoot } from './utils/storage.js';
+import { guardSocketError, isExpectedDisconnectError } from './utils/sse.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || '30mb';
 app.disable('x-powered-by');
+
+process.on('uncaughtException', (error: NodeJS.ErrnoException) => {
+  if (isExpectedDisconnectError(error)) return;
+  console.error('未捕获异常:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  if (reason instanceof Error && isExpectedDisconnectError(reason as NodeJS.ErrnoException)) return;
+  console.error('未处理 Promise 拒绝:', reason);
+  process.exit(1);
+});
+
 const allowLocalDevOrigins = process.env.NODE_ENV !== 'production';
 const allowedOrigins = new Set(
   [
@@ -49,6 +63,7 @@ app.use(cors({
 }));
 
 app.use((req, res, next) => {
+  guardSocketError(req.socket);
   const requestId = req.headers['x-request-id']?.toString() || randomUUID();
   res.setHeader('X-Request-Id', requestId);
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -158,6 +173,8 @@ async function startServer() {
       console.log(`📡 API 文档: http://localhost:${PORT}/api`);
       console.log(`💚 健康检查: http://localhost:${PORT}/health`);
     });
+
+    server.on('connection', guardSocketError);
 
     server.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE') {

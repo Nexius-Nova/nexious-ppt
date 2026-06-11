@@ -919,6 +919,9 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("keydown", onPresentationKeydown);
+  window.addEventListener("focus", store.resumeProjectQueueSubscriptions);
+  window.addEventListener("online", store.resumeProjectQueueSubscriptions);
+  document.addEventListener("visibilitychange", handleVisibilitySync);
   await Promise.all([store.initializeData(), apiKeyStore.fetchApiKeys()]);
   await syncStepWithRoute();
   if (isProjectRoute.value && isWorkflowTab(activeStep.value)) {
@@ -929,8 +932,17 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onPresentationKeydown);
+  window.removeEventListener("focus", store.resumeProjectQueueSubscriptions);
+  window.removeEventListener("online", store.resumeProjectQueueSubscriptions);
+  document.removeEventListener("visibilitychange", handleVisibilitySync);
   store.syncToProject();
 });
+
+function handleVisibilitySync() {
+  if (document.visibilityState === "visible") {
+    store.resumeProjectQueueSubscriptions();
+  }
+}
 
 function handleNavigate(step: string) {
   const pageSteps = [
@@ -1047,6 +1059,14 @@ function buildExportOptions(format: "pptx" | "pdf"): PptxExportOptions {
   const enabledSetting = String(parameters.value.animationEnabled || "auto");
   const effectSetting = String(parameters.value.animationEffect || "auto");
   const enabled = format === "pptx" && enabledSetting === "enabled";
+  const presetTiming: Record<string, { duration: number; stagger: number; transitionDuration: number }> = {
+    cinematic: { duration: 0.82, stagger: 0.18, transitionDuration: 0.72 },
+    dramatic: { duration: 0.76, stagger: 0.16, transitionDuration: 0.68 },
+    kinetic: { duration: 0.46, stagger: 0.1, transitionDuration: 0.36 },
+    spotlight: { duration: 0.72, stagger: 0.22, transitionDuration: 0.62 },
+    cascade: { duration: 0.58, stagger: 0.26, transitionDuration: 0.5 },
+    surprise: { duration: 0.64, stagger: 0.12, transitionDuration: 0.48 }
+  };
   const effect = [
     "appear",
     "fade",
@@ -1072,19 +1092,26 @@ function buildExportOptions(format: "pptx" | "pdf"): PptxExportOptions {
     "swivel",
     "auto",
     "mixed",
-    "random"
+    "random",
+    "cinematic",
+    "dramatic",
+    "kinetic",
+    "spotlight",
+    "cascade",
+    "surprise"
   ].includes(effectSetting)
     ? (effectSetting as NonNullable<PptxExportOptions["animation"]>["effect"])
     : "auto";
+  const timing = presetTiming[effectSetting] || { duration: 0.62, stagger: 0.2, transitionDuration: 0.55 };
   return {
     animation: {
       enabled,
       effect: enabled ? effect : "none",
-      duration: 0.62,
-      stagger: 0.2,
+      duration: timing.duration,
+      stagger: timing.stagger,
       trigger: "after-previous",
       transitionEffect: enabled ? "auto" : "none",
-      transitionDuration: 0.55
+      transitionDuration: timing.transitionDuration
     }
   };
 }
@@ -1313,16 +1340,8 @@ async function retryImage(slideId: string) {
                 >
                   <span class="pipeline-stage__icon">
                     <component
-                      :is="
-                        stage.status === 'running' && !stage.paused
-                          ? Loader2
-                          : stage.icon
-                      "
+                      :is="stage.icon"
                       :size="18"
-                      :class="{
-                        'pipeline-stage__spin':
-                          stage.status === 'running' && !stage.paused
-                      }"
                     />
                   </span>
                   <span class="pipeline-stage__body">
@@ -1435,10 +1454,10 @@ async function retryImage(slideId: string) {
                         :disabled="isRunning || !canOpenWorkflowStep('outline')"
                         @click="store.runOutline"
                       >
-                        <Loader2
+                        <span
                           v-if="isOutlineRunning"
-                          :size="13"
-                          class="spin"
+                          class="button-spinner"
+                          aria-hidden="true"
                         />
                         <RefreshCw v-else :size="13" />
                         {{ outline.length ? "重新生成" : "生成大纲" }}
@@ -2172,6 +2191,7 @@ async function retryImage(slideId: string) {
   text-align: left;
   cursor: pointer;
   overflow: hidden;
+  contain: layout paint;
   transition:
     border-color var(--transition-fast),
     background var(--transition-fast),
@@ -2242,6 +2262,7 @@ async function retryImage(slideId: string) {
 }
 
 .pipeline-stage__icon {
+  position: relative;
   display: grid;
   place-items: center;
   flex: 0 0 auto;
@@ -2251,6 +2272,24 @@ async function retryImage(slideId: string) {
   border-radius: 8px;
   color: var(--color-muted);
   background: var(--color-surface);
+}
+
+.pipeline-stage--running .pipeline-stage__icon::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-right-color: color-mix(in srgb, currentColor 34%, transparent);
+  border-radius: 999px;
+  pointer-events: none;
+  transform: translateZ(0);
+  will-change: transform;
+  animation: stage-spin 0.9s linear infinite;
+}
+
+.pipeline-stage--running .pipeline-stage__icon > svg {
+  transform: translateZ(0);
 }
 
 .pipeline-stage__body {
@@ -2307,9 +2346,44 @@ async function retryImage(slideId: string) {
   transition: width 0.3s ease;
 }
 
-.pipeline-stage__spin,
 .spin {
+  transform: translateZ(0);
+  will-change: transform;
   animation: spin 1s linear infinite;
+}
+
+.button-spinner {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  transform: translateZ(0);
+}
+
+.button-spinner::before {
+  content: "";
+  width: 100%;
+  height: 100%;
+  border: 2px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-top-color: currentColor;
+  border-radius: 999px;
+  transform: translateZ(0);
+  will-change: transform;
+  animation: button-spinner-rotate 0.9s linear infinite;
+}
+
+@keyframes stage-spin {
+  to {
+    transform: translateZ(0) rotate(360deg);
+  }
+}
+
+@keyframes button-spinner-rotate {
+  to {
+    transform: translateZ(0) rotate(360deg);
+  }
 }
 
 .stage-panel {

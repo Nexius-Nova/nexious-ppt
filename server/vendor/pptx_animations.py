@@ -188,6 +188,39 @@ _AUTO_POOL = ['fade', 'wipe', 'fly', 'zoom']
 _IMAGE_POOL = ['zoom', 'dissolve', 'circle', 'box', 'diamond', 'wheel']
 _IMAGE_KEYWORDS: tuple[str, ...] = ('hero', 'figure-', 'image', 'img-', 'kpi')
 
+PRESET_ANIMATION_POOLS: Dict[str, list[str]] = {
+    # Polished, keynote-like motion. Useful as a safe "wow" default.
+    'cinematic': ['fade', 'zoom', 'wipe', 'dissolve', 'fly', 'wheel'],
+    # Stronger reveals for product launches and pitch climaxes.
+    'dramatic': ['zoom', 'wedge', 'wheel', 'split', 'strips', 'diamond', 'fade'],
+    # Fast rhythm for energetic decks. Avoids overly slow patterned effects.
+    'kinetic': ['fly', 'wipe', 'stretch', 'peek', 'zoom', 'cut', 'strips'],
+    # Calm but premium emphasis around title, hero, and key callouts.
+    'spotlight': ['fade', 'zoom', 'circle', 'box', 'dissolve', 'diamond'],
+    # Layered information build-up for frameworks, processes, and dashboards.
+    'cascade': ['fade', 'wipe', 'fly', 'split', 'stretch', 'expand', 'peek'],
+    # Intentional variety for users explicitly asking for strange/cool effects.
+    'surprise': ['dissolve', 'checkerboard', 'blinds', 'random_bars', 'wheel', 'plus', 'swivel', 'wedge'],
+}
+
+PRESET_TRANSITION_POOLS: Dict[str, list[str]] = {
+    'cinematic': ['fade', 'push', 'cover'],
+    'dramatic': ['cover', 'split', 'strips', 'push'],
+    'kinetic': ['push', 'wipe', 'strips'],
+    'spotlight': ['fade', 'cover'],
+    'cascade': ['wipe', 'split', 'fade'],
+    'surprise': ['random', 'strips', 'cover', 'split'],
+}
+
+_PRESET_IMAGE_PREFERENCES: Dict[str, list[str]] = {
+    'cinematic': ['zoom', 'dissolve', 'circle', 'wheel'],
+    'dramatic': ['zoom', 'diamond', 'wheel', 'wedge'],
+    'kinetic': ['fly', 'zoom', 'strips', 'cut'],
+    'spotlight': ['circle', 'box', 'zoom', 'fade'],
+    'cascade': ['wipe', 'fly', 'split', 'expand'],
+    'surprise': ['checkerboard', 'blinds', 'wheel', 'plus', 'swivel'],
+}
+
 # Ordered (substring, effect) patterns consumed by 'auto' mode for non-image
 # groups. The first matching substring in the lowercased group id wins;
 # ordering matters where substrings could overlap (e.g. 'title' before 'item'
@@ -601,6 +634,37 @@ def pick_animation_effect(
     if mode == 'random':
         import random
         return random.choice(_MIXED_POOL)
+    if mode in PRESET_ANIMATION_POOLS:
+        lower = (group_id or '').lower()
+        if any(k in lower for k in _IMAGE_KEYWORDS):
+            pool = _PRESET_IMAGE_PREFERENCES.get(mode, PRESET_ANIMATION_POOLS[mode])
+        elif any(k in lower for k in ('title', 'headline', 'chapter', 'section')):
+            pool = ['fade', 'zoom', 'wipe'] if mode != 'surprise' else ['wheel', 'zoom', 'fade']
+        elif any(k in lower for k in ('chart', 'table', 'timeline', 'process', 'flow')):
+            pool = ['wipe', 'split', 'stretch', 'fly'] if mode != 'spotlight' else ['wipe', 'fade', 'zoom']
+        else:
+            pool = PRESET_ANIMATION_POOLS[mode]
+        return pool[(idx + offset) % len(pool)]
+    return 'fade'
+
+
+def pick_transition_effect(mode: str, page_number: int = 1, layout_hint: str | None = None) -> str:
+    """Resolve a transition effect from a direct effect or expressive preset."""
+    if mode in TRANSITIONS:
+        return mode
+    if mode in PRESET_TRANSITION_POOLS:
+        hint = (layout_hint or '').lower()
+        if any(token in hint for token in ('cover', 'opening', 'chapter', 'ending')):
+            if mode in ('cinematic', 'spotlight'):
+                return 'fade'
+            if mode == 'kinetic':
+                return 'push'
+        pool = PRESET_TRANSITION_POOLS[mode]
+        return pool[(max(1, int(page_number)) - 1) % len(pool)]
+    if mode == 'auto':
+        return ['fade', 'wipe', 'push', 'cover'][(max(1, int(page_number)) - 1) % 4]
+    if mode == 'random':
+        return 'random'
     return 'fade'
 
 
