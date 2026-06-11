@@ -13,7 +13,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: process.env.PORT || '3001',
-        STORAGE_ROOT: process.env.STORAGE_ROOT || path.join(cwd, '.generated'),
+        STORAGE_ROOT: process.env.STORAGE_ROOT || '/var/lib/nexious-ppt',
         PYTHON_BIN: process.env.PYTHON_BIN || path.join(cwd, '.venv', 'bin', 'python'),
       },
       max_memory_restart: process.env.PM2_MAX_MEMORY || '800M',
