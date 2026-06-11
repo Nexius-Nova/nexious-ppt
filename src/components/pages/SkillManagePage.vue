@@ -764,6 +764,12 @@ onBeforeUnmount(stopStatusPolling);
   gap: 18px;
   padding: 20px;
   width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: calc(100dvh - 56px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .page-header {
@@ -848,6 +854,7 @@ onBeforeUnmount(stopStatusPolling);
 .skill-workflow {
   display: grid;
   gap: 12px;
+  min-height: 0;
 }
 
 .skill-filter {
@@ -897,6 +904,7 @@ onBeforeUnmount(stopStatusPolling);
 .skill-list {
   display: grid;
   gap: 8px;
+  min-height: 0;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 10px;
@@ -1009,7 +1017,7 @@ onBeforeUnmount(stopStatusPolling);
 
 .skill-log pre {
   width: 100%;
-  max-height: 220px;
+  max-height: clamp(128px, 24vh, 220px);
   overflow: auto;
   margin: 8px 0 0;
   border: 1px solid var(--color-border);
@@ -1411,6 +1419,10 @@ onBeforeUnmount(stopStatusPolling);
 }
 
 @media (max-width: 860px) {
+  .skill-page {
+    max-height: calc(100svh - 52px);
+  }
+
   .skill-card {
     grid-template-columns: 1fr;
     align-items: stretch;

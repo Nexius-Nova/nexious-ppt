@@ -2734,8 +2734,161 @@ export const useAgentStore = defineStore('agent', () => {
     return /联网|网络|网页|网上|搜索|检索|查找|查资料|资料收集|最新|新闻|趋势|案例|竞品|web\s*search|google|bing/i.test(text);
   }
 
+  function skillText(skill: SkillDefinition) {
+    return `${skill.name} ${skill.description} ${skill.category || ''} ${skill.instruction || ''} ${(skill.capabilities || []).join(' ')}`.toLowerCase();
+  }
+
   function wantsFileParsing(files: string[]) {
     return files.length > 0;
+  }
+
+  function inferSearchQueryForSkill(sourceText: string, fallbackTopic: string) {
+    const clean = stripGeneratedInputArtifacts(sourceText)
+      .replace(URL_PATTERN, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const explicit = clean.match(/(?:搜索|检索|查找|查资料|联网查|网上查|web\s*search)\s*[：:]?\s*([^。；;，,\n]{2,80})/i)?.[1]?.trim();
+    if (explicit) return explicit;
+    const topicHint = fallbackTopic.trim() || clean.match(/(?:主题|题目|标题)\s*[：:]\s*([^。；;\n]{2,80})/)?.[1]?.trim() || '';
+    if (topicHint) {
+      const needs = Array.from(new Set([
+        /最新|趋势|发展|历程|案例|竞品|市场|政策|数据/.test(clean) ? clean.match(/最新|趋势|发展|历程|案例|竞品|市场|政策|数据/g)?.slice(0, 3).join(' ') : '',
+      ].filter(Boolean)));
+      return [topicHint, ...needs].join(' ').trim();
+    }
+    return clean.slice(0, 80) || fallbackTopic || 'PPT 资料收集';
+  }
+
+  function buildSkillRoleInstruction(skill: SkillDefinition, stepId: InputProcessStep['id']) {
+    const category = normalizeInputSkillCategory(skill.category);
+    const roleByStep: Record<InputProcessStep['id'], string> = {
+      collect: '资料收集 Skill：请只补充事实、来源、趋势、案例和可验证资料，不要改写用户主题，不要生成 PPT 大纲。',
+      'file-parse': '文件解析 Skill：请只解析上传文件或图片，输出结构化摘要、关键数据、表格/公式/图片含义，不要发挥生成无关内容。',
+      topic: '资料整理 Skill：请基于现有资料提炼主题、受众、核心叙事、行业/学术/财报/知识库线索，不要替换用户原始需求。',
+      constraints: '生成约束 Skill：请输出大纲、页面类型、图表/表格/公式/图片/时间线、SVG 设计规范等参考建议，只作为后续生成参考。',
+      ready: '输入整理 Skill：请输出可用于 PPT 生成的简洁上下文。'
+    };
+    return [
+      roleByStep[stepId],
+      `当前 Skill 分类：${category}。`,
+      skill.instruction ? `Skill 原始说明：${compactMultiline(skill.instruction, 1200)}` : '',
+      '输出要求：只输出本 Skill 的有用结果；不要重复整段用户输入；不要把预览图、模板示例业务内容或无关日志作为结果。',
+    ].filter(Boolean).join('\n');
+  }
+
+  function buildSkillTaskPayload(
+    skill: SkillDefinition,
+    stepId: InputProcessStep['id'],
+    base: {
+      userContent: string;
+      content: string;
+      files: string[];
+      contextChunks: string[];
+      reason?: string;
+    }
+  ) {
+    const topic = input.value.topic || inferInputTitle(base.userContent || base.content, base.files);
+    const sourceContext = stepId === 'collect'
+      ? base.userContent
+      : buildSkillContextContent(base.content, base.contextChunks);
+    const taskInstruction = buildSkillRoleInstruction(skill, stepId);
+    const common = {
+      taskInstruction,
+      skillName: skill.name,
+      skillCategory: normalizeInputSkillCategory(skill.category),
+      selectionReason: base.reason || '',
+      topic,
+      sourceText: sourceContext,
+      content: sourceContext,
+      files: base.files,
+      userIntent: base.userContent,
+      constraints: {
+        keepUserContentAuthoritative: true,
+        doNotOverrideUserInput: true,
+        doNotUsePreviewImagesAsContent: true,
+        outputLanguage: 'zh-CN',
+      },
+    };
+
+    if (stepId === 'collect' || isSearchSkill(skill)) {
+      const query = inferSearchQueryForSkill(`${base.userContent}\n${input.value.topic}`, topic);
+      return {
+        ...common,
+        purpose: 'web-search',
+        query,
+        searchGoal: [
+          `围绕“${query}”补充 PPT 可用资料`,
+          '优先返回事实、时间线、关键数据、案例、来源标题和链接',
+          '避免直接生成 PPT 文案，避免把用户完整输入当搜索词',
+        ].join('；'),
+        maxResults: 5,
+        format: 'markdown',
+      };
+    }
+
+    if (stepId === 'file-parse') {
+      return {
+        ...common,
+        purpose: 'file-parse',
+        fileContents: uploadedFileContents.value,
+        parseGoal: '解析上传文件/图片，提取可用于 PPT 的主题、数据、表格、公式、图片信息和结构化摘要。',
+      };
+    }
+
+    if (stepId === 'topic') {
+      return {
+        ...common,
+        purpose: 'content-refine',
+        analysisGoal: '综合用户输入、文件解析和资料收集结果，提炼主题、受众、叙事主线、关键信息缺口和可信资料优先级。',
+      };
+    }
+
+    return {
+      ...common,
+      purpose: 'generation-constraint',
+      promptId: selectedPromptId.value,
+      templateName: selectedTemplate.value?.name || '',
+      templateStyleOnly: Boolean(selectedTemplate.value),
+      parameters: { ...parameters.value },
+      designGoal: '输出后续生成大纲、图片和 SVG 页面时可参考的设计规范、页面类型、图表/公式/图标/SVG 布局建议。不得改变用户输入语义。',
+    };
+  }
+
+  function isGenerationReferenceSkill(skill: SkillDefinition) {
+    const category = normalizeInputSkillCategory(skill.category);
+    if ([
+      '生成约束',
+      '页面类型判断',
+      '图表表格标记',
+      '公式图片时间线标记',
+      '数据图表',
+      '数学公式',
+      '图标绘制',
+      'SVG 布局',
+      '页面质检',
+      '溢出检查',
+      '图片遮挡检查',
+      '低对比度检查',
+    ].includes(category)) return true;
+    const text = skillText(skill);
+    return /design|frontend|svg|layout|chart|table|formula|icon|quality|overflow|contrast|设计|布局|图表|表格|公式|图标|质检|溢出|遮挡|对比度/.test(text);
+  }
+
+  function buildStrategistSkillInstruction(skill: SkillDefinition) {
+    const category = normalizeInputSkillCategory(skill.category);
+    const baseInstruction = compactMultiline(skill.instruction || skill.description || '', 1400);
+    const referenceScope = isGenerationReferenceSkill(skill)
+      ? '作为大纲、页面类型、图片需求、SVG 视觉设计和质量检查的参考规范。'
+      : '作为资料或内容理解参考；不要把它当成页面设计风格。';
+    return [
+      `Skill 类型：${category}。${referenceScope}`,
+      '使用方式：由 AI 自主判断是否采用、采用多少、如何与提示词/模板/用户内容搭配。',
+      '边界：用户输入内容最高优先级；模板只提供视觉样式；提示词只提供表达约束；Skill 不得覆盖或污染用户主题。',
+      isGenerationReferenceSkill(skill)
+        ? '如果该 Skill 是设计规范，请转化为 visualTheme、layout、rhythm、chartHint、imagePlan、animationDescription 或 executorRules 的参考，不要照搬示例业务内容。'
+        : '如果该 Skill 是资料类，请只吸收事实、结构和资料线索，不要生成虚构数据。',
+      baseInstruction ? `Skill 说明：${baseInstruction}` : '',
+    ].filter(Boolean).join('\n');
   }
 
   function skillSelectionReason(skill: SkillDefinition, category: string, autoSelected: boolean) {
@@ -3249,14 +3402,13 @@ export const useAgentStore = defineStore('agent', () => {
               detail: `${item.reason}，正在执行 ${skill.name}`,
               logs: collectSkills.map((plan) => `${plan.skill.name}：${plan.reason}`).join('\n'),
             });
-            const result = await runInputSkill(skill, 'collect', {
+            const result = await runInputSkill(skill, 'collect', buildSkillTaskPayload(skill, 'collect', {
+              userContent,
               content,
-              query: input.value.topic || inferInputTitle(userContent || content, files),
               files,
-              purpose: wantsWebSearch(selectionOptions.userText)
-                ? 'web search and enrich source materials before PPT generation'
-                : 'collect and enrich source materials before PPT generation',
-            }, ctx);
+              contextChunks: skillContextChunks,
+              reason: item.reason,
+            }), ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '资料收集 Skill 执行失败';
@@ -3317,12 +3469,13 @@ export const useAgentStore = defineStore('agent', () => {
                 ...fileParseSkills.map((plan) => `${plan.skill.name}：${plan.reason}`),
               ].join('\n'),
             });
-            const result = await runInputSkill(skill, 'file-parse', {
+            const result = await runInputSkill(skill, 'file-parse', buildSkillTaskPayload(skill, 'file-parse', {
+              userContent,
               content,
-              fileContents: uploadedFileContents.value,
               files,
-              purpose: 'parse uploaded files before PPT generation',
-            }, ctx);
+              contextChunks: skillContextChunks,
+              reason: item.reason,
+            }), ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '文件解析 Skill 执行失败';
@@ -3393,11 +3546,13 @@ export const useAgentStore = defineStore('agent', () => {
               detail: `${item.reason}，正在执行 ${skill.name}`,
               logs: topicSkills.map((plan) => `${plan.skill.name}：${plan.reason}`).join('\n'),
             });
-            const result = await runInputSkill(skill, 'topic', {
-              content: buildSkillContextContent(content, skillContextChunks),
+            const result = await runInputSkill(skill, 'topic', buildSkillTaskPayload(skill, 'topic', {
+              userContent,
+              content,
               files,
-              purpose: 'extract topic and audience before PPT generation',
-            }, ctx);
+              contextChunks: skillContextChunks,
+              reason: item.reason,
+            }), ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '主题提炼 Skill 执行失败';
@@ -3444,14 +3599,13 @@ export const useAgentStore = defineStore('agent', () => {
               detail: `${item.reason}，正在执行 ${skill.name}`,
               logs: constraintSkills.map((plan) => `${plan.skill.name}：${plan.reason}`).join('\n'),
             });
-            const result = await runInputSkill(skill, 'constraints', {
-              content: buildSkillContextContent(content, skillContextChunks),
+            const result = await runInputSkill(skill, 'constraints', buildSkillTaskPayload(skill, 'constraints', {
+              userContent,
+              content,
               files,
-              promptId: selectedPromptId.value,
-              templateName: selectedTemplate.value?.name || '',
-              parameters: { ...parameters.value },
-              purpose: 'prepare generation constraints before PPT generation',
-            }, ctx);
+              contextChunks: skillContextChunks,
+              reason: item.reason,
+            }), ctx);
             if (result.context) skillContextChunks.push(result.context);
           } catch (error) {
             const message = error instanceof Error ? error.message : '生成约束 Skill 执行失败';
@@ -4231,11 +4385,18 @@ export const useAgentStore = defineStore('agent', () => {
   function enabledStrategistSkills() {
     return skills.value
       .filter((skill) => skill.enabled)
+      .filter((skill) => isGenerationReferenceSkill(skill) || skill.type === 'prompt-only' || skill.runtime === 'prompt-only')
       .sort((left, right) => left.order - right.order)
       .map((skill) => ({
         id: skill.id,
         name: skill.name,
-        instruction: skill.instruction || skill.description || undefined,
+        instruction: buildStrategistSkillInstruction(skill),
+        executorRules: isGenerationReferenceSkill(skill)
+          ? [
+              `${skill.name} 只作为当前页 SVG 绘制和质检参考，不得替换用户内容。`,
+              '根据页面内容自主决定是否采用该 Skill 的布局、图表、公式、图标或质检建议。',
+            ]
+          : undefined,
       }));
   }
 

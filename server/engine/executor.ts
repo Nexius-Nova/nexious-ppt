@@ -30,6 +30,14 @@ export interface ExecutorImageAsset {
 export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock, context: ExecutorPromptContext = {}): string {
   const { canvas } = spec;
   const specLockMarkdown = renderSpecLockMarkdown({ ...lock, skillExtensions: [] });
+  const skillRuleGuide = (lock.skillExtensions || [])
+    .flatMap((skill) => [
+      skill.strategistPrompt ? `${skill.skillName}: ${skill.strategistPrompt}` : '',
+      ...(skill.executorRules || []).map((rule) => `${skill.skillName}: ${rule}`),
+    ])
+    .filter(Boolean)
+    .slice(0, 18)
+    .join('\n');
 
   return `你是 Nexious PPT 的 Executor，只负责当前单页 SVG 排版。
 
@@ -59,6 +67,7 @@ Animation export structure:
 
 spec_lock:
 ${specLockMarkdown}
+${skillRuleGuide ? `\nSkill design references for this page. Use them only when they improve SVG layout, chart/formula/icon rendering, animation grouping, or quality checks. Do not override user content:\n${skillRuleGuide}` : ''}
 ${context.iconGuide ? `\nNexious PPT icon guide:\n${context.iconGuide}` : ''}`;
 }
 

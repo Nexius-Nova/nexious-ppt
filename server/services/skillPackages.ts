@@ -53,6 +53,7 @@ interface CommandSkillAdapter {
   runtime: SkillRuntime;
   entry: string;
   dependencyFile: string | null;
+  inferredDependencies?: string[];
   title: string;
   description: string;
   plan: string[];
@@ -794,6 +795,7 @@ function detectSkillCommandAdapter(instruction: string): CommandSkillAdapter | n
       runtime: 'python' as SkillRuntime,
       entry: 'scripts/markitdown_adapter.py',
       dependencyFile: null,
+      inferredDependencies: ['markitdown'],
       title: 'MarkItDown 文件解析适配器',
       description: '将上传文件转换为 Markdown，供 PPT 输入阶段继续处理。',
       plan: [
@@ -804,8 +806,14 @@ function detectSkillCommandAdapter(instruction: string): CommandSkillAdapter | n
       script: `#!/usr/bin/env python3
 import json
 import os
-import subprocess
 import sys
+
+try:
+    from markitdown import MarkItDown
+except ImportError as e:
+    print(f"Error: Missing required dependency: {e}", file=sys.stderr)
+    print("Install with: pip install markitdown", file=sys.stderr)
+    sys.exit(1)
 
 
 def read_payload():
@@ -838,16 +846,10 @@ def collect_files(payload):
 
 
 def convert(path):
-    result = subprocess.run(
-        ["uvx", "markitdown", path],
-        text=True,
-        capture_output=True,
-        encoding="utf-8",
-        timeout=240,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr or f"markitdown failed: {path}")
-    return result.stdout.strip()
+    converter = MarkItDown()
+    result = converter.convert(path)
+    text = getattr(result, "text_content", None) or str(result)
+    return text.strip()
 
 
 def main():
@@ -910,6 +912,10 @@ function detectPackageAdaptationPlan(analysis: PackageAnalysis) {
     plan.push(`自动识别 Python 依赖：${analysis.inferredDependencies.join('、')}`);
   }
 
+  if (commandAdapter?.inferredDependencies?.length) {
+    plan.push(`自动补充适配器依赖：${commandAdapter.inferredDependencies.join('、')}`);
+  }
+
   return plan;
 }
 
@@ -934,6 +940,29 @@ async function adaptSkillPackageForWorkflow(packagePath: string) {
 
   const nextAnalysis = await analyzePackageDirectory(packagePath);
   assertSkillPackageSafe(nextAnalysis, 'workflow-adaptation:after');
+  const adapterDependencies = commandAdapter?.inferredDependencies || [];
+  if (adapterDependencies.length) {
+    const inferredDependencies = Array.from(new Set([
+      ...nextAnalysis.inferredDependencies,
+      ...adapterDependencies,
+    ])).sort((a, b) => a.localeCompare(b));
+    return {
+      analysis: {
+        ...nextAnalysis,
+        inferredDependencies,
+        parameters: {
+          ...nextAnalysis.parameters,
+          inferredDependencies,
+        },
+        manifest: {
+          ...nextAnalysis.manifest,
+          inferredDependencies,
+        },
+      },
+      logs,
+    };
+  }
+
   return {
     analysis: nextAnalysis,
     logs,
@@ -1372,7 +1401,222 @@ async function buildImageHealthSampleFile() {
   };
 }
 
+function textIncludesAny(text: string, patterns: RegExp[]) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function getSchemaProperties(schema: Record<string, unknown>) {
+  return parseJsonRecord(schema.properties);
+}
+
+function getSchemaRequiredKeys(schema: Record<string, unknown>) {
+  return Array.isArray(schema.required) ? schema.required.map((item) => String(item)) : [];
+}
+
+function collectContractKeys(schema: Record<string, unknown>, prefix = '', depth = 0): string[] {
+  if (depth > 4 || !schema || typeof schema !== 'object') return [];
+  const keys = new Set<string>();
+  for (const key of getSchemaRequiredKeys(schema)) keys.add(prefix ? `${prefix}.${key}` : key);
+  for (const [key, value] of Object.entries(getSchemaProperties(schema))) {
+    const pathKey = prefix ? `${prefix}.${key}` : key;
+    keys.add(pathKey);
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const nested of collectContractKeys(value as Record<string, unknown>, pathKey, depth + 1)) {
+        keys.add(nested);
+      }
+    }
+  }
+  return Array.from(keys);
+}
+
+function inferSchemaType(schema: Record<string, unknown>) {
+  const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+  return typeof type === 'string' ? type : '';
+}
+
+function getContractSchemaForKey(contract: Record<string, unknown>, key: string) {
+  const properties = getSchemaProperties(contract);
+  const schema = properties[key];
+  return schema && typeof schema === 'object' && !Array.isArray(schema)
+    ? schema as Record<string, unknown>
+    : {};
+}
+
+async function readSkillPackageText(skill: any) {
+  const packagePath = String(skill?.package_path || '');
+  const manifest = parseJsonRecord(skill?.manifest);
+  const parameters = parseJsonRecord(skill?.parameters);
+  const texts: string[] = [
+    skill?.name,
+    skill?.description,
+    skill?.category,
+    skill?.entry,
+    compactMetadataValue(manifest),
+    compactMetadataValue(parameters),
+    parseStoredCapabilities(skill?.capabilities).join(' '),
+  ].filter(Boolean).map(String);
+
+  if (packagePath) {
+    const skillMdPath = safeRelativePath(String(manifest.skillMdPath || manifest.skill_md_path || 'SKILL.md'));
+    const candidates = Array.from(new Set([skillMdPath, 'SKILL.md', 'skill.md'].filter(Boolean)));
+    for (const relativePath of candidates) {
+      const absolutePath = path.join(packagePath, relativePath);
+      if (!isPathInside(absolutePath, packagePath) || !(await fileExists(absolutePath))) continue;
+      texts.push((await fs.readFile(absolutePath, 'utf8')).slice(0, TEXT_SCAN_BYTES));
+      break;
+    }
+
+    const entry = String(skill?.entry || '');
+    if (entry) {
+      const entryPath = path.join(packagePath, safeRelativePath(entry));
+      if (isPathInside(entryPath, packagePath) && await fileExists(entryPath)) {
+        texts.push((await fs.readFile(entryPath, 'utf8')).slice(0, TEXT_SCAN_BYTES));
+      }
+    }
+  }
+
+  return texts.join('\n').toLowerCase();
+}
+
+function inferSkillHealthProfile(skill: any, text: string, contract: Record<string, unknown>) {
+  const contractKeys = collectContractKeys(contract).join(' ').toLowerCase();
+  const combined = `${text}\n${contractKeys}`;
+  const wantsFile = textIncludesAny(combined, [
+    /\b(file|files|filepath|file_path|path|paths|document|documents|attachment|attachments)\b/i,
+    /\b(pdf|docx|pptx|xlsx|markdown|markitdown|convert|parse)\b/i,
+    /文件|附件|文档|解析|转换|读取/i,
+  ]);
+  const wantsImageFile = textIncludesAny(combined, [
+    /\b(image|images|picture|photo|vision|ocr)\b/i,
+    /图片|图像|视觉|识别|OCR/i,
+  ]) && !textIncludesAny(combined, [
+    /\b(image\s*search|search\s*image|generate\s*image|image\s*generation|text-to-image)\b/i,
+    /图片搜索|素材搜索|生成图片|图片生成|配图/i,
+  ]);
+  const wantsImageSearch = textIncludesAny(combined, [
+    /\b(image\s*search|search\s*image|stock\s*photo|asset\s*search)\b/i,
+    /图片搜索|素材搜索|图库/i,
+  ]);
+  const wantsImageGeneration = textIncludesAny(combined, [
+    /\b(generate\s*image|image\s*generation|text-to-image|draw|paint)\b/i,
+    /生成图片|图片生成|绘制|配图/i,
+  ]);
+  const wantsSearch = textIncludesAny(combined, [
+    /\b(query|search|web|bing|google|duckduckgo|ddgs|url|urls)\b/i,
+    /联网|搜索|网页|资料收集|检索/i,
+  ]);
+
+  const intent =
+    wantsImageSearch ? 'image-search'
+      : wantsImageGeneration ? 'image-generation'
+        : wantsImageFile ? 'image-file'
+          : wantsFile ? 'file-parse'
+            : wantsSearch ? 'web-search'
+              : 'content-refine';
+
+  return {
+    intent,
+    wantsFile: wantsFile || wantsImageFile,
+    wantsImageFile,
+    wantsSearch,
+    wantsImageSearch,
+    wantsImageGeneration,
+    query: '手机发展历程',
+    topic: '手机发展历程',
+  };
+}
+
+function applyInputContractDefaults(input: Record<string, any>, contract: Record<string, unknown>, profile: ReturnType<typeof inferSkillHealthProfile>, sampleFile: any | null) {
+  const properties = getSchemaProperties(contract);
+  const requiredKeys = getSchemaRequiredKeys(contract);
+  const keys = Array.from(new Set([...Object.keys(properties), ...requiredKeys]));
+
+  for (const key of keys) {
+    if (input[key] !== undefined && input[key] !== null && input[key] !== '') continue;
+    const schema = getContractSchemaForKey(contract, key);
+    const lowerKey = key.toLowerCase();
+    const type = inferSchemaType(schema);
+    const enumValues = Array.isArray(schema.enum) ? schema.enum : [];
+    if (enumValues.length) {
+      input[key] = enumValues[0];
+    } else if (/query|keyword|search|url/.test(lowerKey)) {
+      input[key] = profile.query;
+    } else if (/topic|title|subject/.test(lowerKey)) {
+      input[key] = profile.topic;
+    } else if (/prompt|instruction|content|text|markdown/.test(lowerKey)) {
+      input[key] = profile.wantsImageGeneration
+        ? '生成一张适合 16:9 PPT 使用的清晰配图，主体明确，构图自然。'
+        : '请把手机发展历程整理为可用于 PPT 的资料要点。';
+    } else if (/max.*result|limit|count|num|size/.test(lowerKey)) {
+      input[key] = 5;
+    } else if (/format/.test(lowerKey)) {
+      input[key] = 'markdown';
+    } else if (/type|mode/.test(lowerKey)) {
+      input[key] = profile.intent;
+    } else if (/file|files|image|images|path|paths/.test(lowerKey)) {
+      input[key] = type === 'array'
+        ? (sampleFile ? [sampleFile] : [])
+        : sampleFile;
+    } else if (type === 'array') {
+      input[key] = [];
+    } else if (type === 'number' || type === 'integer') {
+      input[key] = 1;
+    } else if (type === 'boolean') {
+      input[key] = true;
+    } else if (type === 'object') {
+      input[key] = {};
+    } else {
+      input[key] = 'Nexious PPT Skill health check';
+    }
+  }
+
+  return input;
+}
+
+async function buildAdaptiveSkillHealthInput(skill: any) {
+  const testSample = parseJsonRecord(skill?.test_sample);
+  const inputContract = parseJsonRecord(skill?.input_contract);
+  const packageText = await readSkillPackageText(skill);
+  const profile = inferSkillHealthProfile(skill, packageText, inputContract);
+  const sampleFile = profile.wantsImageFile
+    ? await buildImageHealthSampleFile()
+    : profile.wantsFile
+      ? await readSkillMarkdownSampleFile(skill)
+      : null;
+  const sampleFiles = Array.isArray(testSample.fileContents)
+    ? testSample.fileContents
+    : Array.isArray(testSample.files)
+      ? testSample.files
+      : sampleFile
+        ? [sampleFile]
+        : [];
+  const input: Record<string, any> = {
+    ...testSample,
+    purpose: String(testSample.purpose || profile.intent),
+    topic: String(testSample.topic || profile.topic),
+    query: String(testSample.query || testSample.keyword || profile.query),
+    content: String(testSample.content || testSample.text || '请把手机发展历程整理为可用于 PPT 的资料要点。'),
+  };
+
+  if (profile.wantsImageGeneration) {
+    input.prompt = String(testSample.prompt || '生成一张适合 16:9 PPT 使用的清晰配图，主体明确，构图自然。');
+  }
+  if (sampleFiles.length) {
+    input.fileContents = sampleFiles;
+    input.files = sampleFiles;
+    if (profile.wantsImageFile) input.images = sampleFiles;
+  }
+  if (profile.wantsSearch || profile.wantsImageSearch) {
+    input.maxResults = Number(testSample.maxResults || testSample.max_results || 5);
+    input.format = String(testSample.format || 'markdown');
+  }
+
+  return applyInputContractDefaults(input, inputContract, profile, sampleFiles[0] || null);
+}
+
 async function buildSkillHealthInput(skill: any) {
+  return buildAdaptiveSkillHealthInput(skill);
+
   const testSample = parseJsonRecord(skill?.test_sample);
   const capabilities = parseStoredCapabilities(skill?.capabilities);
   const categoryText = String(skill?.category || '').toLowerCase();
@@ -1387,7 +1631,16 @@ async function buildSkillHealthInput(skill: any) {
   const isImageGeneration = /image\s*(gen|generation)|生成图片|图片生成|配图/.test(imageText);
   const needsImageFile = isImageTool && !isImageSearch && !isImageGeneration;
 
-  if (Object.keys(testSample).length > 0 && !isFileParse && !needsImageFile) return testSample;
+  if (
+    Object.keys(testSample).length > 0
+    && !isSearch
+    && !isFileParse
+    && !isImageSearch
+    && !isImageGeneration
+    && !needsImageFile
+  ) {
+    return testSample;
+  }
 
   if (isImageSearch) {
     return {
@@ -1455,11 +1708,13 @@ async function buildSkillHealthInput(skill: any) {
   }
 
   if (isSearch) {
+    const query = String(testSample.query || testSample.topic || '手机发展历程');
     return {
-      purpose: '资料收集',
-      query: '手机发展历程',
-      topic: '手机发展历程',
-      content: '请联网搜索手机发展历程，并返回可用于 PPT 的简要资料。',
+      ...testSample,
+      purpose: String(testSample.purpose || '资料收集'),
+      query,
+      topic: String(testSample.topic || query),
+      content: String(testSample.content || '请联网搜索手机发展历程，并返回可用于 PPT 的简要资料。'),
     };
   }
 
@@ -1601,7 +1856,8 @@ export async function initializeSkillEnvironment(skillId: number, userId?: numbe
           timeoutMs: INSTALL_TIMEOUT_MS,
         });
         log += result.stdout + result.stderr;
-      } else if (inferredDependencies.length) {
+      }
+      if (inferredDependencies.length) {
         const result = await runProcess(pipExecutable(packagePath), ['install', ...inferredDependencies], {
           cwd: packagePath,
           timeoutMs: INSTALL_TIMEOUT_MS,
@@ -1856,9 +2112,11 @@ export async function runSkillPackage(
       throw new Error('Skill entry must be inside package directory.');
     }
     const command = runtime === 'python' ? pythonExecutable(packagePath) : 'node';
-    const args = runtime === 'python'
-      ? [entryPath, ...buildPythonSkillArgs(payload.input)]
-      : [entryPath];
+    const cliArgs = await buildSkillCliArgsForRun(payload.input, skill, {
+      entryPath,
+      savedFiles: inputFiles.savedFiles,
+    });
+    const args = [entryPath, ...cliArgs];
     const readableArgs = args.slice(1).map((item) => item.includes(' ') ? `"${item}"` : item).join(' ');
     await acquireSkillRunSlot();
     slotAcquired = true;
@@ -2033,6 +2291,144 @@ function inferSkillQuery(input: unknown) {
   const explicitTopic = rawContent.match(/(?:主题|题目|标题)\s*[：:]\s*([^\n。；;]+)/)?.[1]?.trim();
   const query = String(record.query || explicitTopic || rawContent).replace(/\s+/g, ' ').trim();
   return query.length > 120 ? query.slice(0, 120) : query;
+}
+
+function compactMetadataValue(value: unknown) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildSkillMetadataText(skill: any, input: unknown, entrySource = '') {
+  const inputRecord = extractInputRecord(input);
+  const manifest = parseJsonRecord(skill?.manifest);
+  const parameters = parseJsonRecord(skill?.parameters);
+  const capabilities = parseStoredCapabilities(skill?.capabilities);
+  return [
+    skill?.name,
+    skill?.description,
+    skill?.category,
+    skill?.entry,
+    inputRecord.purpose,
+    inputRecord.type,
+    inputRecord.mode,
+    ...capabilities,
+    compactMetadataValue(manifest),
+    compactMetadataValue(parameters),
+    entrySource,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function sourceHasFlag(source: string, flag: string) {
+  return source.includes(`'${flag}'`)
+    || source.includes(`"${flag}"`)
+    || source.includes(flag);
+}
+
+function sourceExpectsFileArgument(source: string) {
+  if (!source.trim()) return false;
+  return /add_argument\(\s*['"](?:input|file|path|document|image|source|filename)/i.test(source)
+    || /\bsys\.argv\[\s*1\s*\]/.test(source);
+}
+
+function sourceAcceptsMultipleFiles(source: string) {
+  return /nargs\s*=\s*['"](?:\+|\*)['"]/.test(source)
+    || /add_argument\(\s*['"](?:files|paths|documents|images)/i.test(source);
+}
+
+function extractCliPositionals(source: string) {
+  const positionals: string[] = [];
+  for (const match of source.matchAll(/add_argument\(\s*['"]([^'"-][^'"]*)['"]/g)) {
+    const name = String(match[1] || '').trim();
+    if (name && !name.startsWith('-')) positionals.push(name);
+  }
+  return Array.from(new Set(positionals));
+}
+
+function buildValueForCliPositional(name: string, input: Record<string, any>, query: string, savedFiles: Array<{ name: string; path: string }>) {
+  const lower = name.toLowerCase();
+  if (/file|path|document|doc|pdf|ppt|excel|image|photo|picture|input|source/.test(lower)) {
+    return savedFiles[0]?.path || '';
+  }
+  if (/query|keyword|search|url|link/.test(lower)) {
+    return String(input.query || input.keyword || input.url || query || '').trim();
+  }
+  if (/prompt|instruction|text|content|markdown/.test(lower)) {
+    return String(input.prompt || input.content || input.text || query || '').trim();
+  }
+  if (/topic|title|subject/.test(lower)) {
+    return String(input.topic || input.title || query || '').trim();
+  }
+  return String(input[name] || query || input.content || '').trim();
+}
+
+function appendKnownCliOptions(args: string[], source: string, record: Record<string, any>) {
+  if (sourceHasFlag(source, '--max-results')) {
+    args.push('--max-results', String(record.maxResults || record.max_results || 5));
+  } else if (sourceHasFlag(source, '--limit')) {
+    args.push('--limit', String(record.maxResults || record.max_results || 5));
+  }
+  if (sourceHasFlag(source, '--format')) {
+    args.push('--format', String(record.format || 'markdown'));
+  }
+  if (sourceHasFlag(source, '--type')) {
+    args.push('--type', String(record.searchType || record.type || 'web'));
+  }
+}
+
+async function readEntrySource(entryPath?: string) {
+  if (!entryPath) return '';
+  try {
+    return await fs.readFile(entryPath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+async function buildSkillCliArgsForRun(
+  input: unknown,
+  skill?: any,
+  options: { entryPath?: string; savedFiles?: Array<{ name: string; path: string }> } = {}
+) {
+  const record = extractInputRecord(input);
+  const purpose = String(record.purpose || '');
+  const query = inferSkillQuery(input);
+  const entrySource = await readEntrySource(options.entryPath);
+  const metadataText = buildSkillMetadataText(skill, input, entrySource);
+  const entryText = String(skill?.entry || options.entryPath || '').toLowerCase();
+  const sourceExpectsQuery = /add_argument\(\s*['"]query['"]/i.test(entrySource)
+    || /\bquery\b[\s\S]{0,120}\bsys\.argv\[\s*1\s*\]/i.test(entrySource);
+  const searchLike = sourceExpectsQuery
+    || /search|collect|web|bing|google|duckduckgo|ddgs|联网|搜索|资料收集|图片搜索|素材搜索/i.test(`${purpose} ${entryText} ${metadataText}`);
+  const fileLike = /file|parse|document|pdf|docx|pptx|xlsx|markdown|markitdown|ocr|文件|解析|读取|图片识别|图像识别/i.test(`${purpose} ${entryText} ${metadataText}`);
+  const args: string[] = [];
+  const savedFiles = options.savedFiles || [];
+  const positionals = extractCliPositionals(entrySource);
+
+  if (positionals.length) {
+    for (const positional of positionals) {
+      const value = buildValueForCliPositional(positional, record, query, savedFiles);
+      if (value) args.push(value);
+    }
+    appendKnownCliOptions(args, entrySource, record);
+    if (args.length) return args;
+  }
+
+  if (query && searchLike) {
+    args.push(query);
+    appendKnownCliOptions(args, entrySource, record);
+    return args;
+  }
+
+  if (fileLike && savedFiles.length && sourceExpectsFileArgument(entrySource)) {
+    const files = sourceAcceptsMultipleFiles(entrySource) ? savedFiles : savedFiles.slice(0, 1);
+    args.push(...files.map((file) => file.path));
+  }
+  return args;
 }
 
 function buildPythonSkillArgs(input: unknown) {

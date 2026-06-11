@@ -63,7 +63,7 @@ export interface StrategistInput {
   } | null;
   promptContent?: string;
   promptId?: string | null;
-  skills: Array<{ id: string; name: string; instruction?: string }>;
+  skills: Array<{ id: string; name: string; instruction?: string; executorRules?: string[] }>;
 }
 
 const MODE_BY_TONE: Record<string, DesignSpec['visualTheme']['mode']> = {
@@ -154,6 +154,7 @@ export function buildStrategistPrompt(input: StrategistInput, context: Strategis
     skillId: s.id,
     skillName: s.name,
     strategistPrompt: s.instruction || undefined,
+    executorRules: Array.isArray(s.executorRules) ? s.executorRules.map(String).filter(Boolean).slice(0, 8) : undefined,
   }));
 
   const system = `你是 Nexious PPT 流程中的 Strategist。你的任务是把用户输入转换为可执行的 PPT 设计规格 JSON，后续 Executor 会逐页生成 SVG 并导出 PowerPoint。
@@ -247,7 +248,14 @@ ${skillExtensions.length > 0 ? `\n启用的 Skill 扩展：\n${skillExtensions.m
 
   const systemWithAnimationGuide = `${system}
 
-${animationGuide}`;
+${animationGuide}
+
+Skill orchestration rules:
+- Skill extensions are optional references. Decide autonomously whether to use each Skill and how much to use.
+- User content is authoritative. Skills must not override the user's topic, facts, selected prompt, or selected template.
+- Web/search/file skills provide source material only; do not convert their examples into slide business content.
+- Design/SVG/chart/formula/icon/quality skills provide design guidance only. Convert useful guidance into visualTheme, layout, rhythm, chartHint, imagePlan, animationDescription, and executorRules.
+- Template content affects visual style only and must not change user-provided content.`;
   const systemWithNexiousCharts = context.chartCatalog
     ? `${systemWithAnimationGuide}
 
@@ -297,6 +305,7 @@ export function parseStrategistOutput(raw: string, input: StrategistInput): Desi
       skillId: s.id,
       skillName: s.name,
       strategistPrompt: s.instruction || undefined,
+      executorRules: Array.isArray(s.executorRules) ? s.executorRules.map(String).filter(Boolean).slice(0, 8) : undefined,
     })),
   };
 }

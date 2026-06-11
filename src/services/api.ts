@@ -900,7 +900,7 @@ export const aiApi = {
       templateAsset?: TemplateAsset | null;
       promptContent?: string;
       promptId?: string | null;
-      skills: Array<{ id: string; name: string; instruction?: string }>;
+      skills: Array<{ id: string; name: string; instruction?: string; executorRules?: string[] }>;
     },
     callbacks: StreamCallbacks
   ): Promise<{ spec: DesignSpec; lock: SpecLock }> => {
@@ -984,7 +984,7 @@ export const aiApi = {
       templateAsset?: TemplateAsset | null;
       promptContent?: string;
       promptId?: string | null;
-      skills: Array<{ id: string; name: string; instruction?: string }>;
+      skills: Array<{ id: string; name: string; instruction?: string; executorRules?: string[] }>;
     };
     projectState?: any;
     includeImages?: boolean;
