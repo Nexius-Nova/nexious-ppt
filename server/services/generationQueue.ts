@@ -1,4 +1,4 @@
-﻿import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import type { Response } from 'express';
@@ -13,13 +13,14 @@ import {
   buildExecutorSystemPrompt,
   buildSpecLock,
   buildStrategistPrompt,
-  buildSvgQualityPatchPrompt,
   buildSvgQualityRepairPrompt,
   cleanSvgOutput,
+  deterministicRepairForIssues,
   ensureImageUsedInSvg,
   finalizeSvgQuality,
+  hasDeterministicFixableIssues,
+  hasLlmFixableIssues,
   parseStrategistOutput,
-  summarizeSvgQualityIssues,
 } from '../engine/index.js';
 import { streamText } from './textModel.js';
 import { generateImage, persistDataImage } from '../routes/ai.js';
@@ -113,7 +114,7 @@ const DEFAULT_GENERATION_QUEUE_CONCURRENCY = 3;
 const DEFAULT_EXPORT_QUEUE_CONCURRENCY = 2;
 const MAX_CONCURRENT_GENERATION_JOBS = Math.max(1, Number(process.env.GENERATION_QUEUE_CONCURRENCY || DEFAULT_GENERATION_QUEUE_CONCURRENCY));
 const MAX_CONCURRENT_EXPORT_JOBS = Math.max(1, Number(process.env.EXPORT_QUEUE_CONCURRENCY || DEFAULT_EXPORT_QUEUE_CONCURRENCY));
-const EXECUTOR_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.EXECUTOR_PAGE_CONCURRENCY || 3)));
+const EXECUTOR_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.EXECUTOR_PAGE_CONCURRENCY || 5)));
 const IMAGE_CONCURRENCY = Math.max(1, Math.min(3, Number(process.env.IMAGE_GENERATION_CONCURRENCY || 3)));
 const IMAGE_GENERATION_ATTEMPTS = 2;
 const MAX_JOB_HISTORY = 300;
@@ -662,7 +663,11 @@ async function isRedisJobCancelled(id: string) {
   return Boolean(await redisConnection.exists(redisCancelKey(id)));
 }
 
-async function ensureRedisQueueReady() {
+export async function initRedisQueue(options?: { startWorker?: boolean }): Promise<boolean> {
+  return ensureRedisQueueReady(options);
+}
+
+async function ensureRedisQueueReady(options?: { startWorker?: boolean }) {
   if (!USE_REDIS_QUEUE) {
     if (REQUIRE_REDIS_QUEUE) {
       throw new Error('生产环境必须配置 REDIS_URL 并启用 Redis 队列，或显式设置 QUEUE_DRIVER=memory 才允许使用内存队列。');
@@ -678,13 +683,13 @@ async function ensureRedisQueueReady() {
   }
   if (redisQueueInitPromise) return redisQueueInitPromise;
 
-  redisQueueInitPromise = initializeRedisQueue().finally(() => {
+  redisQueueInitPromise = initializeRedisQueue(options).finally(() => {
     redisQueueInitPromise = null;
   });
   return redisQueueInitPromise;
 }
 
-async function initializeRedisQueue() {
+async function initializeRedisQueue(options?: { startWorker?: boolean }) {
   try {
     if (!await precheckRedisQueue()) return false;
 
@@ -703,48 +708,50 @@ async function initializeRedisQueue() {
     attachBullMqErrorLogger(generateQueue, 'BullMQ 生成队列');
     attachBullMqErrorLogger(exportQueue, 'BullMQ 导出队列');
 
-    generateWorker = new Worker(
-      bullQueueName('generate'),
-      async (bullJob: BullJob<{ job: GenerateQueuedJob }>) => {
-        const job = bullJob.data.job;
-        activeRedisJobs.set(job.id, job);
-        jobs.set(job.id, job);
-        try {
-          await runJob(job);
-        } finally {
-          activeRedisJobs.delete(job.id);
+    if (options?.startWorker !== false) {
+      generateWorker = new Worker(
+        bullQueueName('generate'),
+        async (bullJob: BullJob<{ job: GenerateQueuedJob }>) => {
+          const job = bullJob.data.job;
+          activeRedisJobs.set(job.id, job);
+          jobs.set(job.id, job);
+          try {
+            await runJob(job);
+          } finally {
+            activeRedisJobs.delete(job.id);
+          }
+        },
+        {
+          connection: createBullRedisOptions(),
+          prefix: REDIS_KEY_PREFIX,
+          concurrency: MAX_CONCURRENT_GENERATION_JOBS,
+          skipVersionCheck: true,
         }
-      },
-      {
-        connection: createBullRedisOptions(),
-        prefix: REDIS_KEY_PREFIX,
-        concurrency: MAX_CONCURRENT_GENERATION_JOBS,
-        skipVersionCheck: true,
-      }
-    );
+      );
 
-    exportWorker = new Worker(
-      bullQueueName('export'),
-      async (bullJob: BullJob<{ job: ExportQueuedJob }>) => {
-        const job = bullJob.data.job;
-        activeRedisJobs.set(job.id, job);
-        jobs.set(job.id, job);
-        try {
-          await runJob(job);
-        } finally {
-          activeRedisJobs.delete(job.id);
+      exportWorker = new Worker(
+        bullQueueName('export'),
+        async (bullJob: BullJob<{ job: ExportQueuedJob }>) => {
+          const job = bullJob.data.job;
+          activeRedisJobs.set(job.id, job);
+          jobs.set(job.id, job);
+          try {
+            await runJob(job);
+          } finally {
+            activeRedisJobs.delete(job.id);
+          }
+        },
+        {
+          connection: createBullRedisOptions(),
+          prefix: REDIS_KEY_PREFIX,
+          concurrency: MAX_CONCURRENT_EXPORT_JOBS,
+          skipVersionCheck: true,
         }
-      },
-      {
-        connection: createBullRedisOptions(),
-        prefix: REDIS_KEY_PREFIX,
-        concurrency: MAX_CONCURRENT_EXPORT_JOBS,
-        skipVersionCheck: true,
-      }
-    );
+      );
 
-    attachBullMqErrorLogger(generateWorker, 'BullMQ 生成 worker');
-    attachBullMqErrorLogger(exportWorker, 'BullMQ 导出 worker');
+      attachBullMqErrorLogger(generateWorker, 'BullMQ 生成 worker');
+      attachBullMqErrorLogger(exportWorker, 'BullMQ 导出 worker');
+    }
 
     await redisConnection.ping();
     redisQueueReady = true;
@@ -1663,7 +1670,7 @@ async function maybeGenerateImages(
       message: `图片自动重试后仍未完成：${missingText}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(results, spec), svgPages: sortServerSvgPages(existingPages) },
     });
-    throw new Error(`图片自动重试后仍未完成：${missingText}。请手动重试图片后再继续。`);
+    console.warn(`图片自动重试后仍未完成：${missingText}，将降级为无图模式继续生成。`);
   }
   await preloadImageMetadata(results);
   return sortImagesByOutline(results, spec);
@@ -1709,7 +1716,7 @@ async function ensureRequiredImagesBeforeLayout(job: GenerateQueuedJob, spec: De
       message: `图片自动重试后仍未完成：${missingText}`,
       result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: sortServerSvgPages(pages) },
     });
-    throw new Error(`图片自动重试后仍未完成：${missingText}。请手动重试图片后再继续。`);
+    console.warn(`图片自动重试后仍未完成：${missingText}，将降级为无图模式继续生成。`);
   }
 }
 
@@ -1765,7 +1772,8 @@ async function ensureServerImagesForLayout(
     message: `第 ${slide.pageNumber} 页图片自动重试后仍未完成："${slide.title}"`,
     result: { spec, lock, outline: spec.outline, images: sortImagesByOutline(images, spec), svgPages: pages.slice().sort((a, b) => a.pageNumber - b.pageNumber) },
   });
-  throw new Error(`第 ${slide.pageNumber} 页需要图片素材，但图片自动重试后仍未生成：${slide.title}`);
+  console.warn(`第 ${slide.pageNumber} 页需要图片素材，但图片自动重试后仍未生成：${slide.title}，将降级为无图模式。`);
+  return [];
 }
 
 async function generateSvgPages(
@@ -1823,6 +1831,8 @@ async function generateSvgPages(
     return sortServerSvgPages(pages);
   }
 
+  const cachedIconGuide = await getIconGuide(lock.iconStyle);
+
   async function worker() {
     while (cursor < slidesToGenerate.length) {
       await assertJobActive(job);
@@ -1841,7 +1851,7 @@ async function generateSvgPages(
       await preloadImageMetadata(slideImages);
       const currentSignature = slideSignature({ job, spec, lock, slide, slideImages, provider, baseUrl, model }) || signature;
       await assertJobActive(job);
-      const pageResult = await generatePageSvg(spec, lock, slide, slideImages, provider, apiKey, baseUrl, model);
+      const pageResult = await generatePageSvg(spec, lock, slide, slideImages, provider, apiKey, baseUrl, model, cachedIconGuide);
       await assertJobActive(job);
       upsertServerSvgPage(pages, {
         pageNumber: slide.pageNumber,
@@ -1875,7 +1885,8 @@ async function generatePageSvg(
   provider: string,
   apiKey: string,
   baseUrl: string,
-  model: string
+  model: string,
+  cachedIconGuide?: string
 ) {
   const pageKey = `P${String(slide.pageNumber).padStart(2, '0')}`;
   const slimSpec = {
@@ -1901,7 +1912,7 @@ async function generatePageSvg(
     forbidden: (lock as any).forbidden || DEFAULT_FORBIDDEN,
   } as any;
 
-  const iconGuide = await getIconGuide(slimLock.iconStyle);
+  const iconGuide = cachedIconGuide ?? await getIconGuide(slimLock.iconStyle);
   const chartTemplateSvg = await getChartSvg(slimLock.pageCharts[pageKey] || slide.chartHint);
   const executorContext = { iconGuide, chartTemplateSvg };
   const systemPrompt = buildExecutorSystemPrompt(slimSpec, slimLock, executorContext);
@@ -1923,21 +1934,35 @@ async function generatePageSvg(
       let quality = finalizeSvgQuality(rawSvg, spec, slide, undefined, imageAssets);
       lastQuality = quality;
       if (quality.blockingIssues.length) {
-        quality = await repairSvgQualityWithFallback({
-          provider,
-          apiKey,
-          baseUrl,
-          model,
-          systemPrompt,
-          spec,
-          slide,
-          imageAssets,
-          quality,
-        });
-        lastQuality = quality;
-      }
-      if (quality.blockingIssues.length && attempt < 3) {
-        throw new Error(`页面质量检查未通过：${summarizeSvgQualityIssues(quality.blockingIssues, 3)}`);
+        // 先尝试确定性修复（不调用LLM）
+        if (hasDeterministicFixableIssues(quality.blockingIssues)) {
+          const deterministicallyRepaired = deterministicRepairForIssues(quality.svg, spec, slide, quality.blockingIssues);
+          const afterDeterministic = finalizeSvgQuality(deterministicallyRepaired, spec, slide, undefined, imageAssets);
+          if (afterDeterministic.blockingIssues.length < quality.blockingIssues.length) {
+            quality = afterDeterministic;
+            lastQuality = quality;
+          }
+        }
+        // 如果仍有LLM可修复的问题，再尝试LLM修复
+        if (quality.blockingIssues.length && hasLlmFixableIssues(quality.blockingIssues)) {
+          const beforeRepairIssueCount = quality.blockingIssues.length;
+          const repaired = await repairSvgQualityWithFallback({
+            provider,
+            apiKey,
+            baseUrl,
+            model,
+            systemPrompt,
+            spec,
+            slide,
+            imageAssets,
+            quality,
+          });
+          // 如果修复后问题更多，回退到修复前
+          if (repaired.blockingIssues.length <= beforeRepairIssueCount) {
+            quality = repaired;
+          }
+          lastQuality = quality;
+        }
       }
       return {
         svg: quality.svg,
@@ -1954,9 +1979,6 @@ async function generatePageSvg(
     }
   }
 
-  if (lastQuality?.blockingIssues?.length) {
-    throw new Error(`页面质量检查未通过：${summarizeSvgQualityIssues(lastQuality.blockingIssues, 5)}`);
-  }
   throw lastError instanceof Error ? lastError : new Error('页面 SVG 生成失败');
 }
 
@@ -1979,22 +2001,15 @@ async function repairSvgQualityWithFallback(input: {
   const { provider, apiKey, baseUrl, model, systemPrompt, spec, slide, imageAssets } = input;
   let quality = input.quality;
 
-  const patchOutput = await streamText(provider, apiKey, baseUrl, model, [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: buildSvgQualityPatchPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, imageAssets) },
-  ]).catch(() => '');
-  const patchSvg = ensureImageUsedInSvg(cleanSvgOutput(patchOutput), slide, spec, imageAssets);
-  if (patchSvg && patchSvg.includes('<svg') && patchSvg.includes('</svg>')) {
-    quality = finalizeSvgQuality(patchSvg, spec, slide, undefined, imageAssets);
-  }
-  if (!quality.blockingIssues.length) return quality;
-
   const repairOutput = await streamText(provider, apiKey, baseUrl, model, [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, imageAssets) },
   ]);
   const repairedSvg = ensureImageUsedInSvg(cleanSvgOutput(repairOutput), slide, spec, imageAssets);
-  return finalizeSvgQuality(repairedSvg || quality.svg, spec, slide, undefined, imageAssets);
+  if (repairedSvg && repairedSvg.includes('<svg') && repairedSvg.includes('</svg>')) {
+    quality = finalizeSvgQuality(repairedSvg, spec, slide, undefined, imageAssets);
+  }
+  return quality;
 }
 
 async function runExportJob(job: ExportQueuedJob) {

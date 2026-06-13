@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DesignSpec, SpecLock } from './spec.js';
 import { inlineRemoteImages } from './svg-to-pptx.js';
 import { exportNativeEditablePptx, type NativeSvgPptxAnimationOptions } from './native-svg-pptx.js';
 import { generatedProjectsRoot } from '../utils/storage.js';
 import { sanitizeGeneratedSvg } from './executor.js';
+import { finalizeSvgQuality, removeGroupOpacity } from './svgQuality.js';
 import {
   finalizeSvgProject,
   writeAnimationConfig,
@@ -71,11 +72,15 @@ export function renderSpecLockMarkdown(lock: SpecLock): string {
     `- subtitle: ${t.subtitleSize}`,
     `- annotation: ${t.annotationSize}`,
     '',
-    '## icons',
-    `- library: ${lock.iconStyle === 'none' ? 'tabler-outline' : lock.iconStyle}`,
-    '- stroke_width: 2',
-    '- inventory: chart-bar, layout-dashboard, list-check, bulb, target, users, arrow-right, check, presentation',
-    '',
+    ...(lock.iconStyle === 'none'
+      ? []
+      : [
+          '## icons',
+          `- library: ${lock.iconStyle}`,
+          '- stroke_width: 2',
+          '- inventory: chart-bar, layout-dashboard, list-check, bulb, target, users, arrow-right, check, presentation',
+          '',
+        ]),
     '## page_rhythm',
     ...Object.entries(lock.pageRhythm).map(([key, value]) => `- ${key}: ${value}`),
   ];
@@ -121,7 +126,7 @@ export function renderDesignSpecMarkdown(spec: DesignSpec, lock: SpecLock): stri
 
 - Style: ${spec.visualTheme.style}
 - Mode: ${spec.visualTheme.mode}
-- Note: No gradients. All SVG pages must use solid HEX colors from spec_lock.
+- Note: Gradients are forbidden. All SVG pages must use solid HEX fills/strokes from spec_lock or compatible solid theme colors.
 
 | Role | HEX |
 | ---- | --- |
@@ -222,13 +227,12 @@ export async function exportWithNexiousPpt(
   await writeAnimationConfig(projectPath, preparedPages, spec, options.animation).then((configPath) => {
     if (options.animation?.enabled) logs.push(`动画配置已写入：${configPath}`);
   });
-  await runPptMasterSvgQualityCheck(projectPath, spec.canvas.format, logs);
   await finalizeSvgProject(projectPath).then((result) => {
     logs.push(`SVG 后处理完成：exitCode=${result.exitCode}`);
     const output = clipToolOutput([result.stdout, result.stderr].filter(Boolean).join('\n'), 2000);
     if (output) logs.push(output);
   });
-  await runPptMasterSvgQualityCheck(path.join(projectPath, 'svg_final'), spec.canvas.format, logs);
+  await runPptMasterSvgQualityCheck(path.join(projectPath, 'svg_final'), spec.canvas.format, logs, spec);
   const exportPath = path.join(projectPath, 'exports', fileName);
   await mkdir(path.dirname(exportPath), { recursive: true });
 
@@ -277,7 +281,7 @@ function assertCompleteExportPages(pages: PptExportPage[], spec: DesignSpec) {
   }
 }
 
-async function runPptMasterSvgQualityCheck(projectPath: string, format: string, logs: string[]) {
+async function runPptMasterSvgQualityCheck(projectPath: string, format: string, logs: string[], spec?: DesignSpec, attemptRepair = true) {
   const result = await runPythonTool(
     [SVG_QUALITY_CHECKER, projectPath, '--format', format],
     SVG_QUALITY_ROOT,
@@ -296,8 +300,71 @@ async function runPptMasterSvgQualityCheck(projectPath: string, format: string, 
   logs.push(`PPT Master SVG 质量检查完成：exitCode=${result.exitCode}`);
   if (output) logs.push(output);
   if (result.exitCode !== 0) {
+    if (attemptRepair && spec) {
+      logs.push('PPT Master SVG 质量检查未通过，正在执行导出阶段自动修复并重试。');
+      const repaired = await repairSvgDirectoryForExport(projectPath, spec, logs);
+      if (repaired > 0) {
+        logs.push(`导出阶段已修复 ${repaired} 个 SVG 文件，重新运行质量检查。`);
+        return runPptMasterSvgQualityCheck(projectPath, format, logs, spec, false);
+      }
+      logs.push('导出阶段未找到可自动修复的 SVG 文件。');
+    }
     throw new Error(`PPT Master SVG 质量检查未通过：${output || '请检查 SVG 页面规范'}`);
   }
+}
+
+async function repairSvgDirectoryForExport(projectPath: string, spec: DesignSpec, logs: string[]) {
+  const svgDir = path.basename(projectPath) === 'svg_final' || path.basename(projectPath) === 'svg_output'
+    ? projectPath
+    : path.join(projectPath, 'svg_output');
+  let files: string[] = [];
+  try {
+    files = (await readdir(svgDir)).filter((file) => file.toLowerCase().endsWith('.svg')).sort();
+  } catch {
+    return 0;
+  }
+
+  let repaired = 0;
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const filePath = path.join(svgDir, file);
+    const pageNumber = inferPageNumberFromSvgFile(file) || index + 1;
+    const slide = spec.outline.find((item) => item.pageNumber === pageNumber) || spec.outline[pageNumber - 1];
+    const raw = await readFile(filePath, 'utf-8').catch(() => '');
+    if (!raw) {
+      logs.push(`导出阶段修复跳过：${file} 内容为空，未替换原页面。`);
+      continue;
+    }
+
+    let next = normalizeSvgForExport(raw, spec, pageNumber);
+    const quality = finalizeSvgQuality(next, spec, slide || {
+      id: `slide-${pageNumber}`,
+      pageNumber,
+      title: `第 ${pageNumber} 页`,
+      bullets: [],
+      speakerNotes: '',
+      visualPrompt: '',
+      imagePlan: [],
+      layout: 'content',
+      rhythm: 'dense',
+    });
+    next = quality.svg;
+    if (next !== raw) {
+      await writeFile(filePath, next, 'utf-8');
+      repaired += 1;
+      const issueText = quality.blockingIssues.length
+        ? `，内部质检仍有 ${quality.blockingIssues.length} 个阻断问题，未替换原页面`
+        : '';
+      logs.push(`导出阶段修复：${file}${issueText}。`);
+    }
+  }
+  return repaired;
+}
+
+function inferPageNumberFromSvgFile(fileName: string) {
+  const match = String(fileName || '').match(/^(\d{1,3})(?:[_-]|$)/);
+  const pageNumber = match ? Number(match[1]) : NaN;
+  return Number.isInteger(pageNumber) && pageNumber > 0 ? pageNumber : 0;
 }
 
 async function runPythonTool(
@@ -393,7 +460,7 @@ export function normalizeSvgForExport(rawSvg: string, spec: DesignSpec, pageNumb
     return svg;
   }
 
-  return buildSafeFallbackSvg(spec, pageNumber);
+  return svg;
 }
 
 function extractSvg(rawSvg: string): string {
@@ -421,9 +488,23 @@ function repairCommonSvgBreakage(rawSvg: string, spec: DesignSpec): string {
   svg = svg.replace(/\sfont-family="'([^"]*?)"/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/'/g, ''))}"`);
   svg = svg.replace(/\sfont-family='([^']*)'/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/"/g, ''))}"`);
   svg = svg.replace(/\sfont-family="([^"]*)"/g, (_match, inner) => ` font-family="${escapeAttrValue(String(inner).replace(/"/g, ''))}"`);
-  svg = svg.replace(/rgba\(\s*([^)]+)\)/gi, '#000000');
+  svg = svg.replace(/rgba\(\s*([^)]+)\)/gi, (_match, inner: string) => {
+    const parts = inner.split(',').map((s: string) => s.trim());
+    if (parts.length >= 3) {
+      const r = Math.max(0, Math.min(255, Math.round(Number(parts[0])))).toString(16).padStart(2, '0');
+      const g = Math.max(0, Math.min(255, Math.round(Number(parts[1])))).toString(16).padStart(2, '0');
+      const b = Math.max(0, Math.min(255, Math.round(Number(parts[2])))).toString(16).padStart(2, '0');
+      if (parts.length === 4) {
+        const a = Math.max(0, Math.min(255, Math.round(Number(parts[3]) * 255))).toString(16).padStart(2, '0');
+        return `#${r}${g}${b}${a}`;
+      }
+      return `#${r}${g}${b}`;
+    }
+    return '#000000';
+  });
   svg = removeUnsupportedClipPathTargets(svg);
   svg = removeDuplicateAttributes(svg);
+  svg = removeGroupOpacity(svg);
   svg = escapeTextNodes(svg);
 
   const svgOpen = svg.match(/<svg\b[^>]*>/i)?.[0] || '';
@@ -558,32 +639,6 @@ function isWellFormedXml(svg: string): boolean {
 
   const stripped = normalized.replace(tagPattern, '');
   return stack.length === 0 && !/[<>]/.test(stripped);
-}
-
-function buildSafeFallbackSvg(spec: DesignSpec, pageNumber: number): string {
-  const slide = spec.outline.find((item) => item.pageNumber === pageNumber) || spec.outline[pageNumber - 1];
-  const colors = spec.visualTheme.colors;
-  const typography = spec.typography;
-  const title = escapeTextContent(slide?.title || `第 ${pageNumber} 页`);
-  const bullets = (slide?.bullets || []).slice(0, 6);
-  const bulletLines = bullets
-    .map((bullet, index) => {
-      const y = 190 + index * 52;
-      return `<g id="bullet-${index + 1}"><circle cx="92" cy="${y - 7}" r="5" fill="${colors.accent}"/><text x="112" y="${y}" font-family="${escapeAttrValue(typography.bodyFamily)}" font-size="${typography.bodySize}" fill="${colors.text}">${escapeTextContent(bullet)}</text></g>`;
-    })
-    .join('\n  ');
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${spec.canvas.width}" height="${spec.canvas.height}" viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}">
-  <rect width="${spec.canvas.width}" height="${spec.canvas.height}" fill="${colors.background}"/>
-  <rect x="54" y="54" width="${spec.canvas.width - 108}" height="${spec.canvas.height - 108}" fill="${colors.surface}" stroke="${colors.border}" stroke-width="1"/>
-  <g id="title-block">
-    <text x="80" y="120" font-family="${escapeAttrValue(typography.titleFamily)}" font-size="${typography.titleSize}" font-weight="700" fill="${colors.text}">${title}</text>
-    <rect x="80" y="145" width="96" height="4" fill="${colors.accent}"/>
-  </g>
-  <g id="content-list">
-  ${bulletLines || `<text x="80" y="210" font-family="${escapeAttrValue(typography.bodyFamily)}" font-size="${typography.bodySize}" fill="${colors.muted}">本页 SVG 已自动修复为安全兜底页面。</text>`}
-  </g>
-</svg>`;
 }
 
 function renderSourceMarkdown(spec: DesignSpec): string {

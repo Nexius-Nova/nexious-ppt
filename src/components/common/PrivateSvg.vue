@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, toRef } from 'vue';
+import { computed, toRef, ref, watch, onBeforeUnmount } from 'vue';
 import { usePrivateSvg } from '@/composables/usePrivateAssetUrl';
 
 defineOptions({ inheritAttrs: false });
@@ -17,6 +17,25 @@ const privateSvg = usePrivateSvg(toRef(props, 'svg'));
 const resolvedSvg = computed(() => privateSvg.svg.value);
 const isLoading = computed(() => privateSvg.loading.value);
 const loadError = computed(() => privateSvg.error.value);
+
+// DOM 复用：避免 v-html 每次重建 DOM
+const contentRef = ref<HTMLElement | null>(null);
+let lastSvgContent = '';
+let rafId: number | null = null;
+
+watch(resolvedSvg, (newSvg) => {
+  if (rafId !== null) cancelAnimationFrame(rafId);
+  rafId = requestAnimationFrame(() => {
+    if (!contentRef.value) return;
+    if (newSvg === lastSvgContent) return;
+    lastSvgContent = newSvg || '';
+    contentRef.value.innerHTML = lastSvgContent;
+  });
+});
+
+onBeforeUnmount(() => {
+  if (rafId !== null) cancelAnimationFrame(rafId);
+});
 </script>
 
 <template>
@@ -25,7 +44,7 @@ const loadError = computed(() => privateSvg.error.value);
     <div v-else-if="loadError || !resolvedSvg" class="private-svg__state private-svg__state--error">
       预览加载失败
     </div>
-    <div v-else class="private-svg__content" v-html="resolvedSvg" />
+    <div v-else ref="contentRef" class="private-svg__content" />
   </div>
 </template>
 

@@ -8,7 +8,15 @@ export type SvgQualityIssueType =
   | 'image-overlap-content'
   | 'element-overlap'
   | 'low-contrast'
-  | 'large-blank-image-area';
+  | 'large-blank-image-area'
+  | 'invalid-gradient'
+  | 'formula-render-risk'
+  | 'chart-structure-missing'
+  | 'icon-placeholder-invalid'
+  | 'animation-grouping-risk'
+  | 'placeholder-content'
+  | 'style-consistency-risk'
+  | 'group-opacity';
 
 export type SvgQualitySeverity = 'warning' | 'error';
 
@@ -49,8 +57,8 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
 const TEXT_MARGIN = 28;
 const FLOAT_TOLERANCE = 3;
-const CONTAINER_TEXT_PADDING_X = 24;
-const CONTAINER_TEXT_PADDING_Y = 16;
+const CONTAINER_TEXT_PADDING_X = 16;
+const CONTAINER_TEXT_PADDING_Y = 10;
 
 function parseAttributes(source: string): Record<string, string> {
   const attrs: Record<string, string> = {};
@@ -150,12 +158,12 @@ function estimateTextWidth(text: string, fontSize: number) {
   let units = 0;
   for (const char of String(text || '')) {
     if (/\s/.test(char)) units += 0.34;
-    else if (/[\u3000-\u9fff\uff00-\uffef]/.test(char)) units += 0.98;
-    else if (/[A-Z0-9]/.test(char)) units += 0.62;
+    else if (/[\u3000-\u9fff\uff00-\uffef]/.test(char)) units += 1.02;
+    else if (/[A-Z0-9]/.test(char)) units += 0.66;
     else if (/[.,;:!?'"`|/\\()[\]{}·•\-–—_+*=]/.test(char)) units += 0.42;
-    else units += 0.54;
+    else units += 0.58;
   }
-  return Math.max(fontSize, units * fontSize);
+  return Math.max(fontSize, units * fontSize) + 8;
 }
 
 function textLineBox(input: {
@@ -186,7 +194,7 @@ function textLineBox(input: {
   };
 }
 
-function extractElementBoxes(svg: string, tag: 'image' | 'rect' | 'text' | 'line' | 'path'): SvgElementBox[] {
+function extractElementBoxes(svg: string, tag: 'image' | 'rect' | 'text' | 'line' | 'path' | 'use' | 'circle' | 'ellipse' | 'polygon' | 'polyline'): SvgElementBox[] {
   const boxes: SvgElementBox[] = [];
   const regex = tag === 'text'
     ? /<text\b[\s\S]*?<\/text>/gi
@@ -197,7 +205,7 @@ function extractElementBoxes(svg: string, tag: 'image' | 'rect' | 'text' | 'line
     const attrs = parseAttributes(source);
     const index = match.index || 0;
 
-    if (tag === 'image' || tag === 'rect') {
+    if (tag === 'image' || tag === 'rect' || tag === 'use') {
       const box = {
         x: numberAttr(attrs, 'x'),
         y: numberAttr(attrs, 'y'),
@@ -205,6 +213,31 @@ function extractElementBoxes(svg: string, tag: 'image' | 'rect' | 'text' | 'line
         height: numberAttr(attrs, 'height'),
       };
       if (box.width > 0 && box.height > 0) boxes.push({ tag, attrs, source, index, ...box });
+      continue;
+    }
+
+    if (tag === 'circle' || tag === 'ellipse') {
+      const cx = numberAttr(attrs, 'cx');
+      const cy = numberAttr(attrs, 'cy');
+      const rx = tag === 'circle' ? numberAttr(attrs, 'r') : numberAttr(attrs, 'rx');
+      const ry = tag === 'circle' ? numberAttr(attrs, 'r') : numberAttr(attrs, 'ry');
+      if (rx > 0 && ry > 0) boxes.push({ tag, attrs, source, index, x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2 });
+      continue;
+    }
+
+    if (tag === 'polygon' || tag === 'polyline') {
+      const numbers = Array.from(String(attrs.points || '').matchAll(/-?\d+(?:\.\d+)?/g)).map((item) => Number.parseFloat(item[0]));
+      if (numbers.length >= 4) {
+        const xs = numbers.filter((_value, idx) => idx % 2 === 0);
+        const ys = numbers.filter((_value, idx) => idx % 2 === 1);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        if (Number.isFinite(minX) && Number.isFinite(maxX) && Number.isFinite(minY) && Number.isFinite(maxY)) {
+          boxes.push({ tag, attrs, source, index, x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) });
+        }
+      }
       continue;
     }
 
@@ -431,6 +464,7 @@ function deterministicRepair(svg: string, spec: DesignSpec) {
   let result = removeStyleAndClassAttributes(svg);
   result = removeDuplicateAttributes(result);
   result = removeUnsupportedClipPathTargets(result);
+  result = removeGroupOpacity(result);
   result = addOrReplaceSvgAttributes(result, spec);
   result = repairTextCanvasOverflow(result, spec);
   return result;
@@ -438,6 +472,107 @@ function deterministicRepair(svg: string, spec: DesignSpec) {
 
 function issue(type: SvgQualityIssueType, severity: SvgQualitySeverity, message: string, element?: string, bbox?: Box): SvgQualityIssue {
   return { type, severity, message, element, bbox };
+}
+
+function inspectGradients(svg: string): SvgQualityIssue[] {
+  const issues: SvgQualityIssue[] = [];
+  const gradientDefs = Array.from(svg.matchAll(/<(linearGradient|radialGradient)\b[\s\S]*?<\/\1>/gi));
+  for (const match of gradientDefs) {
+    const source = match[0];
+    issues.push(issue('invalid-gradient', 'error', 'Gradient definitions are forbidden; replace linearGradient/radialGradient with solid HEX fills.', source));
+  }
+
+  for (const ref of svg.matchAll(/url\(#([^)]+)\)/gi)) {
+    if (/grad|gradient/i.test(ref[1])) issues.push(issue('invalid-gradient', 'error', `Gradient references are forbidden: ${ref[1]}`));
+  }
+  return issues;
+}
+
+function inspectFormulaRisks(svg: string, slide: SpecSlide): SvgQualityIssue[] {
+  const text = stripTags(svg);
+  const formulaIntent = /公式|方程|数学|函数|定理|推导|latex|math|equation|formula|∑|∫|√|≤|≥|≈|π|α|β|γ/i.test(`${slide.title}\n${slide.bullets.join('\n')}\n${slide.speakerNotes}`);
+  const rawFormula = /(\$\$?[^$]{2,}\$\$?)|(\\\(|\\\[)|\\frac|\\sum|\\int|\\sqrt|<math\b|<\/math>/i.test(svg);
+  if (rawFormula) {
+    return [issue('formula-render-risk', 'error', 'Formula markup or raw LaTeX/MathML remains in SVG; render it with SVG text/tspan/path elements.')];
+  }
+  if (formulaIntent && !/[=+\-×÷∑∫√≤≥≈πθαβγ]/.test(text)) {
+    return [issue('formula-render-risk', 'warning', 'Slide appears to need a formula, but no formula-like expression is visible.')];
+  }
+  return [];
+}
+
+function inspectIconRisks(svg: string, icons: SvgElementBox[]): SvgQualityIssue[] {
+  const issues: SvgQualityIssue[] = [];
+  if (/<g\b[^>]*data-icon\s*=/i.test(svg)) {
+    issues.push(issue('icon-placeholder-invalid', 'error', 'Icon placeholder must use <use data-icon="library/name" .../>, not <g data-icon>.'));
+  }
+  for (const icon of icons) {
+    if (!String(icon.attrs['data-icon'] || '').trim()) continue;
+    if (icon.width <= 0 || icon.height <= 0) {
+      issues.push(issue('icon-placeholder-invalid', 'error', 'Icon placeholder is missing width or height.', icon.source, icon));
+    }
+    if (!/^[-\w]+\/[-\w]+$/.test(String(icon.attrs['data-icon'] || ''))) {
+      issues.push(issue('icon-placeholder-invalid', 'warning', `Icon data-icon should include library/name: ${icon.attrs['data-icon']}`, icon.source, icon));
+    }
+  }
+  return issues;
+}
+
+function inspectChartStructure(slide: SpecSlide, layout: string, structuralElements: SvgElementBox[]): SvgQualityIssue[] {
+  const chartHint = String(slide.chartHint || '').trim();
+  if (!chartHint && !/chart|matrix|table|timeline|process|flow|diagram|图表|矩阵|表格|时间线|流程|架构/.test(layout)) return [];
+  const meaningful = structuralElements.filter((item) => item.width > 6 && item.height > 6);
+  const needsManyElements = /chart|matrix|table|timeline|process|flow|diagram|architecture|架构|流程|矩阵|表格|图表/i.test(`${layout} ${chartHint}`);
+  if (needsManyElements && meaningful.length < 4) {
+    return [issue('chart-structure-missing', 'error', 'Chart/diagram slide lacks enough visible structural elements, nodes, connectors, bars, cells, or labels.')];
+  }
+  return [];
+}
+
+function inspectAnimationGrouping(svg: string, slide: SpecSlide): SvgQualityIssue[] {
+  if (!String(slide.animationDescription || '').trim()) return [];
+  const groupIds = Array.from(svg.matchAll(/<g\b[^>]*\bid\s*=\s*(['"])(.*?)\1/gi), (match) => String(match[2] || '').toLowerCase());
+  const meaningfulGroups = groupIds.filter((id) => !/(background|bg|chrome|footer|header|defs)/.test(id));
+  if (meaningfulGroups.length < 2) {
+    return [issue('animation-grouping-risk', 'warning', 'Animated slide has too few meaningful <g id="..."> groups for PPT element animation.')];
+  }
+  return [];
+}
+
+function inspectPlaceholderContent(svg: string, slide: SpecSlide): SvgQualityIssue[] {
+  const visibleText = stripTags(svg);
+  const placeholders = ['Lorem ipsum', '占位', '示例文本', '标题文本', '正文内容', 'Your text', 'Sample text', 'Placeholder'];
+  const found = placeholders.find((item) => new RegExp(escapeRegExp(item), 'i').test(visibleText));
+  if (found) {
+    return [issue('placeholder-content', 'error', `Placeholder content remains visible: ${found}`)];
+  }
+  const title = String(slide.title || '').trim();
+  if (title && !visibleText.includes(title.slice(0, Math.min(8, title.length)))) {
+    return [issue('placeholder-content', 'warning', 'Slide title is not clearly visible in generated SVG.')];
+  }
+  return [];
+}
+
+function inspectStyleConsistency(svg: string, spec: DesignSpec): SvgQualityIssue[] {
+  const issues: SvgQualityIssue[] = [];
+  if (/<style\b/i.test(svg) || /\sclass\s*=/i.test(svg)) {
+    issues.push(issue('style-consistency-risk', 'error', 'SVG should not rely on <style> or class attributes; use explicit attributes for PPT export stability.'));
+  }
+  const colors = new Set(Array.from(svg.matchAll(/#[0-9a-fA-F]{3,8}\b/g), (match) => normalizeHexColor(match[0]) || match[0].toUpperCase()));
+  const allowed = new Set(Object.values(spec.visualTheme.colors).map((color) => normalizeHexColor(color)).filter(Boolean));
+  const extraColors = Array.from(colors).filter((color) => color.length === 7 && !allowed.has(color));
+  if (extraColors.length > 10) {
+    issues.push(issue('style-consistency-risk', 'warning', `SVG uses many colors outside visualTheme palette: ${extraColors.slice(0, 6).join(', ')}`));
+  }
+  return issues;
+}
+
+function inspectGroupOpacity(svg: string): SvgQualityIssue[] {
+  const issues: SvgQualityIssue[] = [];
+  if (/<g\b[^>]*\sopacity\s*=/i.test(svg)) {
+    issues.push(issue('group-opacity', 'error', 'Detected forbidden <g opacity> (set opacity on each child element individually)'));
+  }
+  return issues;
 }
 
 function normalizeQualityImageAssets(input?: string | SvgQualityImageAsset[]): SvgQualityImageAsset[] {
@@ -476,6 +611,12 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageInput?
   const rects = extractElementBoxes(svg, 'rect');
   const lines = extractElementBoxes(svg, 'line');
   const paths = extractElementBoxes(svg, 'path');
+  const icons = extractElementBoxes(svg, 'use');
+  const circles = extractElementBoxes(svg, 'circle');
+  const ellipses = extractElementBoxes(svg, 'ellipse');
+  const polygons = extractElementBoxes(svg, 'polygon');
+  const polylines = extractElementBoxes(svg, 'polyline');
+  const structuralElements = [...rects, ...lines, ...paths, ...icons, ...circles, ...ellipses, ...polygons, ...polylines];
   const layout = String(slide.layout || '').toLowerCase();
   const imageAssets = normalizeQualityImageAssets(imageInput);
   const generatedImages = imageAssets.length
@@ -518,7 +659,7 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageInput?
           break;
         }
       }
-      const chartLikeElements = [...rects, ...lines, ...paths].filter((item) => {
+      const chartLikeElements = structuralElements.filter((item) => {
         if (item.width >= canvas.width * 0.92 && item.height >= canvas.height * 0.85) return false;
         if (item.width <= 2 && item.height <= 2) return false;
         return rectsOverlap(img, item, 3);
@@ -547,7 +688,7 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageInput?
     }
   }
 
-  const coveringElements = [...rects, ...lines, ...paths];
+  const coveringElements = structuralElements;
   for (const text of significantTexts) {
     const cover = coveringElements.find((element) => isLikelyTextCoveringElement(element, text, spec));
     if (cover) {
@@ -569,8 +710,18 @@ function inspectSvg(svg: string, spec: DesignSpec, slide: SpecSlide, imageInput?
     }
   }
 
+  issues.push(...inspectGradients(svg));
+  issues.push(...inspectFormulaRisks(svg, slide));
+  issues.push(...inspectIconRisks(svg, icons));
+  issues.push(...inspectChartStructure(slide, layout, structuralElements));
+  issues.push(...inspectAnimationGrouping(svg, slide));
+  issues.push(...inspectPlaceholderContent(svg, slide));
+  issues.push(...inspectStyleConsistency(svg, spec));
+  issues.push(...inspectGroupOpacity(svg));
+
   return issues;
 }
+
 
 export function finalizeSvgQuality(svg: string, spec: DesignSpec, slide: SpecSlide, _imageSlot?: unknown, imageInput?: string | SvgQualityImageAsset[]): SvgQualityResult {
   const repairedSvg = deterministicRepair(String(svg || ''), spec);
@@ -618,8 +769,15 @@ Rules:
 4. Images must not leave the canvas, cover titles/body/chart elements, or leave their required containers.
 5. ${imageInstruction}
 6. Text must have readable contrast against its background.
-7. Do not use <style>, class, foreignObject, mask, script, animate, textPath, rgba(), or gradients.
-8. The root must be <svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}" width="${spec.canvas.width}" height="${spec.canvas.height}">.
+7. Formulas must be rendered as visible SVG text/tspan/path, not raw LaTeX/MathML placeholders.
+8. Chart/table/timeline/diagram pages must include enough visible structure: nodes, bars, cells, connectors, axis/labels or framework regions matching the slide content.
+9. Gradients are forbidden. Remove linearGradient/radialGradient and replace gradient fills/strokes with solid HEX colors or layered solid shapes.
+10. Icons must use <use data-icon="library/name" .../> placeholders or expanded SVG paths; do not use <g data-icon>.
+11. Preserve or improve meaningful top-level <g id="..."> groups for PPT animation, especially title, content, chart/image and summary groups.
+12. Remove placeholder/sample content and keep wording faithful to the slide title, bullets and notes.
+13. Keep the visual style consistent with spec colors, typography and the design direction; do not introduce unrelated decorative themes.
+14. Do not use <style>, class, foreignObject, mask, script, animate, textPath, rgba(), external fonts, or external resources.
+15. The root must be <svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}" width="${spec.canvas.width}" height="${spec.canvas.height}">.
 
 SVG to repair:
 ${svg}`;
@@ -695,7 +853,241 @@ Rules:
 2. Only move, resize, recolor, wrap, shorten, crop or reorder elements needed to fix the listed issues.
 3. Preserve at least 24px horizontal and 16px vertical padding for text inside visible containers.
 4. Fix overlaps by separating text, images, chart shapes, labels and connectors; do not hide the issue by drawing another shape above it.
-5. The final answer must still be a complete valid SVG.
-6. Do not use <style>, class, foreignObject, mask, script, animate, textPath, rgba(), or gradients.
-7. The root must be <svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}" width="${spec.canvas.width}" height="${spec.canvas.height}">.`;
+5. Fix formula, chart, style, layout, text, image, animation-grouping, icon, content and visual-style issues when they are listed.
+6. Gradients are forbidden. Remove linearGradient/radialGradient and replace gradient fills/strokes with solid HEX colors or layered solid shapes.
+7. The final answer must still be a complete valid SVG.
+8. Do not use <style>, class, foreignObject, mask, script, animate, textPath, rgba(), external fonts, or external resources.
+9. The root must be <svg viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}" width="${spec.canvas.width}" height="${spec.canvas.height}">.`;
+}
+
+
+const DETERMINISTIC_FIXABLE_TYPES: SvgQualityIssueType[] = [
+  'text-overflow',
+  'element-overlap',
+  'low-contrast',
+  'image-out-of-canvas',
+  'invalid-gradient',
+  'style-consistency-risk',
+  'icon-placeholder-invalid',
+  'group-opacity',
+];
+
+export function isDeterministicFixable(issue: SvgQualityIssue): boolean {
+  return DETERMINISTIC_FIXABLE_TYPES.includes(issue.type);
+}
+
+export function hasDeterministicFixableIssues(issues: SvgQualityIssue[]): boolean {
+  return issues.some(isDeterministicFixable);
+}
+
+export function hasLlmFixableIssues(issues: SvgQualityIssue[]): boolean {
+  return issues.some(issue => issue.severity === 'error' && !isDeterministicFixable(issue));
+}
+
+function repairLowContrastText(svg: string, spec: DesignSpec): string {
+  const colors = spec.visualTheme.colors;
+  const texts = extractElementBoxes(svg, 'text');
+  let result = svg;
+  for (const text of texts.sort((a, b) => b.index - a.index)) {
+    const fill = normalizeHexColor(attrOrStyle(text.attrs, 'fill', ''));
+    if (!fill) continue;
+    const bg = findTextBackgroundRect(text, svg, spec);
+    const bgFill = normalizeHexColor(attrOrStyle(bg?.attrs || {}, 'fill')) || colors.surface || colors.background;
+    if (contrastRatio(fill, bgFill) < 3) {
+      const safeFill = luminance(bgFill) > 0.5 ? colors.text : colors.background;
+      const normalizedSafeFill = normalizeHexColor(safeFill);
+      if (normalizedSafeFill && normalizedSafeFill !== fill) {
+        const open = text.source.match(/^<text\b[^>]*>/i)?.[0];
+        if (open) {
+          const patched = setAttribute(open, 'fill', normalizedSafeFill);
+          result = result.slice(0, text.index) + text.source.replace(open, patched) + result.slice(text.index + text.source.length);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+function findTextBackgroundRect(text: SvgElementBox, svg: string, spec: DesignSpec) {
+  const rects = extractElementBoxes(svg, 'rect');
+  return rects
+    .filter(rect => rect.index < text.index)
+    .filter(rect => rect.width > 40 && rect.height > 20)
+    .filter(rect => !isDecorativeBackgroundBox(rect, spec))
+    .filter(rect => rectsOverlap(rect, text))
+    .sort((a, b) => b.index - a.index)[0];
+}
+
+function repairImageCanvasOverflow(svg: string, spec: DesignSpec): string {
+  const images = extractElementBoxes(svg, 'image');
+  let result = svg;
+  for (const img of images.sort((a, b) => b.index - a.index)) {
+    if (!outsideCanvas(img, spec.canvas)) continue;
+    const open = img.source.match(/^<image\b[^>]*\/?>/i)?.[0];
+    if (!open) continue;
+    let patched = open;
+    const x = Math.max(0, img.x);
+    const y = Math.max(0, img.y);
+    const maxX = Math.min(spec.canvas.width, img.x + img.width);
+    const maxY = Math.min(spec.canvas.height, img.y + img.height);
+    const w = Math.max(0, maxX - x);
+    const h = Math.max(0, maxY - y);
+    if (w > 0 && h > 0) {
+      patched = setAttribute(patched, 'x', Math.round(x));
+      patched = setAttribute(patched, 'y', Math.round(y));
+      patched = setAttribute(patched, 'width', Math.round(w));
+      patched = setAttribute(patched, 'height', Math.round(h));
+    }
+    result = result.slice(0, img.index) + img.source.replace(open, patched) + result.slice(img.index + img.source.length);
+  }
+  return result;
+}
+
+function repairElementOverlap(svg: string, spec: DesignSpec): string {
+  const texts = extractElementBoxes(svg, 'text')
+    .filter(t => (t.text || '').length >= 2)
+    .sort((a, b) => a.index - b.index);
+  let result = svg;
+  const adjusted: SvgElementBox[] = [];
+  for (const text of texts) {
+    let currentText = text;
+    for (const prev of adjusted) {
+      const overlap = intersectionArea(currentText, prev);
+      if (isBlockingTextOverlap(prev, currentText, overlap)) {
+        const shift = prev.y + prev.height - currentText.y + 6;
+        const open = currentText.source.match(/^<text\b[^>]*>/i)?.[0];
+        if (open) {
+          const newY = numberAttr(currentText.attrs, 'y', currentText.y + 20) + shift;
+          const patched = setAttribute(open, 'y', Math.round(Math.min(newY, spec.canvas.height - 20)));
+          result = result.slice(0, currentText.index) + currentText.source.replace(open, patched) + result.slice(currentText.index + currentText.source.length);
+          currentText = { ...currentText, y: currentText.y + shift };
+        }
+        break;
+      }
+    }
+    adjusted.push(currentText);
+  }
+  return result;
+}
+
+function removeGradientDefinitions(svg: string): string {
+  let result = svg;
+  result = result.replace(/<(linearGradient|radialGradient)\b[\s\S]*?<\/\1>/gi, '');
+  result = result.replace(/url\(#([^)]+)\)/gi, (match, id: string) => {
+    if (/grad|gradient/i.test(id)) return '#888888';
+    return match;
+  });
+  result = result.replace(/<defs\s*>\s*<\/defs>/gi, '');
+  return result;
+}
+
+function fixIconPlaceholderG(svg: string): string {
+  return svg.replace(/<g\b([^>]*?)data-icon\s*=\s*(['"])([^'"]+)\2([^>]*?)>/gi, (_match, before: string, _q: string, iconRef: string, after: string) => {
+    const widthMatch = (before + after).match(/width\s*=\s*['"]([^'"]+)['"]/i);
+    const heightMatch = (before + after).match(/height\s*=\s*['"]([^'"]+)['"]/i);
+    const xMatch = (before + after).match(/\sx\s*=\s*['"]([^'"]+)['"]/i);
+    const yMatch = (before + after).match(/\sy\s*=\s*['"]([^'"]+)['"]/i);
+    const w = widthMatch?.[1] || '48';
+    const h = heightMatch?.[1] || '48';
+    const x = xMatch?.[1] || '0';
+    const y = yMatch?.[1] || '0';
+    return `<use data-icon="${iconRef}" x="${x}" y="${y}" width="${w}" height="${h}" href="#icon-${iconRef}"/>`;
+  });
+}
+
+export function removeGroupOpacity(svg: string): string {
+  let result = svg;
+  const MAX_ITERATIONS = 20;
+  for (let iter = 0; iter < MAX_ITERATIONS; iter += 1) {
+    const match = result.match(/<g\b([^>]*?)\sopacity\s*=\s*(['"])([^'"]+)\2([^>]*?)>/i);
+    if (!match) break;
+    const matchIndex = match.index!;
+    const openTag = match[0];
+    const before = match[1];
+    const opacityValue = match[3];
+    const after = match[4];
+    const opacity = parseFloat(opacityValue);
+
+    let depth = 1;
+    let closeIndex = -1;
+    const searchStart = matchIndex + openTag.length;
+    for (let i = searchStart; i < result.length - 3; i += 1) {
+      if (result.substr(i, 3) === '<g ' || result.substr(i, 2) === '<g>') {
+        depth += 1;
+      } else if (result.substr(i, 4) === '</g>') {
+        depth -= 1;
+        if (depth === 0) {
+          closeIndex = i;
+          break;
+        }
+      }
+    }
+    if (closeIndex === -1) break;
+
+    const innerContent = result.substring(searchStart, closeIndex);
+    const prefix = result.substring(0, matchIndex);
+    const suffix = result.substring(closeIndex + 4);
+
+    let newOpen: string;
+    if (isNaN(opacity) || opacity >= 1) {
+      const cleaned = `${before} ${after}`.replace(/\s+/g, ' ').trim();
+      newOpen = cleaned ? `<g ${cleaned}>` : '<g>';
+    } else {
+      const cleaned = `${before} ${after}`.replace(/\s+/g, ' ').trim();
+      newOpen = cleaned ? `<g ${cleaned}>` : '<g>';
+      const childOpacity = Math.round(opacity * 1000) / 1000;
+      const flattenedInner = innerContent.replace(/<((?!g\b|defs\b|clippath\b|lineargradient\b|radialgradient\b|mask\b|symbol\b|pattern\b|filter\b)[a-z][\w:-]*)\b([^<>]*?)(\/?)>/gi, (_childTag: string, childName: string, childAttrs: string, selfClose: string) => {
+        const existingOpacityMatch = childAttrs.match(/\sopacity\s*=\s*(['"])([^'"]*)\1/i);
+        if (existingOpacityMatch) {
+          const existingOpacity = parseFloat(existingOpacityMatch[2]);
+          const newOpacity = Math.round(existingOpacity * opacity * 1000) / 1000;
+          const replaced = childAttrs.replace(/\sopacity\s*=\s*(['"])[^'"]*\1/i, ` opacity="${newOpacity}"`);
+          return `<${childName}${replaced}${selfClose}>`;
+        }
+        return `<${childName}${childAttrs} opacity="${childOpacity}"${selfClose}>`;
+      });
+      result = prefix + newOpen + flattenedInner + '</g>' + suffix;
+      continue;
+    }
+    result = prefix + newOpen + innerContent + '</g>' + suffix;
+  }
+  return result;
+}
+
+export function deterministicRepairForIssues(
+  svg: string,
+  spec: DesignSpec,
+  slide: SpecSlide,
+  issues: SvgQualityIssue[]
+): string {
+  let result = svg;
+  const fixableIssues = issues.filter(isDeterministicFixable);
+  if (!fixableIssues.length) return result;
+
+  if (fixableIssues.some(i => i.type === 'style-consistency-risk')) {
+    result = removeStyleAndClassAttributes(result);
+  }
+  if (fixableIssues.some(i => i.type === 'invalid-gradient')) {
+    result = removeGradientDefinitions(result);
+  }
+  if (fixableIssues.some(i => i.type === 'text-overflow')) {
+    result = repairTextCanvasOverflow(result, spec);
+  }
+  if (fixableIssues.some(i => i.type === 'low-contrast')) {
+    result = repairLowContrastText(result, spec);
+  }
+  if (fixableIssues.some(i => i.type === 'image-out-of-canvas')) {
+    result = repairImageCanvasOverflow(result, spec);
+  }
+  if (fixableIssues.some(i => i.type === 'element-overlap')) {
+    result = repairElementOverlap(result, spec);
+  }
+  if (fixableIssues.some(i => i.type === 'icon-placeholder-invalid')) {
+    result = fixIconPlaceholderG(result);
+  }
+  if (fixableIssues.some(i => i.type === 'group-opacity')) {
+    result = removeGroupOpacity(result);
+  }
+
+  return result;
 }

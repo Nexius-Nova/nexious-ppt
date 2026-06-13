@@ -6,6 +6,7 @@ import {
   Brain,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Download,
   FileText,
   Image,
@@ -61,6 +62,25 @@ const route = useRoute();
 const router = useRouter();
 const store = useAgentStore();
 const apiKeyStore = useApiKeyStore();
+
+const workflowElapsed = ref(0);
+let workflowTimer: ReturnType<typeof setInterval> | null = null;
+const workflowEta = computed(() => {
+  if (!store.isRunning) return '';
+  const elapsed = workflowElapsed.value;
+  const progress = currentProgress.value;
+  if (progress <= 0 || progress >= 100) return '';
+  const remaining = Math.round((elapsed / progress) * (100 - progress) / 1000);
+  if (remaining < 60) return `约 ${remaining} 秒`;
+  return `约 ${Math.round(remaining / 60)} 分钟`;
+});
+const workflowElapsedText = computed(() => {
+  const s = workflowElapsed.value / 1000;
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  const sec = Math.round(s % 60);
+  return `${m}m ${sec}s`;
+});
 
 const {
   activityLog,
@@ -328,6 +348,75 @@ const layoutPreviewPage = computed(() => {
   return latestSvgPage.value;
 });
 const presentationPages = computed(() => layoutDisplayPages.value);
+
+// 缩略图按需加载：初始显示数量
+const thumbsVisibleCount = ref(8);
+const THUMBS_LOAD_BATCH = 6;
+
+const layoutVisiblePages = computed(() => {
+  return layoutDisplayPages.value.slice(0, thumbsVisibleCount.value);
+});
+
+const hasMoreThumbs = computed(() => {
+  return thumbsVisibleCount.value < layoutDisplayPages.value.length;
+});
+
+function loadMoreThumbs() {
+  if (!hasMoreThumbs.value) return;
+  thumbsVisibleCount.value = Math.min(
+    thumbsVisibleCount.value + THUMBS_LOAD_BATCH,
+    layoutDisplayPages.value.length
+  );
+}
+
+// 当总页数变化时重置
+watch(layoutTotalPages, () => {
+  thumbsVisibleCount.value = 8;
+});
+
+const thumbsContainerRef = ref<HTMLElement | null>(null);
+const thumbsSentinelRef = ref<HTMLElement | null>(null);
+let thumbsObserver: IntersectionObserver | null = null;
+
+function setupThumbsObserver() {
+  if (thumbsObserver) return;
+  thumbsObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries[0]?.isIntersecting && hasMoreThumbs.value) {
+        loadMoreThumbs();
+      }
+    },
+    { root: thumbsContainerRef.value, threshold: 0.1 }
+  );
+  if (thumbsSentinelRef.value) {
+    thumbsObserver.observe(thumbsSentinelRef.value);
+  }
+}
+
+watch(thumbsSentinelRef, (el) => {
+  if (el && !thumbsObserver) setupThumbsObserver();
+  else if (el && thumbsObserver) thumbsObserver.observe(el);
+});
+
+const isBatchRetrying = ref(false);
+
+const fallbackPageNumbers = computed(() => {
+  return layoutDisplayPages.value
+    .filter(p => p.fallback)
+    .map(p => p.pageNumber);
+});
+
+async function batchRetryFallbackPages() {
+  if (isBatchRetrying.value) return;
+  isBatchRetrying.value = true;
+  try {
+    for (const pageNum of fallbackPageNumbers.value) {
+      await store.retrySlidePage(pageNum);
+    }
+  } finally {
+    isBatchRetrying.value = false;
+  }
+}
 const presentationPage = computed(() => {
   if (!presentationPages.value.length) return null;
   const index = Math.min(
@@ -515,28 +604,7 @@ const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
         status: "idle"
       };
     }
-    if (
-      hasPendingRequiredImages.value &&
-      step.id === "layout" &&
-      step.status !== "idle"
-    ) {
-      return {
-        ...step,
-        status: "idle",
-        progress: 0
-      };
-    }
-    if (
-      hasPendingRequiredImages.value &&
-      step.id === "preview" &&
-      step.status !== "idle"
-    ) {
-      return {
-        ...step,
-        status: "idle",
-        progress: 0
-      };
-    }
+    // 图片未完成时不再硬阻塞后续阶段，改为降级提示
     if (
       hasPendingRequiredImages.value &&
       step.id === "images" &&
@@ -544,7 +612,7 @@ const workflowDisplaySteps = computed<WorkflowStep[]>(() =>
     ) {
       return {
         ...step,
-        status: "idle",
+        status: "running",
         progress: Math.round(
           (completedImageCount.value /
             Math.max(1, requiredImageCount.value)) *
@@ -917,6 +985,21 @@ watch(
   }
 );
 
+watch(() => store.isRunning, (running) => {
+  if (running) {
+    workflowElapsed.value = 0;
+    if (workflowTimer) clearInterval(workflowTimer);
+    workflowTimer = setInterval(() => {
+      workflowElapsed.value += 1000;
+    }, 1000);
+  } else {
+    if (workflowTimer) {
+      clearInterval(workflowTimer);
+      workflowTimer = null;
+    }
+  }
+});
+
 onMounted(async () => {
   window.addEventListener("keydown", onPresentationKeydown);
   window.addEventListener("focus", store.resumeProjectQueueSubscriptions);
@@ -936,6 +1019,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("online", store.resumeProjectQueueSubscriptions);
   document.removeEventListener("visibilitychange", handleVisibilitySync);
   store.syncToProject();
+  store.cleanupQueueSubscriptions();
+  if (workflowTimer) {
+    clearInterval(workflowTimer);
+    workflowTimer = null;
+  }
+  thumbsObserver?.disconnect();
 });
 
 function handleVisibilitySync() {
@@ -1029,9 +1118,23 @@ async function runFromCurrentStep() {
         break;
       case "outline":
         await store.runOutline();
+        // 大纲完成后自动推进到后续阶段
+        if (!isPaused.value) {
+          goToWorkflowStep("images");
+          await store.runImages();
+        }
+        if (!isPaused.value) {
+          goToWorkflowStep("layout");
+          await store.runLayout();
+        }
         break;
       case "images":
         await store.runImages();
+        // 图片完成后自动推进到布局
+        if (!isPaused.value) {
+          goToWorkflowStep("layout");
+          await store.runLayout();
+        }
         break;
       case "layout":
         await store.runLayout();
@@ -1133,9 +1236,13 @@ async function handleExport(
     createdAt: Date.now()
   });
 
+  // 使用 store 的导出进度事件来更新真实进度
   const progressInterval = window.setInterval(() => {
-    exportProgress.value = Math.min(90, exportProgress.value + 12);
-  }, 300);
+    // 缓慢递增作为保底，但主要依赖 store 的进度更新
+    if (exportProgress.value < 80) {
+      exportProgress.value = Math.min(80, exportProgress.value + 3);
+    }
+  }, 500);
 
   try {
     await store.exportCurrentDeck(format, buildExportOptions(format));
@@ -1267,6 +1374,10 @@ async function retryImage(slideId: string) {
               size="sm"
               show-label
             />
+            <div v-if="store.isRunning" class="status-item">
+              <Clock :size="12" />
+              <span>{{ workflowElapsedText }}{{ workflowEta ? ' · ' + workflowEta : '' }}</span>
+            </div>
           </div>
           <div class="workspace-step-header__actions">
             <VersionHistory />
@@ -1669,8 +1780,8 @@ async function retryImage(slideId: string) {
                       </div>
                     </div>
 
-                    <div class="executor-thumbs" v-if="layoutDisplayPages.length">
-                      <template v-for="page in layoutDisplayPages" :key="page.pageNumber">
+                    <div ref="thumbsContainerRef" class="executor-thumbs" v-if="layoutDisplayPages.length">
+                      <template v-for="page in layoutVisiblePages" :key="page.pageNumber">
                         <div v-if="page.svg" class="executor-thumb-wrap">
                           <button
                             class="executor-thumb executor-thumb--done"
@@ -1715,6 +1826,21 @@ async function retryImage(slideId: string) {
                           </button>
                         </div>
                       </template>
+                      <div ref="thumbsSentinelRef" class="executor-thumbs__sentinel"></div>
+                      <div v-if="hasMoreThumbs" class="executor-thumbs__more" @click="loadMoreThumbs">
+                        <span>加载更多 ({{ layoutDisplayPages.length - thumbsVisibleCount }} 页)</span>
+                      </div>
+                    </div>
+                    <div v-if="fallbackPageNumbers.length > 1" class="executor-batch-retry">
+                      <button
+                        class="executor-batch-retry__btn"
+                        :disabled="isBatchRetrying"
+                        @click="batchRetryFallbackPages"
+                      >
+                        <Loader2 v-if="isBatchRetrying" :size="14" class="spin" />
+                        <RotateCcw v-else :size="14" />
+                        批量重试 {{ fallbackPageNumbers.length }} 个失败页面
+                      </button>
                     </div>
                   </div>
 
@@ -2056,7 +2182,7 @@ async function retryImage(slideId: string) {
 
 .workspace-content-wrapper {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 280px);
   min-height: 0;
   overflow: hidden;
 }
@@ -2162,10 +2288,10 @@ async function retryImage(slideId: string) {
 
 .pipeline-console {
   display: grid;
-  grid-template-columns: 214px minmax(0, 1fr);
+  grid-template-columns: 160px minmax(0, 1fr);
   align-items: start;
   gap: 12px;
-  max-width: 1360px;
+  max-width: 1600px;
   margin: 0 auto;
 }
 
@@ -2763,6 +2889,66 @@ async function retryImage(slideId: string) {
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 4px;
+}
+
+.executor-thumbs__sentinel {
+  width: 1px;
+  height: 1px;
+  flex-shrink: 0;
+}
+
+.executor-thumbs__more {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  min-width: 80px;
+  height: 54px;
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  color: var(--color-subtle);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  padding: 4px 8px;
+  text-align: center;
+}
+
+.executor-thumbs__more:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.executor-batch-retry {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.executor-batch-retry__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-accent-soft);
+  border-radius: 6px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-family: inherit;
+}
+
+.executor-batch-retry__btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: var(--color-surface);
+}
+
+.executor-batch-retry__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .executor-thumb-wrap {

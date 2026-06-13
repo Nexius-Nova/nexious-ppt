@@ -1,4 +1,4 @@
-﻿const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 import type { DesignSpec, SpecSlide, SpecLock, SkillExtension, TemplateAsset, TemplateAssetSettings } from '../types/agent';
 import { translateErrorMessage } from '../utils/errorMessages';
@@ -1013,9 +1013,10 @@ export const aiApi = {
   subscribeQueueJob: async (
     id: string,
     onJob: (job: QueueJobSnapshot) => void,
-    onError?: (error: Error) => void
+    onError?: (error: Error) => void,
+    signal?: AbortSignal
   ): Promise<void> => {
-    const response = await api.fetchWithAuth(`${API_BASE_URL}/api/generate/jobs/${id}/events`);
+    const response = await api.fetchWithAuth(`${API_BASE_URL}/api/generate/jobs/${id}/events`, { signal });
     if (!response.ok) {
       throw new Error('浠诲姟璁㈤槄澶辫触');
     }
@@ -1025,6 +1026,10 @@ export const aiApi = {
     let buffer = '';
     try {
       while (true) {
+        if (signal?.aborted) {
+          await reader.cancel();
+          return;
+        }
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -1045,7 +1050,8 @@ export const aiApi = {
         }
       }
     } catch (error) {
-      onError?.(error instanceof Error ? error : new Error('浠诲姟璁㈤槄涓柇'));
+      if (signal?.aborted) return;
+      onError?.(error instanceof Error ? error : new Error('浠诲姟璁㈤槄涓柇'));
       throw error;
     }
   },
@@ -1053,7 +1059,8 @@ export const aiApi = {
   waitForQueueJob: async (
     id: string,
     onJob: (job: QueueJobSnapshot) => void,
-    timeoutMs = 30 * 60 * 1000
+    timeoutMs = 30 * 60 * 1000,
+    signal?: AbortSignal
   ): Promise<QueueJobSnapshot> => {
     const startedAt = Date.now();
     let lastJob: QueueJobSnapshot | null = null;
@@ -1069,13 +1076,15 @@ export const aiApi = {
       onJob(job);
     };
 
-    void aiApi.subscribeQueueJob(id, publishJob).catch((error) => {
+    void aiApi.subscribeQueueJob(id, publishJob, undefined, signal).catch((error) => {
+      if (signal?.aborted) return;
       sseError = error instanceof Error ? error : new Error('任务订阅中断');
     }).finally(() => {
       sseDone = true;
     });
 
     while (!isTerminalQueueJob(lastJob)) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       if (Date.now() - startedAt > timeoutMs) throw new Error('任务等待超时');
       await new Promise(resolve => window.setTimeout(resolve, 1500));
       const response = await aiApi.getQueueJob(id);

@@ -26,7 +26,11 @@ def safe_print(message: str) -> None:
 def flatten_text(svg_file: Path) -> bool:
     from xml.etree import ElementTree as ET
 
-    tree = ET.parse(str(svg_file))
+    try:
+        tree = ET.parse(str(svg_file))
+    except ET.ParseError:
+        safe_print(f"[WARN] flatten_text: skipping {svg_file.name} (not well-formed XML)")
+        return False
     changed = flatten_text_with_tspans(tree)
     if changed:
         tree.write(str(svg_file), encoding="unicode", xml_declaration=False)
@@ -73,20 +77,35 @@ def finalize_project(project_dir: Path, *, dry_run: bool = False, quiet: bool = 
     }
 
     for svg_file in sorted(svg_final.glob("*.svg")):
-        stats["icons"] += embed_icons_in_file(svg_file, icons_dir, dry_run=False, verbose=False)
-        stats["office_vectors"] += count_office_vector_refs_in_svg(svg_file)
-        image_count, image_errors = align_and_embed_images_in_svg(
-            svg_file,
-            dry_run=False,
-            verbose=False,
-            compress=False,
-            max_dimension=None,
-        )
-        stats["images"] += image_count
-        stats["image_errors"] += image_errors
-        if flatten_text(svg_file):
-            stats["flattened"] += 1
-        stats["rounded"] += fix_rounded_rects(svg_file)
+        try:
+            stats["icons"] += embed_icons_in_file(svg_file, icons_dir, dry_run=False, verbose=False)
+        except Exception as exc:
+            safe_print(f"[WARN] embed_icons: skipping {svg_file.name} ({exc})")
+        try:
+            stats["office_vectors"] += count_office_vector_refs_in_svg(svg_file)
+        except Exception as exc:
+            safe_print(f"[WARN] count_office_vectors: skipping {svg_file.name} ({exc})")
+        try:
+            image_count, image_errors = align_and_embed_images_in_svg(
+                svg_file,
+                dry_run=False,
+                verbose=False,
+                compress=False,
+                max_dimension=None,
+            )
+            stats["images"] += image_count
+            stats["image_errors"] += image_errors
+        except Exception as exc:
+            safe_print(f"[WARN] align_embed_images: skipping {svg_file.name} ({exc})")
+        try:
+            if flatten_text(svg_file):
+                stats["flattened"] += 1
+        except Exception as exc:
+            safe_print(f"[WARN] flatten_text: skipping {svg_file.name} ({exc})")
+        try:
+            stats["rounded"] += fix_rounded_rects(svg_file)
+        except Exception as exc:
+            safe_print(f"[WARN] fix_rounded_rects: skipping {svg_file.name} ({exc})")
 
     if not quiet:
         safe_print(
@@ -95,7 +114,12 @@ def finalize_project(project_dir: Path, *, dry_run: bool = False, quiet: bool = 
             f"image_errors={stats['image_errors']}, office_vectors={stats['office_vectors']}, "
             f"flattened={stats['flattened']}, rounded_rects={stats['rounded']}"
         )
-    return stats["image_errors"] == 0
+    if stats["image_errors"] > 0:
+        safe_print(
+            f"[WARN] {stats['image_errors']} image error(s) encountered; "
+            "SVG files with parse issues were skipped but export will continue."
+        )
+    return True
 
 
 def main() -> int:

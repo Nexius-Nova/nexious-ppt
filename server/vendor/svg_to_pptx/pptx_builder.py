@@ -795,7 +795,39 @@ def create_pptx_with_native_svg(
                 if verbose:
                     print(f"  [{i}/{len(svg_files)}] {svg_path.name} - Error: {e}")
                 if use_native_shapes:
-                    raise
+                    # Instead of aborting the entire export, write a blank
+                    # placeholder slide so the PPTX structure stays valid.
+                    # Losing one slide's content is better than failing the whole file.
+                    blank_slide_xml = (
+                        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                        '\n<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+                        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+                        ' xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+                        '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/>'
+                        '<p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>'
+                        '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Error Placeholder"/>'
+                        '<p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/>'
+                        '<p:txBody><a:bodyPr/><a:lstStyle/>'
+                        '<a:p><a:r><a:rPr lang="en-US" sz="1200" dirty="0"/>'
+                        '<a:t>Slide conversion failed</a:t></a:r></a:p>'
+                        '</p:txBody></p:sp>'
+                        '</p:spTree></p:cSld></p:sld>'
+                    )
+                    slide_xml_path = extract_dir / 'ppt' / 'slides' / f'slide{slide_num}.xml'
+                    with open(slide_xml_path, 'w', encoding='utf-8') as f:
+                        f.write(blank_slide_xml)
+                    # Write minimal rels
+                    rels_dir = extract_dir / 'ppt' / 'slides' / '_rels'
+                    rels_dir.mkdir(exist_ok=True)
+                    rels_path = rels_dir / f'slide{slide_num}.xml.rels'
+                    rels_xml = (
+                        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                        '\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                        '\n  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+                        '\n</Relationships>'
+                    )
+                    with open(rels_path, 'w', encoding='utf-8') as f:
+                        f.write(rels_xml)
 
         # Update [Content_Types].xml
         content_types_path = extract_dir / '[Content_Types].xml'

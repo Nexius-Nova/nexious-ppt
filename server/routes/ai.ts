@@ -1284,8 +1284,9 @@ router.post('/run-skill', authMiddleware, async (req: AuthRequest, res: Response
       systemPrompt = `你是一个数据可视化专家。请分析PPT页面内容，识别数据表达机会，为适合的页面推荐图表类型。
 要求：
 1. 只为包含数字、百分比、对比、趋势等数据的页面推荐图表
-2. 推荐合适的图表类型（柱状图、折线图、饼图、雷达图等）
-3. 以JSON数组格式返回，每项包含 slideId 和 chartHint`;
+2. 推荐合适的图表类型时必须具体说明表达目的、字段/节点/层级/连线含义，不能只写“柱状图/流程图/架构图”等泛称
+3. 如果能匹配内置模板 key，可用“key | 具体表达：... | 结构：...”格式，例如“layered_architecture | 具体表达：产品架构分为体验层、服务层、数据层 | 结构：每层 2-4 个模块卡片，标注职责和跨层调用关系”
+4. 以JSON数组格式返回，每项包含 slideId 和 chartHint`;
 
       userPrompt = `请分析以下PPT页面，推荐图表：\n${JSON.stringify(slides.map((s: any) => ({ slideId: s.id, title: s.title, bullets: s.bullets })))}`;
     } else if (skillId === 'design-polish' || skillName?.includes('设计') || skillName?.includes('优化')) {

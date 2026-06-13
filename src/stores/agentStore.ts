@@ -1,4 +1,4 @@
-﻿import { defineStore } from 'pinia';
+import { defineStore } from 'pinia';
 import { storeToRefs } from 'pinia';
 import { computed, ref, watch } from 'vue';
 import { analyzeDeckInput, exportDeck, generateSlideImages } from '@/services/agentSimulator';
@@ -566,6 +566,7 @@ export const useAgentStore = defineStore('agent', () => {
   }
   const subscribedQueueJobIds = new Set<string>();
   const queuePollTimers = new Map<string, ReturnType<typeof window.setInterval>>();
+  const queueJobAbortControllers = new Map<string, AbortController>();
   const lastQueueLogKey = ref('');
 
   type RunContext = { token: number; projectId: string | null };
@@ -720,7 +721,7 @@ export const useAgentStore = defineStore('agent', () => {
         };
         project.updatedAt = Date.now();
         if (activePptId.value === projectId) {
-          restoreProjectState(project.state, { preserveActiveStep: true });
+          restoreProjectState(project.state, { preserveActiveStep: true, preserveActivityLog: true });
         }
         syncActiveRunRefsFromProject();
         return;
@@ -902,7 +903,7 @@ export const useAgentStore = defineStore('agent', () => {
       };
       project.updatedAt = Date.now();
       if (activePptId.value === projectId) {
-        restoreProjectState(project.state, { preserveActiveStep: true });
+        restoreProjectState(project.state, { preserveActiveStep: true, preserveActivityLog: true });
         syncActiveRunRefsFromProject();
       }
       return;
@@ -931,7 +932,7 @@ export const useAgentStore = defineStore('agent', () => {
     project.updatedAt = Date.now();
     if (activePptId.value === projectId) {
       if (job.result || isTerminalQueueStatus(job.status)) {
-        restoreProjectState(project.state, { preserveActiveStep: true });
+        restoreProjectState(project.state, { preserveActiveStep: true, preserveActivityLog: true });
       } else {
         applyQueueHeartbeatToActiveState(job);
       }
@@ -940,15 +941,16 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function applyQueueJobToActiveProject(job: QueueJobSnapshot) {
-    pushQueueJobLog(job);
     if (job.projectState) {
       restoreProjectState(stateWithLiveQueueJob(
         normalizeProjectState(job.projectState as Partial<PptProjectState>),
         job.projectId || activePptId.value || '',
         job
-      ), { preserveActiveStep: true });
+      ), { preserveActiveStep: true, preserveActivityLog: true });
+      pushQueueJobLog(job);
       return;
     }
+    pushQueueJobLog(job);
     if (job.status === 'cancelled') return;
     const displayStep = displayStepForQueueJob(job);
     if (displayStep === 'outline') {
@@ -1033,13 +1035,15 @@ export const useAgentStore = defineStore('agent', () => {
     startProjectQueuePolling(projectId, queueJobId);
     if (subscribedQueueJobIds.has(queueJobId)) return;
     subscribedQueueJobIds.add(queueJobId);
+    const controller = new AbortController();
+    queueJobAbortControllers.set(queueJobId, controller);
     void aiApi.waitForQueueJob(queueJobId, (job) => {
       upsertProjectRunningJob(projectId, job);
       applyQueueJobToProjectState(projectId, job);
       if (activePptId.value === projectId) {
         applyQueueJobToActiveProject(job);
       }
-    }).then(async (finalJob) => {
+    }, 30 * 60 * 1000, controller.signal).then(async (finalJob) => {
       applyQueueJobToProjectState(projectId, finalJob);
       stopProjectQueuePolling(queueJobId);
       clearProjectRunningJob(projectId);
@@ -1058,12 +1062,14 @@ export const useAgentStore = defineStore('agent', () => {
         await syncToProjectNow();
       }
     }).catch((error) => {
+      if (controller.signal.aborted) return;
       const errMsg = error instanceof Error ? error.message : '任务订阅中断';
       if (activePptId.value === projectId) {
         pushLog(`后台任务状态同步失败：${errMsg}`);
       }
     }).finally(() => {
       subscribedQueueJobIds.delete(queueJobId);
+      queueJobAbortControllers.delete(queueJobId);
       syncActiveRunRefsFromProject();
     });
   }
@@ -1102,6 +1108,18 @@ export const useAgentStore = defineStore('agent', () => {
       subscribeProjectQueueJob(project.id, queueJobId);
       void refreshProjectQueueSnapshot(project.id);
     }
+  }
+
+  function cleanupQueueSubscriptions() {
+    for (const [queueJobId, controller] of queueJobAbortControllers) {
+      controller.abort();
+      queueJobAbortControllers.delete(queueJobId);
+    }
+    for (const [queueJobId, timer] of queuePollTimers) {
+      window.clearInterval(timer);
+      queuePollTimers.delete(queueJobId);
+    }
+    subscribedQueueJobIds.clear();
   }
 
   function applyGeneratedProjectInfo(spec?: DesignSpec | null) {
@@ -1659,9 +1677,10 @@ export const useAgentStore = defineStore('agent', () => {
     };
   }
 
-  function restoreProjectState(state: PptProjectState, options: { preserveActiveStep?: boolean } = {}) {
+  function restoreProjectState(state: PptProjectState, options: { preserveActiveStep?: boolean; preserveActivityLog?: boolean } = {}) {
     const normalizedState = normalizeProjectState(state);
     const previousActiveStep = activeStep.value;
+    const previousActivityLog = options.preserveActivityLog ? [...activityLog.value] : null;
     input.value = { ...normalizedState.input, files: [...normalizedState.input.files] };
     uploadedFileContents.value = normalizedState.uploadedFileContents?.map((file) => ({ ...file })) || [];
     processedInputContent.value = normalizedState.processedInputContent || '';
@@ -1740,7 +1759,9 @@ export const useAgentStore = defineStore('agent', () => {
       activeStep.value = previousActiveStep;
     }
 
-    if (normalizedState.activityLog && normalizedState.activityLog.length > 0) {
+    if (previousActivityLog) {
+      activityLog.value = previousActivityLog;
+    } else if (normalizedState.activityLog && normalizedState.activityLog.length > 0) {
       activityLog.value = [...normalizedState.activityLog];
     } else {
       activityLog.value = [];
@@ -1820,18 +1841,15 @@ export const useAgentStore = defineStore('agent', () => {
     await syncToProjectNow();
   }
 
-  let inputSyncTimer: ReturnType<typeof setTimeout> | null = null;
-  function debouncedSyncToProject() {
-    if (inputSyncTimer) clearTimeout(inputSyncTimer);
-    inputSyncTimer = setTimeout(() => {
-      syncToProject();
-    }, 300);
-  }
+  let deepWatchTimer: ReturnType<typeof setTimeout> | null = null;
 
   watch([input, parameters], () => {
-    if (activePpt.value) {
-      debouncedSyncToProject();
-    }
+    if (deepWatchTimer) clearTimeout(deepWatchTimer);
+    deepWatchTimer = setTimeout(() => {
+      if (activePpt.value) {
+        syncToProject();
+      }
+    }, 300);
   }, { deep: true });
 
   let logSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3021,6 +3039,9 @@ export const useAgentStore = defineStore('agent', () => {
   function buildStrategistSkillInstruction(skill: SkillDefinition) {
     const category = normalizeInputSkillCategory(skill.category);
     const baseInstruction = compactMultiline(skill.instruction || skill.description || '', 1400);
+    const capabilities = skill.capabilities || [];
+    const isChartSkill = capabilities.includes('chart-design') || /图表|表格|数据可视化|chart|table|dataviz|data visualization/i.test(skillText(skill));
+    const isLayoutSkill = capabilities.includes('svg-layout') || capabilities.includes('page-generation');
     const referenceScope = isGenerationReferenceSkill(skill)
       ? '作为大纲、页面类型、图片需求、SVG 视觉设计和质量检查的参考规范。'
       : '作为资料或内容理解参考；不要把它当成页面设计风格。';
@@ -3031,6 +3052,12 @@ export const useAgentStore = defineStore('agent', () => {
       isGenerationReferenceSkill(skill)
         ? '如果该 Skill 是设计规范，请转化为 visualTheme、layout、rhythm、chartHint、imagePlan、animationDescription 或 executorRules 的参考，不要照搬示例业务内容。'
         : '如果该 Skill 是资料类，请只吸收事实、结构和资料线索，不要生成虚构数据。',
+      isChartSkill
+        ? '图表建议要求：当本页适合图表/信息图时，chartHint 必须给出具体图表结构、字段/节点/层级/连线含义和表达目的；可以以前缀保留模板 key，但禁止只输出裸 key 或“柱状图/流程图”等泛称。'
+        : '',
+      isLayoutSkill
+        ? '页面生成要求：将 Skill 中的 SVG 布局经验转化为本页可执行的层级、分组、视觉重点和安全留白建议，避免泛泛描述。'
+        : '',
       baseInstruction ? `Skill 说明：${baseInstruction}` : '',
     ].filter(Boolean).join('\n');
   }
@@ -5514,12 +5541,14 @@ export const useAgentStore = defineStore('agent', () => {
       upsertProjectRunningJob(currentQueuedProjectId, response.data, queuedResumeStage);
       subscribedQueueJobId = response.data.id;
       subscribedQueueJobIds.add(subscribedQueueJobId);
+      const genController = new AbortController();
+      queueJobAbortControllers.set(subscribedQueueJobId, genController);
       const finalJob = await aiApi.waitForQueueJob(response.data.id, (job) => {
         upsertProjectRunningJob(currentQueuedProjectId, job);
         applyQueueJobToProjectState(currentQueuedProjectId, job);
         if (!isRunContextActive(ctx)) return;
         applyQueueJobToActiveProject(job);
-      });
+      }, 30 * 60 * 1000, genController.signal);
 
       applyQueueJobToProjectState(currentQueuedProjectId, finalJob);
       clearProjectRunningJob(currentQueuedProjectId);
@@ -5628,10 +5657,13 @@ export const useAgentStore = defineStore('agent', () => {
         if (!response.success || !response.data) {
           throw new Error(response.message || '创建导出任务失败');
         }
+        const exportController = new AbortController();
+        queueJobAbortControllers.set(response.data.id, exportController);
         const finalJob = await aiApi.waitForQueueJob(response.data.id, (job) => {
           pushLog(job.message || `导出进度：${job.progress}%`);
           setStepStatus('preview', 'running', Math.max(40, Math.min(99, job.progress)));
-        });
+        }, 30 * 60 * 1000, exportController.signal);
+        queueJobAbortControllers.delete(response.data.id);
         if (finalJob.status === 'cancelled') {
           throw new Error(finalJob.errorMessage || finalJob.message || '导出任务已取消');
         }
@@ -6223,6 +6255,7 @@ export const useAgentStore = defineStore('agent', () => {
     fetchSkills,
     fetchTemplates,
     resumeProjectQueueSubscriptions,
+    cleanupQueueSubscriptions,
     applyGalleryTemplate,
     clearGalleryTemplate,
     initializeData,

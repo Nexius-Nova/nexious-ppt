@@ -20,7 +20,7 @@ import versionRoutes from './routes/versions.js';
 import generateRoutes from './routes/generate.js';
 import generationJobRoutes from './routes/generationJobs.js';
 import inputFileRoutes from './routes/inputFiles.js';
-import { shutdownRedisQueue } from './services/generationQueue.js';
+import { initRedisQueue, shutdownRedisQueue } from './services/generationQueue.js';
 import { generatedAvatarsRoot, generatedImagesRoot } from './utils/storage.js';
 import { guardSocketError, isExpectedDisconnectError } from './utils/sse.js';
 
@@ -167,6 +167,10 @@ async function startServer() {
       console.error('❌ 数据库连接失败，请检查配置');
       process.exit(1);
     }
+
+    // 主进程只创建 Queue（用于入队），不启动 Worker
+    // Worker 由独立进程 server/worker.ts 启动
+    await initRedisQueue({ startWorker: false });
 
     const server = app.listen(PORT, () => {
       console.log(`🚀 服务器运行在 http://localhost:${PORT}`);

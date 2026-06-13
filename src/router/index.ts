@@ -1,8 +1,11 @@
 import { createRouter, createWebHistory } from "vue-router";
-import AgentWorkspace from "@/views/AgentWorkspace.vue";
-import AuthPage from "@/components/pages/AuthPage.vue";
-import HomePage from "@/components/pages/HomePage.vue";
 import { useAuthStore } from "@/stores/authStore";
+
+// 路由懒加载 - 按需加载页面组件，减少首屏体积
+const HomePage = () => import("@/components/pages/HomePage.vue");
+const AuthPage = () => import("@/components/pages/AuthPage.vue");
+const AgentWorkspace = () => import("@/views/AgentWorkspace.vue");
+const AgentUI = () => import("@/components/pages/agentUI.vue");
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -79,6 +82,15 @@ export const router = createRouter({
       component: AgentWorkspace,
       meta: {
         title: "个人中心 - AI PPT Agent"
+      }
+    },
+    {
+      path: "/agent-ui",
+      name: "agent-ui",
+      component: AgentUI,
+      meta: {
+        title: "Agent 工作流 - AI PPT Agent",
+        public: true
       }
     },
     {

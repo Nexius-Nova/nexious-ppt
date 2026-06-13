@@ -45,7 +45,7 @@ export function buildExecutorSystemPrompt(spec: DesignSpec, lock: SpecLock, cont
 1. 只输出 SVG，不要 Markdown，不要解释。
 2. SVG 必须是合法 XML，根元素 viewBox="0 0 ${canvas.width} ${canvas.height}"，width="${canvas.width}"，height="${canvas.height}"。
 3. 只能使用 spec_lock 中列出的颜色、字体和字号。
-4. 禁止使用渐变、<style>、class、<foreignObject>、<mask>、rgba()、@font-face、<animate>、<script>、<textPath>、<g opacity>、<image opacity>。
+4. 禁止使用渐变、linearGradient、radialGradient、url(#...gradient...)、<style>、class、<foreignObject>、<mask>、rgba()、@font-face、<animate>、<script>、<textPath>、<g opacity>、<image opacity>。
 5. 文本使用 <text> 和 <tspan>，XML 保留字符必须转义。
 6. 顶层内容使用 <g id="..."> 分组，id 使用英文 kebab-case。
 7. 不要引用不存在的图片；除非本页提供了图片素材 URL，否则不要写 <image>。如果提供了图片素材，必须按素材清单使用，不要编造新 URL。
@@ -112,7 +112,7 @@ ${chart ? `- chart: ${chart}` : ''}
 ${context.chartTemplateSvg ? `\nNexious PPT chart template SVG reference. Learn only structure, coordinates, hierarchy, and visual proportion; replace all sample content with this slide's real content:\n${context.chartTemplateSvg}` : ''}
 
 设计方向：${spec.visualTheme.style}
-请让本页构图明显匹配 layout=${layout} 与 rhythm=${rhythm}，不要复用上一页版式。
+请依据本页内容、layout=${layout}、rhythm=${rhythm}、spec_lock 颜色/字体和已显式提供的模板/Skill/素材生成构图；当没有明确模板/提示词时，可自主决定页面视觉方向，但禁止使用任何渐变。不要引入未提供的业务内容，不要复用上一页版式。
 
 输出纯 SVG。`;
 }

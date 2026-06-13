@@ -10,7 +10,10 @@ import {
   buildSvgQualityRepairPrompt,
   cleanSvgOutput,
   ensureImageUsedInSvg,
-  finalizeSvgQuality
+  finalizeSvgQuality,
+  deterministicRepairForIssues,
+  hasDeterministicFixableIssues,
+  hasLlmFixableIssues,
 } from '../engine/index.js';
 import { DEFAULT_FORBIDDEN, normalizeTypography } from '../engine/spec.js';
 import type { StrategistInput, DesignSpec, SpecLock, SpecSlide } from '../engine/index.js';
@@ -365,7 +368,7 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
 
     if (estimatedTokens > 500000) {
       console.warn(`[Executor] Page ${slide.pageNumber}: prompt too large (~${estimatedTokens}tokens), using simplified prompt`);
-      const simplifiedSystem = `你是PPT SVG执行器。画布: ${spec.canvas.width}x${spec.canvas.height}。颜色: primary=${lock.colors.primary}, accent=${lock.colors.accent}, bg=${lock.colors.background}, text=${lock.colors.text}, surface=${lock.colors.surface}, muted=${lock.colors.muted}。字体: ${spec.typography.titleFamily}。输出纯SVG代码，viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"。禁止<style>,class,<foreignObject>,rgba()。`;
+      const simplifiedSystem = `你是PPT SVG执行器。画布: ${spec.canvas.width}x${spec.canvas.height}。颜色: primary=${lock.colors.primary}, accent=${lock.colors.accent}, bg=${lock.colors.background}, text=${lock.colors.text}, surface=${lock.colors.surface}, muted=${lock.colors.muted}。字体: ${spec.typography.titleFamily}。设计方向：${spec.visualTheme?.style || '根据主题自主决定，禁止使用渐变'}。输出纯SVG代码，viewBox="0 0 ${spec.canvas.width} ${spec.canvas.height}"。禁止渐变、linearGradient、radialGradient、<style>,class,<foreignObject>,rgba(),<script>,<animate>。`;
       const simplifiedImageText = safeImageAssets.length
         ? `可用图片素材：${safeImageAssets.map((asset: any) => `${asset.id}:${asset.url}`).join('；')}。是否使用、使用几张、位置、尺寸、裁切、旋转、缩放都由你按内容自主决定，只能使用清单 URL，不能遮挡标题、正文、图表或关键组件。`
         : '不要写 <image>。';
@@ -394,13 +397,29 @@ router.post('/executor-page', authMiddleware, async (req: AuthRequest, res: Resp
     let svg = ensureImageUsedInSvg(cleanSvgOutput(fullContent), slide, spec, safeImageAssets);
     let quality = finalizeSvgQuality(svg, spec, slide, undefined, safeImageAssets);
     if (quality.blockingIssues.length) {
-      writeSseData(res, { status: 'quality-check', phase: 'executor', pageNumber: slide.pageNumber, message: '正在修复页面布局质量问题' });
-      const repairContent = await streamText(provider, apiKey, baseUrl, model, [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, safeImageAssets) },
-      ]);
-      svg = ensureImageUsedInSvg(cleanSvgOutput(repairContent), slide, spec, safeImageAssets);
-      quality = finalizeSvgQuality(svg || quality.svg, spec, slide, undefined, safeImageAssets);
+      // 先尝试确定性修复（不调用LLM）
+      if (hasDeterministicFixableIssues(quality.blockingIssues)) {
+        const deterministicallyRepaired = deterministicRepairForIssues(quality.svg, spec, slide, quality.blockingIssues);
+        const afterDeterministic = finalizeSvgQuality(deterministicallyRepaired, spec, slide, undefined, safeImageAssets);
+        if (afterDeterministic.blockingIssues.length < quality.blockingIssues.length) {
+          quality = afterDeterministic;
+        }
+      }
+      // 如果仍有LLM可修复的问题，再尝试LLM修复
+      if (quality.blockingIssues.length && hasLlmFixableIssues(quality.blockingIssues)) {
+        const beforeRepairIssueCount = quality.blockingIssues.length;
+        const repairContent = await streamText(provider, apiKey, baseUrl, model, [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: buildSvgQualityRepairPrompt(quality.svg, spec, slide, undefined, quality.blockingIssues, safeImageAssets) },
+        ]);
+        const repairedSvg = ensureImageUsedInSvg(cleanSvgOutput(repairContent), slide, spec, safeImageAssets);
+        if (repairedSvg && repairedSvg.includes('<svg')) {
+          const afterRepair = finalizeSvgQuality(repairedSvg, spec, slide, undefined, safeImageAssets);
+          if (afterRepair.blockingIssues.length <= beforeRepairIssueCount) {
+            quality = afterRepair;
+          }
+        }
+      }
     }
     svg = quality.svg;
 

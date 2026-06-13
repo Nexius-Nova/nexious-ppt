@@ -1,9 +1,65 @@
 import { inlinePrivateSvgImages } from '@/composables/usePrivateAssetUrl';
 import { api } from '@/services/api';
 
+/* ─── LRU 缓存 ─── */
+const SVG_RENDER_CACHE_MAX = 30;
+const svgRenderCache = new Map<string, { blob: Blob; timestamp: number }>();
+
+function svgContentHash(svg: string): string {
+  // 简单哈希：取 SVG 内容的前200字符 + 长度 + 尾部50字符
+  const len = svg.length;
+  const head = svg.slice(0, 200);
+  const tail = svg.slice(-50);
+  return `${len}:${head}:${tail}`;
+}
+
+function getCachedRender(svg: string): Blob | null {
+  const key = svgContentHash(svg);
+  const entry = svgRenderCache.get(key);
+  if (!entry) return null;
+  // 移到末尾（LRU）
+  svgRenderCache.delete(key);
+  svgRenderCache.set(key, entry);
+  return entry.blob;
+}
+
+function setCachedRender(svg: string, blob: Blob): void {
+  const key = svgContentHash(svg);
+  // 淘汰最旧的
+  if (svgRenderCache.size >= SVG_RENDER_CACHE_MAX) {
+    const oldest = svgRenderCache.keys().next().value;
+    if (oldest !== undefined) svgRenderCache.delete(oldest);
+  }
+  svgRenderCache.set(key, { blob, timestamp: Date.now() });
+}
+
+/* ─── 内联图片缓存 ─── */
+const IMAGE_INLINE_CACHE_MAX = 50;
+const imageInlineCache = new Map<string, string>();
+
+function getCachedImageDataUrl(url: string): string | null {
+  const entry = imageInlineCache.get(url);
+  if (!entry) return null;
+  imageInlineCache.delete(url);
+  imageInlineCache.set(url, entry);
+  return entry;
+}
+
+function setCachedImageDataUrl(url: string, dataUrl: string): void {
+  if (imageInlineCache.size >= IMAGE_INLINE_CACHE_MAX) {
+    const oldest = imageInlineCache.keys().next().value;
+    if (oldest !== undefined) imageInlineCache.delete(oldest);
+  }
+  imageInlineCache.set(url, dataUrl);
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 async function fetchImageAsDataUrl(imageUrl: string): Promise<string | null> {
+  // 检查缓存
+  const cached = getCachedImageDataUrl(imageUrl);
+  if (cached) return cached;
+
   try {
     const proxyUrl = `${API_BASE_URL}/api/ai/proxy-image?url=${encodeURIComponent(imageUrl)}`;
     const resp = await api.fetchWithAuth(proxyUrl);
@@ -14,7 +70,11 @@ async function fetchImageAsDataUrl(imageUrl: string): Promise<string | null> {
     const blob = await resp.blob();
     return new Promise<string>((resolve) => {
       const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
+      reader.onload = () => {
+        const result = reader.result as string;
+        if (result) setCachedImageDataUrl(imageUrl, result);
+        resolve(result);
+      };
       reader.onerror = () => {
         console.warn(`[svgRenderer] FileReader error for ${imageUrl}`);
         resolve('');
@@ -139,6 +199,10 @@ function svgToDataUrl(svgString: string): string {
 }
 
 export async function renderSvgToPng(svgString: string, width: number, height: number): Promise<Blob> {
+  // 检查渲染缓存
+  const cached = getCachedRender(svgString);
+  if (cached) return cached;
+
   const withPrivateAssets = await inlinePrivateSvgImages(svgString);
   const inlined = await inlineRemoteImages(withPrivateAssets);
 
@@ -169,7 +233,10 @@ export async function renderSvgToPng(svgString: string, width: number, height: n
     const blob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob(
         (b) => {
-          if (b) resolve(b);
+          if (b) {
+            setCachedRender(svgString, b);
+            resolve(b);
+          }
           else reject(new Error('PNG 导出失败'));
         },
         'image/png',

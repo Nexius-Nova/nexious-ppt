@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onBeforeUnmount, reactive } from 'vue';
 import PrivateSvg from '@/components/common/PrivateSvg.vue';
 import { renderSvgToPng } from '@/services/svgRenderer';
 
@@ -10,12 +10,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:activeIndex': [value: number];
+  'retryPage': [pageNumber: number];
+  'regeneratePage': [pageNumber: number];
 }>();
 
 const scale = ref(1);
 const showNotes = ref(false);
-const renderedPngs = ref<Map<number, string>>(new Map());
-const renderingPages = ref<Set<number>>(new Set());
+const renderedPngs: Map<number, string> = reactive(new Map());
+const renderingPages: Set<number> = reactive(new Set());
 
 const currentNotes = computed(() => {
   if (props.pages.length === 0) return '';
@@ -31,34 +33,34 @@ const currentSvg = computed(() => {
 
 async function renderPageToPng(index: number) {
   const page = props.pages[index];
-  if (!page?.svg || renderedPngs.value.has(index) || renderingPages.value.has(index)) return;
+  if (!page?.svg || renderedPngs.has(index) || renderingPages.has(index)) return;
 
-  renderingPages.value = new Set([...renderingPages.value, index]);
+  // 释放旧的 Blob URL
+  const oldUrl = renderedPngs.get(index);
+  if (oldUrl) {
+    URL.revokeObjectURL(oldUrl);
+    renderedPngs.delete(index);
+  }
+
+  renderingPages.add(index);
 
   try {
     const blob = await renderSvgToPng(page.svg, 1280, 720);
     const url = URL.createObjectURL(blob);
-
-    const newMap = new Map(renderedPngs.value);
-    newMap.set(index, url);
-    renderedPngs.value = newMap;
+    renderedPngs.set(index, url);
   } catch {
-    const newMap = new Map(renderedPngs.value);
-    newMap.set(index, '');
-    renderedPngs.value = newMap;
+    renderedPngs.set(index, '');
   } finally {
-    const newSet = new Set(renderingPages.value);
-    newSet.delete(index);
-    renderingPages.value = newSet;
+    renderingPages.delete(index);
   }
 }
 
 watch(() => props.pages, () => {
-  for (const url of renderedPngs.value.values()) {
+  for (const url of renderedPngs.values()) {
     if (url) URL.revokeObjectURL(url);
   }
-  renderedPngs.value = new Map();
-  renderingPages.value = new Set();
+  renderedPngs.clear();
+  renderingPages.clear();
 
   if (props.pages.length > 0) {
     renderPageToPng(props.activeIndex);
@@ -66,7 +68,7 @@ watch(() => props.pages, () => {
 }, { immediate: true });
 
 watch(() => props.activeIndex, (newIdx) => {
-  if (!renderedPngs.value.has(newIdx)) {
+  if (!renderedPngs.has(newIdx)) {
     renderPageToPng(newIdx);
   }
 });
@@ -83,6 +85,58 @@ function zoomOut() {
   scale.value = Math.max(0.3, scale.value - 0.1);
 }
 
+// 缩略图按需加载
+const thumbsVisibleCount = ref(10);
+const THUMBS_BATCH = 8;
+
+const visiblePages = computed(() => {
+  return props.pages.slice(0, thumbsVisibleCount.value);
+});
+
+const hasMorePages = computed(() => {
+  return thumbsVisibleCount.value < props.pages.length;
+});
+
+function loadMorePages() {
+  if (!hasMorePages.value) return;
+  thumbsVisibleCount.value = Math.min(
+    thumbsVisibleCount.value + THUMBS_BATCH,
+    props.pages.length
+  );
+}
+
+// 当 pages 变化时重置
+watch(() => props.pages, () => {
+  thumbsVisibleCount.value = 10;
+});
+
+const thumbsRef = ref<HTMLElement | null>(null);
+const sentinelRef = ref<HTMLElement | null>(null);
+let observer: IntersectionObserver | null = null;
+
+watch(sentinelRef, (el) => {
+  if (!el) return;
+  if (observer) observer.disconnect();
+  observer = new IntersectionObserver(
+    (entries) => {
+      if (entries[0]?.isIntersecting && hasMorePages.value) {
+        loadMorePages();
+      }
+    },
+    { root: thumbsRef.value, threshold: 0.1 }
+  );
+  observer.observe(el);
+});
+
+onBeforeUnmount(() => {
+  observer?.disconnect();
+  // 释放所有 Blob URL
+  for (const url of renderedPngs.values()) {
+    if (url) URL.revokeObjectURL(url);
+  }
+  renderedPngs.clear();
+});
+
 </script>
 
 <template>
@@ -96,6 +150,8 @@ function zoomOut() {
           <button class="svg-deck-preview__btn" @click="zoomIn" title="放大">+</button>
         </div>
         <button class="svg-deck-preview__btn" @click="showNotes = !showNotes" :class="{ 'svg-deck-preview__btn--active': showNotes }" title="演讲备注">📝</button>
+        <button class="svg-deck-preview__btn" @click="emit('regeneratePage', pages[activeIndex]?.pageNumber || activeIndex + 1)" title="重新生成本页">🔄</button>
+        <button class="svg-deck-preview__btn" @click="emit('retryPage', pages[activeIndex]?.pageNumber || activeIndex + 1)" title="重试本页">🔁</button>
       </div>
       <div class="svg-deck-preview__viewport">
         <div class="svg-deck-preview__canvas" :style="{ transform: `scale(${scale})` }">
@@ -117,9 +173,9 @@ function zoomOut() {
     <div v-else class="svg-deck-preview__empty">
       <p>暂无预览内容，请先生成 PPT</p>
     </div>
-    <div class="svg-deck-preview__thumbnails" v-if="pages.length > 1">
+    <div ref="thumbsRef" class="svg-deck-preview__thumbnails" v-if="pages.length > 1">
       <div
-        v-for="(page, index) in pages"
+        v-for="(page, index) in visiblePages"
         :key="index"
         class="svg-deck-preview__thumb"
         :class="{ 'svg-deck-preview__thumb--active': index === activeIndex }"
@@ -134,6 +190,13 @@ function zoomOut() {
         <PrivateSvg v-else-if="page.svg" class="svg-deck-preview__thumb-svg" :svg="page.svg" />
         <div v-else class="svg-deck-preview__thumb-empty">待生成</div>
         <span class="svg-deck-preview__thumb-num">{{ page.pageNumber }}</span>
+        <div class="svg-deck-preview__thumb-actions">
+          <button class="svg-deck-preview__thumb-action" @click.stop="emit('regeneratePage', page.pageNumber)" title="重新生成">🔄</button>
+        </div>
+      </div>
+      <div ref="sentinelRef" class="svg-deck-preview__thumb-sentinel"></div>
+      <div v-if="hasMorePages" class="svg-deck-preview__thumb-more" @click="loadMorePages">
+        <span>+{{ pages.length - thumbsVisibleCount }}</span>
       </div>
     </div>
   </div>
@@ -316,6 +379,33 @@ function zoomOut() {
   padding: 4px 0;
 }
 
+.svg-deck-preview__thumb-sentinel {
+  width: 1px;
+  height: 1px;
+  flex-shrink: 0;
+}
+
+.svg-deck-preview__thumb-more {
+  flex-shrink: 0;
+  width: 48px;
+  height: 54px;
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--color-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  transition: all var(--transition-fast);
+}
+
+.svg-deck-preview__thumb-more:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
 .svg-deck-preview__thumb {
   flex-shrink: 0;
   width: 96px;
@@ -376,6 +466,37 @@ function zoomOut() {
   padding: 1px 4px;
   border-radius: 3px;
   font-variant-numeric: tabular-nums;
+}
+
+.svg-deck-preview__thumb-actions {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: none;
+  gap: 2px;
+}
+
+.svg-deck-preview__thumb:hover .svg-deck-preview__thumb-actions {
+  display: flex;
+}
+
+.svg-deck-preview__thumb-action {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.svg-deck-preview__thumb-action:hover {
+  background: var(--color-accent);
 }
 
 @keyframes spin {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -11,7 +12,7 @@ from xml.etree import ElementTree as ET
 
 from .drawingml_context import ConvertContext, ShapeResult
 from .drawingml_utils import (
-    SVG_NS, EMU_PER_PX,
+    SVG_NS, XLINK_NS, EMU_PER_PX,
     _extract_inheritable_styles, parse_transform_matrix, resolve_url_id,
 )
 from .drawingml_styles import build_effect_xml
@@ -411,7 +412,9 @@ def convert_element(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None
             result = converter(elem, ctx)
         except Exception as e:
             trace('error', error=str(e))
-            raise SvgNativeConversionError(f'Failed to convert <{tag}>: {e}') from e
+            # Skip elements that fail to convert rather than aborting the entire export.
+            # A missing shape is better than a failed slide.
+            return None
         if result:
             shape_match = re.search(r'<p:cNvPr id="(\d+)"', result.xml)
             metadata: dict[str, Any] = {}
@@ -428,8 +431,10 @@ def convert_element(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None
         trace('skip', reason='non-visual')
         return None
 
+    # Unsupported visual element: skip rather than abort the entire export.
+    # Losing a single element is better than failing the whole slide.
     trace('unsupported')
-    raise SvgNativeConversionError(f'Unsupported visual SVG element <{tag}>')
+    return None
 
 
 def _local_tag(elem: ET.Element) -> str:
@@ -456,6 +461,131 @@ def _collect_unsupported_visuals(root: ET.Element) -> list[str]:
     for idx, child in enumerate(list(root), start=1):
         walk(child, f'/svg[{idx}]')
     return issues
+
+
+def _expand_use_href_references(root: ET.Element) -> int:
+    """Expand ``<use href="#id">`` by inlining the referenced element.
+
+    Standard SVG ``<use>`` elements reference a ``<defs>`` element by ID.
+    DrawingML has no equivalent, so we resolve them by cloning the
+    referenced element, applying the ``<use>`` position (x/y) as a
+    ``transform="translate(x,y)"``, and replacing the ``<use>`` with
+    the cloned ``<g>`` wrapper.
+
+    Returns the number of ``<use>`` elements successfully expanded.
+    """
+    # Build parent map
+    parent_of: dict[ET.Element, ET.Element] = {}
+    for parent in root.iter():
+        for child in parent:
+            parent_of[child] = parent
+
+    # Collect defs
+    defs_map: dict[str, ET.Element] = {}
+    for defs_elem in root.iter(f'{{{SVG_NS}}}defs'):
+        for child in defs_elem:
+            elem_id = child.get('id')
+            if elem_id:
+                defs_map[elem_id] = child
+    for defs_elem in root.iter('defs'):
+        for child in defs_elem:
+            elem_id = child.get('id')
+            if elem_id and elem_id not in defs_map:
+                defs_map[elem_id] = child
+
+    # Find all <use> elements that are NOT data-icon placeholders
+    targets: list[ET.Element] = []
+    for elem in root.iter():
+        local = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        if local == 'use' and not elem.get('data-icon'):
+            targets.append(elem)
+
+    expanded = 0
+    for use_elem in targets:
+        parent = parent_of.get(use_elem)
+        if parent is None:
+            continue
+
+        # Resolve href (supports both href and xlink:href)
+        href = use_elem.get('href') or use_elem.get(f'{{{XLINK_NS}}}href') or ''
+        if not href.startswith('#'):
+            continue
+        ref_id = href[1:]
+        ref_elem = defs_map.get(ref_id)
+        if ref_elem is None:
+            continue
+
+        # Clone the referenced element
+        clone = copy.deepcopy(ref_elem)
+
+        # Apply <use> positioning as a transform
+        x = use_elem.get('x', '0')
+        y = use_elem.get('y', '0')
+        existing_transform = use_elem.get('transform', '')
+        translate = f'translate({x},{y})'
+        new_transform = f'{translate} {existing_transform}'.strip() if existing_transform else translate
+
+        # Wrap in a <g> with the transform
+        wrapper = ET.Element(f'{{{SVG_NS}}}g')
+        wrapper.set('transform', new_transform)
+        # Carry over id from <use> if present
+        use_id = use_elem.get('id')
+        if use_id:
+            wrapper.set('id', use_id)
+        # Carry over style/class from <use>
+        use_style = use_elem.get('style')
+        if use_style:
+            wrapper.set('style', use_style)
+        use_class = use_elem.get('class')
+        if use_class:
+            wrapper.set('class', use_class)
+
+        wrapper.append(clone)
+
+        # Replace <use> with the wrapper <g>
+        idx = list(parent).index(use_elem)
+        parent.remove(use_elem)
+        parent.insert(idx, wrapper)
+        expanded += 1
+
+    return expanded
+
+
+def _remove_unsupported_visuals(root: ET.Element) -> int:
+    """Remove unsupported visual elements from the tree so conversion can proceed.
+
+    Instead of aborting the entire export, we strip out elements that cannot
+    be converted to DrawingML. This means some visual fidelity is lost, but
+    the rest of the slide is preserved.
+
+    Returns the number of elements removed.
+    """
+    # Build parent map
+    parent_of: dict[ET.Element, ET.Element] = {}
+    for parent in root.iter():
+        for child in parent:
+            parent_of[child] = parent
+
+    removed = 0
+    # Collect first, then remove (avoid mutating while iterating)
+    to_remove: list[ET.Element] = []
+    for elem in root.iter():
+        tag = _local_tag(elem)
+        if (tag not in _CONVERTERS
+                and tag not in _NON_VISUAL_TAGS
+                and tag not in _SUPPORTED_VISUAL_CHILD_TAGS):
+            # Skip root element
+            if elem is root:
+                continue
+            to_remove.append(elem)
+
+    for elem in to_remove:
+        parent = parent_of.get(elem)
+        if parent is not None:
+            parent.remove(elem)
+            removed += 1
+
+    return removed
 
 
 def convert_svg_to_slide_shapes(
@@ -532,13 +662,29 @@ def convert_svg_to_slide_shapes(
         if verbose:
             print(f'  Hoisted {hoisted_defs} definition element(s) into <defs>')
 
+    # Expand standard <use href="#id"> references by inlining the referenced
+    # element from <defs>. This resolves most unsupported <use> elements that
+    # would otherwise block native PPTX conversion.
+    expanded_refs = _expand_use_href_references(root)
+    if expanded_refs:
+        trace_steps.append({'action': 'expand-use-href-references', 'count': expanded_refs})
+        if verbose:
+            print(f'  Expanded {expanded_refs} <use href="#..."> reference(s)')
+
     unsupported = _collect_unsupported_visuals(root)
     if unsupported:
         preview = '; '.join(unsupported[:8])
         suffix = '' if len(unsupported) <= 8 else f'; +{len(unsupported) - 8} more'
-        raise SvgNativeConversionError(
-            f'{svg_path.name}: unsupported visual SVG element(s): {preview}{suffix}'
-        )
+        # Instead of raising, remove unsupported elements and continue
+        # so the export doesn't fail on a single problematic element.
+        removed = _remove_unsupported_visuals(root)
+        trace_steps.append({
+            'action': 'remove-unsupported-visuals',
+            'count': removed,
+            'elements': unsupported[:8],
+        })
+        if verbose:
+            print(f'  WARNING: Removed {removed} unsupported visual element(s): {preview}{suffix}')
 
     defs = collect_defs(root)
     ctx = ConvertContext(

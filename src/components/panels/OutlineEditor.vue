@@ -224,6 +224,102 @@ function scrollToSlide(slideId: string) {
 }
 
 const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
+
+const CHART_HINT_LABELS: Record<string, string> = {
+  area_chart: '面积趋势图：展示 1-2 条累计趋势，突出随时间变化的规模感',
+  bar_chart: '柱状对比图：比较 3-8 个类别的单项数值差异',
+  box_plot_chart: '箱线分布图：比较不同分组的中位数、区间和异常点',
+  bubble_chart: '气泡散点图：同时表达横轴、纵轴和规模三类变量',
+  bullet_chart: '目标达成图：对比多个 KPI 的实际值、目标值和完成差距',
+  butterfly_chart: '镜像对比图：左右两组数据围绕同一轴线进行对照',
+  donut_chart: '环形占比图：展示整体中的 3-6 个组成部分，并突出中心指标',
+  dual_axis_line_chart: '双轴折线图：对比两类单位不同的时间趋势',
+  dumbbell_chart: '哑铃对比图：展示多个项目在前后、两态之间的变化幅度',
+  funnel_chart: '漏斗转化图：呈现 3-5 个连续阶段的转化递减',
+  gantt_chart: '甘特计划图：展示任务周期、依赖关系和排期节奏',
+  gauge_chart: '仪表盘图：突出单个核心指标的目标完成度',
+  grouped_bar_chart: '分组柱状图：并列比较同一类别下 2-4 组系列',
+  heatmap_chart: '热力矩阵图：用色块强弱展示二维维度中的密度或强度',
+  horizontal_bar_chart: '横向排行图：适合长标签项目的 5-12 项排名对比',
+  kpi_cards: 'KPI 指标卡：用 4-8 个核心数字快速概览结果',
+  line_chart: '折线趋势图：展示 1-3 条连续时间序列的方向变化',
+  matrix_2x2: '四象限矩阵：按两条评价轴定位项目、优先级或策略选择',
+  quadrant_text_bullets: '四象限框架：每个象限承载标题和要点列表',
+  quadrant_bubble_scatter: '气泡四象限：在二维矩阵中加入规模权重',
+  pareto_chart: '帕累托图：用降序柱和累计线突出关键贡献项',
+  pie_chart: '饼图：展示 3-6 个部分对整体的占比关系',
+  hub_inward_arrows: '中心压力图：周边力量向核心对象施加影响',
+  process_flow: '流程图：展示 3-8 个顺序步骤和节点之间的连接',
+  progress_bar_chart: '进度条图：并列展示多个事项的完成百分比',
+  radar_chart: '雷达能力图：比较 4-8 个维度的能力或评分',
+  sankey_chart: '桑基流向图：展示来源、节点和去向之间的流量分配',
+  scatter_chart: '散点图：展示两个变量之间的相关性、聚类或异常点',
+  stacked_area_chart: '堆叠面积图：表达多系列随时间变化的总量和构成',
+  stacked_bar_chart: '堆叠柱状图：比较各类别总量及其内部组成',
+  timeline: '时间线：展示 3-8 个里程碑事件和先后顺序',
+  treemap_chart: '矩形树图：展示层级或多项目的面积占比关系',
+  waterfall_chart: '瀑布图：拆解从起点到终点的增减贡献',
+  pyramid_chart: '金字塔层级图：展示 3-6 层分层结构、等级或成熟度',
+  pyramid_isometric: '立体金字塔：用更强视觉层次表现四级成长或成熟模型',
+  venn_diagram: '维恩图：展示 2-3 个集合的重叠与交集价值',
+  pros_cons_chart: '利弊对照图：左右列出优势、风险或正反观点',
+  circular_stages: '循环阶段图：展示 4-6 个闭环阶段和持续迭代关系',
+  numbered_steps: '编号步骤图：用数字强调 3-6 个顺序步骤',
+  icon_grid: '图标网格：展示 4-9 个并列能力、功能或价值点',
+  isometric_stairs: '阶梯进阶图：表现成长、提升或阶段性跃迁',
+  mind_map: '思维导图：围绕一个核心主题发散 3-6 个分支',
+  comparison_table: '对比表：按多项维度比较 2-4 个方案、产品或对象',
+  snake_flow: '蛇形长流程：容纳 6-10 个连续旅程或生命周期步骤',
+  roadmap_vertical: '纵向路线图：展示 4-8 个里程碑及状态推进',
+  word_cloud: '词云图：用大小权重突出关键词频率或重要性',
+  concentric_circles: '同心圆层级图：展示由核心到外围的优先级或影响圈',
+  segmented_wheel: '分段轮盘图：围绕中心主题拆分 4-8 个并列维度',
+  arc_anchored_list: '弧形锚点列表：用左侧弧形视觉统一 3-5 条并列主线',
+  chevron_process: '箭头阶段图：用连续箭头表现 3-6 个方法阶段',
+  chevron_chain_with_tail: '箭头价值链：展示连续环节如何汇聚到最终成果',
+  comparison_columns: '并列方案卡：对比 2-4 个套餐、服务层级或方案',
+  fishbone_diagram: '鱼骨图：分析问题背后的 4-6 类原因',
+  hub_spoke: '中心辐射图：一个核心能力连接 4-8 个周边能力',
+  vertical_list: '纵向重点列表：展示 3-6 条核心观点、建议或行动项',
+  vertical_pillars: '支柱图：并列展示 3-5 个独立支柱或战略维度',
+  layered_architecture: '分层架构图：展示 3-4 层结构、每层模块职责和跨层关系',
+  module_composition: '模块组成图：展示一个系统/功能由多个子模块构成',
+  pipeline_with_stages: '管道阶段图：展示数据、构建或业务流水线的阶段与产物',
+  client_server_flow: '客户端服务端交互图：展示请求、响应和关键交互方向',
+  basic_table: '基础表格：用行列结构整理文本或数字信息',
+  consulting_table: '咨询表格：高密度呈现指标、条形微图和结论',
+  project_schedule_table: '项目排期表：展示任务、负责人、状态和时间安排',
+  financial_statement_table: '财务报表：展示收入、成本、利润等结构化数字',
+  feature_matrix_table: '功能矩阵表：按产品或方案对比功能支持情况',
+  harvey_balls_table: '评分矩阵表：用圆点评级展示定性评估结果',
+  team_roster: '团队名册：展示成员、角色和简短背景',
+  top_down_tree: '层级树图：展示组织、目标或任务的上下级分解关系',
+  journey_map: '旅程地图：按阶段呈现用户行为、情绪和痛点',
+  agenda_list: '议程列表：展示演示结构、议题顺序和时间安排',
+};
+
+function humanizeChartKey(key: string) {
+  return key
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function formatChartHint(chartHint?: string) {
+  const raw = String(chartHint || '').trim();
+  if (!raw) return '';
+  const key = raw.match(/[a-z0-9_]+(?:-[a-z0-9_]+)*/i)?.[0] || '';
+  const label = key ? CHART_HINT_LABELS[key] : '';
+  const detail = raw
+    .replace(new RegExp(`^\\s*${key}\\s*([|:：,，-]+)?\\s*`, 'i'), '')
+    .replace(/\s*\|\s*/g, '\n')
+    .replace(/^(具体表达|表达重点|结构|用途|建议)\s*[：:]\s*/i, '')
+    .trim();
+  if (label && detail) return `${label}\n${detail}`;
+  if (label) return label;
+  return raw.includes('_') || raw.includes('-') ? `${humanizeChartKey(raw)}：请结合本页内容细化图表结构` : raw;
+}
 </script>
 
 <template>
@@ -371,8 +467,10 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
           </div>
 
           <div v-if="slide.chartHint" class="outline-slide__chart">
-            <UiBadge tone="warning" size="sm">图表建议</UiBadge>
-            <span>{{ slide.chartHint }}</span>
+            <div class="outline-slide__chart-header">
+              <UiBadge tone="warning" size="sm">图表建议</UiBadge>
+            </div>
+            <p class="outline-slide__chart-text">{{ formatChartHint(slide.chartHint) }}</p>
           </div>
 
           <div v-if="slide.animationDescription" class="outline-slide__animation-plan">
@@ -913,15 +1011,32 @@ const copilotTypes: SuggestionType[] = ['polish', 'condense', 'expand'];
 
 /* ---- Chart hint ---- */
 .outline-slide__chart {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
   border-radius: 8px;
   font-size: 12px;
   color: var(--color-muted);
   line-height: 1.5;
   background: var(--color-warning-soft);
+}
+
+.outline-slide__chart-header {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.outline-slide__chart-text {
+  max-height: 72px;
+  min-width: 0;
+  margin: 0;
+  padding-right: 4px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  scrollbar-width: thin;
 }
 
 .outline-slide__animation-plan {

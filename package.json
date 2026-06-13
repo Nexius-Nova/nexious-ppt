@@ -5,9 +5,10 @@
   "type": "module",
   "packageManager": "pnpm@9.0.2",
   "scripts": {
-    "dev": "concurrently \"pnpm run dev:client\" \"pnpm run dev:server\"",
+    "dev": "concurrently \"pnpm run dev:client\" \"pnpm run dev:server\" \"pnpm run dev:worker\"",
     "dev:client": "vite --host 0.0.0.0",
     "dev:server": "tsx watch server/start.ts",
+    "dev:worker": "tsx watch server/worker.ts",
     "dev:all": "pnpm run dev",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
@@ -16,7 +17,8 @@
     "migrate": "tsx server/scripts/migrate.ts",
     "verify-db": "tsx server/scripts/verify-db.ts",
     "cleanup-generated": "tsx server/scripts/cleanup-generated-assets.ts",
-    "server": "tsx server/start.ts"
+    "server": "tsx server/start.ts",
+    "worker": "tsx server/worker.ts"
   },
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",

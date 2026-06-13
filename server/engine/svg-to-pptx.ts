@@ -490,18 +490,287 @@ function addImage(ctx: NativeContext, scope: SvgContext, attrs: SvgAttrs) {
   ctx.converted += 1;
 }
 
+function tessellatePathToLines(d: string): Array<{ x1: number; y1: number; x2: number; y2: number }> {
+  const lines: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+  const commands = Array.from(d.matchAll(/([MLCQSAZmlcqsaZ])[\s,]*([-\d.e+-]*)/gi));
+
+  let cx = 0;
+  let cy = 0;
+  let sx = 0;
+  let sy = 0;
+  let prevCmd = '';
+
+  for (const match of commands) {
+    const cmd = match[1];
+    const argsStr = match[2] || '';
+
+    if (cmd === 'M' || cmd === 'm') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 2) {
+        if (cmd === 'M') { cx = nums[0]; cy = nums[1]; }
+        else { cx += nums[0]; cy += nums[1]; }
+        sx = cx; sy = cy;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'L' || cmd === 'l') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 2) {
+        const nx = cmd === 'L' ? nums[0] : cx + nums[0];
+        const ny = cmd === 'L' ? nums[1] : cy + nums[1];
+        lines.push({ x1: cx, y1: cy, x2: nx, y2: ny });
+        cx = nx; cy = ny;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'H' || cmd === 'h') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 1) {
+        const nx = cmd === 'H' ? nums[0] : cx + nums[0];
+        lines.push({ x1: cx, y1: cy, x2: nx, y2: cy });
+        cx = nx;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'V' || cmd === 'v') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 1) {
+        const ny = cmd === 'V' ? nums[0] : cy + nums[0];
+        lines.push({ x1: cx, y1: cy, x2: cx, y2: ny });
+        cy = ny;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'C' || cmd === 'c') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 6) {
+        const x1 = cmd === 'C' ? nums[0] : cx + nums[0];
+        const y1 = cmd === 'C' ? nums[1] : cy + nums[1];
+        const x2 = cmd === 'C' ? nums[2] : cx + nums[2];
+        const y2 = cmd === 'C' ? nums[3] : cy + nums[3];
+        const x3 = cmd === 'C' ? nums[4] : cx + nums[4];
+        const y3 = cmd === 'C' ? nums[5] : cy + nums[5];
+        const steps = 8;
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const mt = 1 - t;
+          const px = mt * mt * mt * cx + 3 * mt * mt * t * x1 + 3 * mt * t * t * x2 + t * t * t * x3;
+          const py = mt * mt * mt * cy + 3 * mt * mt * t * y1 + 3 * mt * t * t * y2 + t * t * t * y3;
+          const prevT = (i - 1) / steps;
+          const pmt = 1 - prevT;
+          const ppx = pmt * pmt * pmt * cx + 3 * pmt * pmt * prevT * x1 + 3 * pmt * prevT * prevT * x2 + prevT * prevT * prevT * x3;
+          const ppy = pmt * pmt * pmt * cy + 3 * pmt * pmt * prevT * y1 + 3 * pmt * prevT * prevT * y2 + prevT * prevT * prevT * y3;
+          lines.push({ x1: ppx, y1: ppy, x2: px, y2: py });
+        }
+        cx = x3; cy = y3;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'Q' || cmd === 'q') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 4) {
+        const x1 = cmd === 'Q' ? nums[0] : cx + nums[0];
+        const y1 = cmd === 'Q' ? nums[1] : cy + nums[1];
+        const x2 = cmd === 'Q' ? nums[2] : cx + nums[2];
+        const y2 = cmd === 'Q' ? nums[3] : cy + nums[3];
+        const steps = 6;
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const mt = 1 - t;
+          const px = mt * mt * cx + 2 * mt * t * x1 + t * t * x2;
+          const py = mt * mt * cy + 2 * mt * t * y1 + t * t * y2;
+          const prevT = (i - 1) / steps;
+          const pmt = 1 - prevT;
+          const ppx = pmt * pmt * cx + 2 * pmt * prevT * x1 + prevT * prevT * x2;
+          const ppy = pmt * pmt * cy + 2 * pmt * prevT * y1 + prevT * prevT * y2;
+          lines.push({ x1: ppx, y1: ppy, x2: px, y2: py });
+        }
+        cx = x2; cy = y2;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'A' || cmd === 'a') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 7) {
+        const rx = Math.abs(nums[0]);
+        const ry = Math.abs(nums[1]);
+        const xAxisRotation = nums[2];
+        const largeArcFlag = nums[3];
+        const sweepFlag = nums[4];
+        const ex = cmd === 'A' ? nums[5] : cx + nums[5];
+        const ey = cmd === 'A' ? nums[6] : cy + nums[6];
+        const steps = 10;
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const prevT = (i - 1) / steps;
+          const p1 = arcPoint(cx, cy, rx, ry, xAxisRotation, largeArcFlag, sweepFlag, ex, ey, prevT);
+          const p2 = arcPoint(cx, cy, rx, ry, xAxisRotation, largeArcFlag, sweepFlag, ex, ey, t);
+          lines.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
+        }
+        cx = ex; cy = ey;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'Z' || cmd === 'z') {
+      lines.push({ x1: cx, y1: cy, x2: sx, y2: sy });
+      cx = sx; cy = sy;
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'S' || cmd === 's') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 4) {
+        const x2 = cmd === 'S' ? nums[0] : cx + nums[0];
+        const y2 = cmd === 'S' ? nums[1] : cy + nums[1];
+        const x3 = cmd === 'S' ? nums[2] : cx + nums[2];
+        const y3 = cmd === 'S' ? nums[3] : cy + nums[3];
+        let x1 = x2;
+        let y1 = y2;
+        if (prevCmd === 'C' || prevCmd === 'c' || prevCmd === 'S' || prevCmd === 's') {
+          x1 = 2 * cx - x2;
+          y1 = 2 * cy - y2;
+        }
+        const steps = 8;
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const mt = 1 - t;
+          const px = mt * mt * mt * cx + 3 * mt * mt * t * x1 + 3 * mt * t * t * x2 + t * t * t * x3;
+          const py = mt * mt * mt * cy + 3 * mt * mt * t * y1 + 3 * mt * t * t * y2 + t * t * t * y3;
+          const prevT = (i - 1) / steps;
+          const pmt = 1 - prevT;
+          const ppx = pmt * pmt * pmt * cx + 3 * pmt * pmt * prevT * x1 + 3 * pmt * prevT * prevT * x2 + prevT * prevT * prevT * x3;
+          const ppy = pmt * pmt * pmt * cy + 3 * pmt * pmt * prevT * y1 + 3 * pmt * prevT * prevT * y2 + prevT * prevT * prevT * y3;
+          lines.push({ x1: ppx, y1: ppy, x2: px, y2: py });
+        }
+        cx = x3; cy = y3;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    if (cmd === 'T' || cmd === 't') {
+      const nums = parsePathNumbers(argsStr);
+      if (nums.length >= 2) {
+        const ex = cmd === 'T' ? nums[0] : cx + nums[0];
+        const ey = cmd === 'T' ? nums[1] : cy + nums[1];
+        let qx = ex;
+        let qy = ey;
+        if (prevCmd === 'Q' || prevCmd === 'q' || prevCmd === 'T' || prevCmd === 't') {
+          qx = 2 * cx - ex;
+          qy = 2 * cy - ey;
+        }
+        const steps = 6;
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const mt = 1 - t;
+          const px = mt * mt * cx + 2 * mt * t * qx + t * t * ex;
+          const py = mt * mt * cy + 2 * mt * t * qy + t * t * ey;
+          const prevT = (i - 1) / steps;
+          const pmt = 1 - prevT;
+          const ppx = pmt * pmt * cx + 2 * pmt * prevT * qx + prevT * prevT * ex;
+          const ppy = pmt * pmt * cy + 2 * pmt * prevT * qy + prevT * prevT * ey;
+          lines.push({ x1: ppx, y1: ppy, x2: px, y2: py });
+        }
+        cx = ex; cy = ey;
+      }
+      prevCmd = cmd;
+      continue;
+    }
+
+    prevCmd = cmd;
+  }
+
+  return lines;
+}
+
+function parsePathNumbers(value: string): number[] {
+  return Array.from(value.matchAll(/-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g)).map(m => Number.parseFloat(m[0])).filter(Number.isFinite);
+}
+
+function arcPoint(cx: number, cy: number, rx: number, ry: number, rotation: number, largeArc: number, sweep: number, ex: number, ey: number, t: number): { x: number; y: number } {
+  if (rx === 0 || ry === 0) return { x: cx + (ex - cx) * t, y: cy + (ey - cy) * t };
+  const phi = rotation * Math.PI / 180;
+  const cosPhi = Math.cos(phi);
+  const sinPhi = Math.sin(phi);
+  const dx2 = (cx - ex) / 2;
+  const dy2 = (cy - ey) / 2;
+  const x1p = cosPhi * dx2 + sinPhi * dy2;
+  const y1p = -sinPhi * dx2 + cosPhi * dy2;
+  let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lambda > 1) {
+    const sqrtLambda = Math.sqrt(lambda);
+    rx *= sqrtLambda;
+    ry *= sqrtLambda;
+  }
+  const rx2 = rx * rx;
+  const ry2 = ry * ry;
+  const x1p2 = x1p * x1p;
+  const y1p2 = y1p * y1p;
+  let c = Math.sqrt(Math.max(0, (rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2) / (rx2 * y1p2 + ry2 * x1p2)));
+  if (largeArc === sweep) c = -c;
+  const cxp = c * rx * y1p / ry;
+  const cyp = -c * ry * x1p / rx;
+  const theta1 = vectorAngle(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  const dTheta = vectorAngle((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  let thetaEnd = theta1 + dTheta * t;
+  if (!sweep && dTheta > 0) thetaEnd = theta1 - (2 * Math.PI - dTheta) * t;
+  if (sweep && dTheta < 0) thetaEnd = theta1 + (2 * Math.PI + dTheta) * t;
+  const cosT = Math.cos(thetaEnd);
+  const sinT = Math.sin(thetaEnd);
+  const px = cosPhi * rx * cosT - sinPhi * ry * sinT + (cx + ex) / 2;
+  const py = sinPhi * rx * cosT + cosPhi * ry * sinT + (cy + ey) / 2;
+  return { x: px, y: py };
+}
+
+function vectorAngle(ux: number, uy: number, vx: number, vy: number): number {
+  const dot = ux * vx + uy * vy;
+  const cross = ux * vy - uy * vx;
+  return Math.atan2(cross, dot);
+}
+
 function addSimplePathLines(ctx: NativeContext, scope: SvgContext, attrs: SvgAttrs) {
   const d = attrs.d || '';
-  const commands = Array.from(d.matchAll(/([ML])\s*([-\d.]+)[,\s]+([-\d.]+)/gi));
-  if (commands.length < 2 || /[CQSA]/i.test(d)) return;
+  if (!d) return;
   const style = mergeStyle(scope.style, attrs);
-  for (let i = 1; i < commands.length; i += 1) {
-    const previous = commands[i - 1];
-    const current = commands[i];
-    const x1 = pxX(ctx, scope, Number.parseFloat(previous[2]));
-    const y1 = pxY(ctx, scope, Number.parseFloat(previous[3]));
-    const x2 = pxX(ctx, scope, Number.parseFloat(current[2]));
-    const y2 = pxY(ctx, scope, Number.parseFloat(current[3]));
+  const fill = cleanColor(style.fill);
+  if (fill && fill !== 'FFFFFF') {
+    addPathAsPolygon(ctx, scope, attrs, style);
+    return;
+  }
+  const pathLines = tessellatePathToLines(d);
+  if (!pathLines.length) return;
+  for (const line of pathLines) {
+    const x1 = pxX(ctx, scope, line.x1);
+    const y1 = pxY(ctx, scope, line.y1);
+    const x2 = pxX(ctx, scope, line.x2);
+    const y2 = pxY(ctx, scope, line.y2);
+    addNativeLine(ctx, style, x1, y1, x2, y2);
+  }
+}
+
+function addPathAsPolygon(ctx: NativeContext, scope: SvgContext, attrs: SvgAttrs, style: SvgStyle) {
+  const d = attrs.d || '';
+  const pathLines = tessellatePathToLines(d);
+  for (const line of pathLines) {
+    const x1 = pxX(ctx, scope, line.x1);
+    const y1 = pxY(ctx, scope, line.y1);
+    const x2 = pxX(ctx, scope, line.x2);
+    const y2 = pxY(ctx, scope, line.y2);
     addNativeLine(ctx, style, x1, y1, x2, y2);
   }
 }

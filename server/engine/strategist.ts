@@ -156,7 +156,7 @@ export function buildStrategistPrompt(input: StrategistInput, context: Strategis
   const colorGuide = buildColorGuide(selectedTemplate);
   const autonomousDesign = shouldUseAutonomousDesign(input);
   const autonomousDesignGuide = autonomousDesign
-    ? '设计策略：用户未选择提示词、未选择模板，且未明确指定 PPT 设计风格或配色。你必须根据主题、资料、受众和场景自主决定 visualTheme.style、完整 HEX 配色、字体气质、图标风格、页面节奏和构图，不要继承默认 business/tech/minimal 等固定模板，不要参考历史项目、默认提示词或模板广场内容。'
+    ? '设计策略：用户未选择提示词、未选择模板，且未明确指定 PPT 设计风格或配色。你必须根据主题、资料、受众和场景自主决定 visualTheme.style、完整 HEX 配色、字体气质、图标风格、页面节奏和构图；禁止使用渐变。不要继承默认 business/tech/minimal 等固定模板，不要参考历史项目、默认提示词或模板广场内容。'
     : '';
   const animationGuide = buildAnimationGuide(input);
   const selectedPromptContent = hasSelectedPrompt(input) ? String(input.promptContent || '').trim() : '';
@@ -181,7 +181,7 @@ export function buildStrategistPrompt(input: StrategistInput, context: Strategis
   "canvas": { "format": "ppt169", "width": ${canvas.width}, "height": ${canvas.height} },
   "visualTheme": {
     "mode": "versatile|consulting|top-consulting",
-    "style": "一句话描述视觉方向，不能使用渐变",
+    "style": "一句话描述视觉方向，禁止使用渐变",
     "colors": {
 ${colorGuide}
     }
@@ -218,7 +218,7 @@ ${colorGuide}
       ],
       "layout": "cover|chapter|toc|content|mixed-media|visual-focus|media-grid|content-chart|ending",
       "rhythm": "anchor|dense|breathing",
-      "chartHint": "仅图表页填写，如 bar_chart、timeline、matrix_2x2"
+      "chartHint": "仅图表页填写；格式为 chart_key | 具体表达：本页要表达什么 | 结构：节点/字段/层级/连线如何组织"
     }
   ]
 }
@@ -228,7 +228,7 @@ ${colorGuide}
 2. 第一页必须是 cover，最后一页建议是 ending；内容足够时可以加入 toc 或 chapter。cover 代表封面结构，不代表必须使用大图片。
 3. ${slideCountGuide}
 4. rhythm 必须服务叙事：cover、toc、chapter、ending 用 anchor；信息密集页用 dense；单一观点或关键结论页用 breathing。
-5. 颜色只能使用 HEX；不能使用渐变、rgba 或透明色；整体至少包含 3 个有区分度的色相，避免一整套单色系。
+5. 颜色只能使用 HEX；禁止使用渐变、linearGradient、radialGradient、rgba 或透明色；整体至少包含 3 个有区分度的色相，避免一整套单色系。
 6. 未选择模板方案时，AI 必须根据主题自主决定主题风格、排版布局、大纲结构和颜色，不得固定套用 business、tech 或任何默认风格。
 7. 只有 templateAsset 存在时，才参考模板方案。模板方案只影响当前项目，不允许变成全局风格。
 8. 模板只提供视觉设计样式参考，包括色彩、字体、图标、版式节奏、构图比例、留白、装饰方式和 SVG 绘制风格；模板不得影响用户输入内容。
@@ -239,7 +239,7 @@ ${colorGuide}
 13. 默认视觉模式为 ${mode}。
 14. imagePlan 只描述图片素材需求，不描述固定坐标、固定槽位或固定排版。每页最多 4 张图片素材；如果用户明确要求多图、案例对比、产品矩阵、过程图，可以使用 2-4 张；普通内容页通常 0-1 张。
 15. 页面构图必须有变化，不要连续 3 页使用相同结构；每页 layout、rhythm、imagePlan 都要和用户内容强相关。封面构图要多样化，避免所有项目都使用居中大图。
-16. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、渐变背景。
+16. 不要输出无法被 SVG 稳定实现的设计要求，例如复杂滤镜、外链字体、脚本动画、渐变或依赖外部资源。
 ${autonomousDesignGuide}`;
 
   const user = `主题：${input.topic || '未提供，请从内容资料中自动提炼'}
@@ -266,12 +266,14 @@ Skill orchestration rules:
 - User content is authoritative. Skills must not override the user's topic, facts, selected prompt, or selected template.
 - Web/search/file skills provide source material only; do not convert their examples into slide business content.
 - Design/SVG/chart/formula/icon/quality skills provide design guidance only. Convert useful guidance into visualTheme, layout, rhythm, chartHint, imagePlan, animationDescription, and executorRules.
+- When a chart/data/SVG-layout/page-generation Skill is enabled and the page needs visual structure, prefer its chart structure guidance. chartHint must be specific enough for the outline page to show to users: include the chosen visual structure, what fields/nodes/layers mean, and how it supports the slide's message.
+- Do not output a bare internal chart key as chartHint. If using a Nexious chart template, start with the key for machine matching, then add Chinese details, e.g. "layered_architecture | 具体表达：产品架构分为体验层、服务层、数据层 | 结构：每层 2-4 个模块卡片，标注职责和跨层调用关系".
 - Template content affects visual style only and must not change user-provided content.`;
   const systemWithNexiousCharts = context.chartCatalog
     ? `${systemWithAnimationGuide}
 
 Nexious PPT 图表模板库：
-当页面需要图表、流程、矩阵、时间线、信息图或框架表达时，优先从下列 key 中选择最贴合的 chartHint；没有合适模板时可以留空，但 layout 仍要准确。
+当页面需要图表、流程、矩阵、时间线、信息图或框架表达时，优先从下列 key 中选择最贴合的 chartHint；没有合适模板时可以留空，但 layout 仍要准确。禁止只输出裸 key，必须写成“key | 具体表达：... | 结构：...”。
 ${context.chartCatalog}`
     : systemWithAnimationGuide;
 
@@ -305,7 +307,7 @@ export function parseStrategistOutput(raw: string, input: StrategistInput): Desi
     canvas,
     visualTheme: {
       mode: normalizeMode(parsed.visualTheme?.mode, input.tone),
-      style: parsed.visualTheme?.style || '根据主题定制的清晰演示风格，不使用渐变',
+      style: parsed.visualTheme?.style || '根据主题自主决定的清晰演示风格，禁止使用渐变',
       colors,
     },
     typography,
@@ -631,7 +633,7 @@ function buildFallbackSpec(input: StrategistInput): DesignSpec {
     canvas: CANVAS_FORMATS.ppt169,
     visualTheme: {
       mode: getPreferredMode(input.tone),
-      style: '根据主题定制的清晰演示风格，不使用渐变',
+      style: `${fallbackTopic || '当前主题'} 的自主视觉方向：根据资料密度和汇报场景决定版式、色彩层次和图形语言，禁止使用渐变`,
       colors,
     },
     typography,
